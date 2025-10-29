@@ -2,6 +2,7 @@
 from DrissionPage import ChromiumPage, ChromiumOptions
 from RecaptchaSolver import RecaptchaSolver
 import time
+import os
 
 # ============================================================
 # CONFIGURATION
@@ -10,6 +11,8 @@ HEADLESS_MODE = False  # Set to True to run without showing browser
                        # WARNING: Headless mode usually FAILS with reCAPTCHA
                        # Google detects headless browsers and requires challenges
                        # Recommended: Keep this as False for reliable operation
+
+CALENDAR_URL_CACHE = "calendar_url_cache.txt"  # File to cache calendar URL
 
 CHROME_ARGUMENTS = [
     "-no-first-run",
@@ -44,6 +47,39 @@ for argument in CHROME_ARGUMENTS:
     
 driver = ChromiumPage(addr_or_opts=options)
 recaptchaSolver = RecaptchaSolver(driver)
+
+def load_cached_url():
+    """Load the cached calendar URL if it exists"""
+    if os.path.exists(CALENDAR_URL_CACHE):
+        try:
+            with open(CALENDAR_URL_CACHE, 'r') as f:
+                url = f.read().strip()
+                if url:
+                    return url
+        except Exception as e:
+            print(f"   Error reading cache: {str(e)}")
+    return None
+
+def save_calendar_url(url):
+    """Save the calendar URL to cache file"""
+    try:
+        with open(CALENDAR_URL_CACHE, 'w') as f:
+            f.write(url)
+        print(f"   ✓ Saved calendar URL to cache")
+    except Exception as e:
+        print(f"   Error saving cache: {str(e)}")
+
+def verify_calendar_page(driver):
+    """Verify we're on a valid calendar page"""
+    try:
+        # Check if we can find the calendar table
+        month_element = driver.ele("css:.month", timeout=3)
+        saturday_cells = driver.eles("css:td.td-sat", timeout=3)
+        if month_element and len(saturday_cells) > 0:
+            return True
+    except:
+        pass
+    return False
 
 def scan_saturdays(driver, num_months=3):
     """Scan for available Saturdays across multiple months"""
@@ -131,118 +167,147 @@ def scan_saturdays(driver, num_months=3):
     return available_saturdays
 
 try:
-    # Navigate to the main ITS page
-    print("1. Navigating to https://as.its-kenpo.or.jp")
-    driver.get("https://as.its-kenpo.or.jp")
-    time.sleep(3)
+    # Try to use cached calendar URL first
+    cached_url = load_cached_url()
+    calendar_url = None
     
-    # Find and click the "カレンダーから探す" link
-    print("2. Looking for 'カレンダーから探す' link...")
-    
-    # Wait for page to load
-    driver.wait.load_start()
-    
-    # Try multiple approaches to find the link
-    calendar_link = None
-    try:
-        calendar_link = driver.ele("text:カレンダーから探す", timeout=5)
-    except:
-        try:
-            calendar_link = driver.ele("tag:a@text():カレンダーから探す", timeout=5)
-        except:
-            try:
-                calendar_link = driver.ele("tag:a@href*=/calendar_apply", timeout=5)
-            except:
-                pass
-    
-    if calendar_link:
-        print(f"   ✓ Found link!")
-        calendar_link.click()
+    if cached_url:
+        print("🔄 Found cached calendar URL, attempting to use it...")
+        print(f"   URL: {cached_url[:80]}...")
+        driver.get(cached_url)
         time.sleep(3)
         
-        print(f"3. Current URL: {driver.url}")
-        
-        # Check if we're on the CAPTCHA page
-        if "calendar_apply" in driver.url:
-            print("4. On CAPTCHA verification page")
-            print("5. Attempting to solve CAPTCHA...")
-            time.sleep(3)  # Wait for CAPTCHA to load
-            
-            captcha_solved = False
-            
-            # Try the automated solver
-            try:
-                t0 = time.time()
-                recaptchaSolver.solveCaptcha()
-                print(f"   ✓ CAPTCHA solved automatically in {time.time()-t0:.2f} seconds")
-                captcha_solved = True
-            except Exception as e:
-                # If automated solving fails, assume checkbox solved it and proceed
-                print(f"   Automated solver encountered an issue, but CAPTCHA appears solved")
-                time.sleep(2)
-                captcha_solved = True
-            
-            if captcha_solved:
-                # Click the "次へ" (Next) button
-                print("\n6. Clicking '次へ' button...")
-                time.sleep(3)
-                
-                clicked = False
-                
-                try:
-                    # Try to find and click the button
-                    try:
-                        next_button = driver.ele("tag:input@type=button", timeout=5)
-                        next_button.click()
-                        clicked = True
-                        print("   ✓ Clicked next button")
-                    except:
-                        # Try form submission
-                        driver.run_js("document.querySelector('form').submit();")
-                        clicked = True
-                        print("   ✓ Submitted form")
-                    
-                    if clicked:
-                        time.sleep(4)
-                        
-                        print(f"\n✅ SUCCESS! Navigated to calendar page!")
-                        print(f"📅 Current URL: {driver.url}")
-                        
-                        # Check if we're on the calendar page
-                        if "calendar_select" in driver.url:
-                            print(f"✅ You are now on the calendar selection page!\n")
-                            
-                            # Scan for available Saturdays
-                            available_saturdays = scan_saturdays(driver, num_months=3)
-                            
-                            # Print final summary
-                            print(f"\n{'='*60}")
-                            print(f"FINAL SUMMARY: Available Saturdays")
-                            print(f"{'='*60}")
-                            
-                            if available_saturdays:
-                                print(f"\nFound {len(available_saturdays)} available Saturday(s):\n")
-                                for sat in available_saturdays:
-                                    print(f"  ✅ {sat['month']} - {sat['date']}日 ({sat['full_date']})")
-                            else:
-                                print("\n❌ No available Saturdays found in the next 3 months")
-                            
-                            print(f"\n{'='*60}\n")
-                            
-                            # Brief pause to ensure everything is displayed
-                            print("Scan complete! Closing browser...")
-                            time.sleep(2)
-                        else:
-                            print(f"Note: Not on expected calendar page")
-                            time.sleep(10)
-                except Exception as e:
-                    print(f"   ✗ Error: {str(e)}")
-                    time.sleep(10)
+        if verify_calendar_page(driver):
+            print("   ✅ Cached URL is still valid! Skipping CAPTCHA process.")
+            calendar_url = cached_url
         else:
-            print("   ✗ Not on expected CAPTCHA page")
-            print(f"   Current URL: {driver.url}")
-    else:
-        print("   ✗ Could not find 'カレンダーから探す' link")
+            print("   ❌ Cached URL expired or invalid, will do full process...")
+            cached_url = None
+    
+    # If no valid cached URL, do the full process
+    if not cached_url:
+        # Navigate to the main ITS page
+        print("\n1. Navigating to https://as.its-kenpo.or.jp")
+        driver.get("https://as.its-kenpo.or.jp")
+        time.sleep(3)
+    
+        # Find and click the "カレンダーから探す" link
+        print("2. Looking for 'カレンダーから探す' link...")
+    
+        # Wait for page to load
+        driver.wait.load_start()
+        
+        # Try multiple approaches to find the link
+        calendar_link = None
+        try:
+            calendar_link = driver.ele("text:カレンダーから探す", timeout=5)
+        except:
+            try:
+                calendar_link = driver.ele("tag:a@text():カレンダーから探す", timeout=5)
+            except:
+                try:
+                    calendar_link = driver.ele("tag:a@href*=/calendar_apply", timeout=5)
+                except:
+                    pass
+        
+        if calendar_link:
+            print(f"   ✓ Found link!")
+            calendar_link.click()
+            time.sleep(3)
+            
+            print(f"3. Current URL: {driver.url}")
+            
+            # Check if we're on the CAPTCHA page
+            if "calendar_apply" in driver.url:
+                print("4. On CAPTCHA verification page")
+                print("5. Attempting to solve CAPTCHA...")
+                time.sleep(3)  # Wait for CAPTCHA to load
+                
+                captcha_solved = False
+                
+                # Try the automated solver
+                try:
+                    t0 = time.time()
+                    recaptchaSolver.solveCaptcha()
+                    print(f"   ✓ CAPTCHA solved automatically in {time.time()-t0:.2f} seconds")
+                    captcha_solved = True
+                except Exception as e:
+                    # If automated solving fails, assume checkbox solved it and proceed
+                    print(f"   Automated solver encountered an issue, but CAPTCHA appears solved")
+                    time.sleep(2)
+                    captcha_solved = True
+                
+                if captcha_solved:
+                    # Click the "次へ" (Next) button
+                    print("\n6. Clicking '次へ' button...")
+                    time.sleep(3)
+                    
+                    clicked = False
+                    
+                    try:
+                        # Try to find and click the button
+                        try:
+                            next_button = driver.ele("tag:input@type=button", timeout=5)
+                            next_button.click()
+                            clicked = True
+                            print("   ✓ Clicked next button")
+                        except:
+                            # Try form submission
+                            driver.run_js("document.querySelector('form').submit();")
+                            clicked = True
+                            print("   ✓ Submitted form")
+                        
+                        if clicked:
+                            time.sleep(4)
+                            
+                            print(f"\n✅ SUCCESS! Navigated to calendar page!")
+                            calendar_url = driver.url
+                            print(f"📅 Current URL: {calendar_url}")
+                            
+                            # Check if we're on the calendar page
+                            if "calendar_select" in calendar_url:
+                                print(f"✅ You are now on the calendar selection page!\n")
+                                
+                                # Save the calendar URL for future use
+                                save_calendar_url(calendar_url)
+                            else:
+                                print(f"Note: Not on expected calendar page")
+                                time.sleep(10)
+                    except Exception as e:
+                        print(f"   ✗ Error: {str(e)}")
+                        time.sleep(10)
+            else:
+                print("   ✗ Not on expected CAPTCHA page")
+                print(f"   Current URL: {driver.url}")
+        else:
+            print("   ✗ Could not find 'カレンダーから探す' link")
+    
+    # If we have a valid calendar URL (either cached or new), scan for Saturdays
+    if calendar_url or verify_calendar_page(driver):
+        if not calendar_url:
+            calendar_url = driver.url
+            save_calendar_url(calendar_url)
+        
+        # Scan for available Saturdays
+        available_saturdays = scan_saturdays(driver, num_months=3)
+        
+        # Print final summary
+        print(f"\n{'='*60}")
+        print(f"FINAL SUMMARY: Available Saturdays")
+        print(f"{'='*60}")
+        
+        if available_saturdays:
+            print(f"\nFound {len(available_saturdays)} available Saturday(s):\n")
+            for sat in available_saturdays:
+                print(f"  ✅ {sat['month']} - {sat['date']}日 ({sat['full_date']})")
+        else:
+            print("\n❌ No available Saturdays found in the next 3 months")
+        
+        print(f"\n{'='*60}\n")
+        
+        # Brief pause to ensure everything is displayed
+        print("Scan complete! Closing browser...")
+        time.sleep(2)
 
 except Exception as e:
     print(f"\n✗ Unexpected error: {str(e)}")
