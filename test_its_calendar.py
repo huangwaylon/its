@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
 from DrissionPage import ChromiumPage, ChromiumOptions
-import sys
-import os
-
-# Add the GoogleRecaptchaBypass directory to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'GoogleRecaptchaBypass'))
 from RecaptchaSolver import RecaptchaSolver
 import time
 
