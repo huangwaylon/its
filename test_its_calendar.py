@@ -3,16 +3,12 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 from RecaptchaSolver import RecaptchaSolver
 import time
 import os
+from datetime import datetime
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-HEADLESS_MODE = False  # Set to True to run without showing browser
-                       # WARNING: Headless mode usually FAILS with reCAPTCHA
-                       # Google detects headless browsers and requires challenges
-                       # Recommended: Keep this as False for reliable operation
-
-CALENDAR_URL_CACHE = "calendar_url_cache.txt"  # File to cache calendar URL
+# Configuration
+CALENDAR_URL_CACHE = "calendar_url_cache.txt"
+MAIN_URL = "https://as.its-kenpo.or.jp"
+SCAN_INTERVAL_SECONDS = 60  # Check every 1 minute
 
 CHROME_ARGUMENTS = [
     "-no-first-run",
@@ -26,295 +22,374 @@ CHROME_ARGUMENTS = [
     "-enable-features=NetworkService,NetworkServiceInProcess",
     "-disable-features=FlashDeprecationWarning",
     "-deny-permission-prompts",
-    "-accept-lang=ja-JP",  # Japanese language
+    "-accept-lang=ja-JP",
     "--disable-usage-stats",
     "--disable-crash-reporter",
 ]
- 
-options = ChromiumOptions()
-# Set Chrome browser path for macOS
-options.set_browser_path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
-# Set headless mode if enabled
-if HEADLESS_MODE:
-    options.headless()
-    print("⚠️  Running in HEADLESS mode - reCAPTCHA may be more difficult to bypass")
-else:
-    print("ℹ️  Running in NORMAL mode (browser visible)")
 
-for argument in CHROME_ARGUMENTS:
-    options.set_argument(argument)
+def create_driver(headless=False):
+    """Create a ChromiumPage driver with specified headless mode."""
+    options = ChromiumOptions()
+    options.set_browser_path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
     
-driver = ChromiumPage(addr_or_opts=options)
-recaptchaSolver = RecaptchaSolver(driver)
+    if headless:
+        options.headless()
+        print("Running in HEADLESS mode")
+    else:
+        print("Running in NORMAL mode (browser visible)")
+    
+    for argument in CHROME_ARGUMENTS:
+        options.set_argument(argument)
+    
+    return ChromiumPage(addr_or_opts=options)
+
 
 def load_cached_url():
-    """Load the cached calendar URL if it exists"""
-    if os.path.exists(CALENDAR_URL_CACHE):
-        try:
-            with open(CALENDAR_URL_CACHE, 'r') as f:
-                url = f.read().strip()
-                if url:
-                    return url
-        except Exception as e:
-            print(f"   Error reading cache: {str(e)}")
-    return None
+    """Load the cached calendar URL if it exists."""
+    if not os.path.exists(CALENDAR_URL_CACHE):
+        return None
+    
+    try:
+        with open(CALENDAR_URL_CACHE, 'r') as f:
+            url = f.read().strip()
+            return url if url else None
+    except Exception as e:
+        print(f"Error reading cache: {e}")
+        return None
+
 
 def save_calendar_url(url):
-    """Save the calendar URL to cache file"""
+    """Save the calendar URL to cache file."""
     try:
         with open(CALENDAR_URL_CACHE, 'w') as f:
             f.write(url)
-        print(f"   ✓ Saved calendar URL to cache")
+        print(f"Saved calendar URL to cache")
     except Exception as e:
-        print(f"   Error saving cache: {str(e)}")
+        print(f"Error saving cache: {e}")
 
-def verify_calendar_page(driver):
-    """Verify we're on a valid calendar page"""
+
+def is_valid_calendar_page(driver):
+    """Check if current page is a valid calendar page."""
     try:
-        # Check if we can find the calendar table
         month_element = driver.ele("css:.month", timeout=3)
         saturday_cells = driver.eles("css:td.td-sat", timeout=3)
-        if month_element and len(saturday_cells) > 0:
-            return True
+        return month_element is not None and len(saturday_cells) > 0
     except:
-        pass
-    return False
+        return False
 
-def scan_saturdays(driver, num_months=3):
-    """Scan for available Saturdays across multiple months"""
-    available_saturdays = []
-    
-    print(f"\n{'='*60}")
-    print(f"SCANNING SATURDAYS FOR {num_months} MONTHS")
-    print(f"{'='*60}")
-    
-    for month_num in range(num_months):
-        print(f"\nMonth {month_num + 1}/{num_months}")
-        print(f"{'-'*60}")
-        
-        # Get the current month name
-        try:
-            month_element = driver.ele("css:.month", timeout=3)
-            current_month = month_element.text
-            print(f"Current month: {current_month}")
-        except:
-            current_month = "Unknown"
-            print("Could not find month name")
-        
-        # Find all Saturday cells (td-sat class)
-        try:
-            saturday_cells = driver.eles("css:td.td-sat")
-            print(f"Found {len(saturday_cells)} Saturday(s)")
-            
-            for cell in saturday_cells:
-                try:
-                    # Get the date number
-                    date_text = cell.ele("tag:p").text
-                    
-                    # Get the icon (O or X)
-                    icon_element = cell.ele("css:.icon")
-                    icon = icon_element.text
-                    
-                    # Get the full date from data attribute
-                    full_date = cell.attr("data-join-time")
-                    
-                    status = "Available" if icon == "○" else "Full"
-                    
-                    print(f"  {date_text}日: {icon} ({status}) - {full_date}")
-                    
-                    if icon == "○":
-                        available_saturdays.append({
-                            'month': current_month,
-                            'date': date_text,
-                            'full_date': full_date,
-                            'icon': icon
-                        })
-                        
-                except Exception as e:
-                    print(f"  Error processing cell: {str(e)[:50]}")
-                    
-        except Exception as e:
-            print(f"Error finding Saturday cells: {str(e)}")
-        
-        # Click next month button if not the last iteration
-        if month_num < num_months - 1:
-            try:
-                print(f"\nNavigating to next month...")
-                next_month_btn = None
-                try:
-                    next_month_btn = driver.ele("@id=nextMonth", timeout=3)
-                except:
-                    try:
-                        next_month_btn = driver.ele("tag:input@value=翌月＞", timeout=3)
-                    except:
-                        try:
-                            next_month_btn = driver.ele("css:.next-month input", timeout=3)
-                        except:
-                            pass
-                
-                if next_month_btn:
-                    next_month_btn.click()
-                    time.sleep(3)  # Wait for AJAX to load new month
-                    print("✓ Moved to next month")
-                else:
-                    print("✗ Could not find next month button")
-                    break
-            except Exception as e:
-                print(f"Error clicking next month button: {str(e)}")
-                break
-    
-    return available_saturdays
 
-try:
-    # Try to use cached calendar URL first
-    cached_url = load_cached_url()
-    calendar_url = None
+def validate_cached_url(cached_url):
+    """Validate cached URL in headless mode."""
+    print(f"\nValidating cached URL in headless mode...")
+    print(f"URL: {cached_url[:80]}...")
     
-    if cached_url:
-        print("🔄 Found cached calendar URL, attempting to use it...")
-        print(f"   URL: {cached_url[:80]}...")
+    driver = create_driver(headless=True)
+    try:
         driver.get(cached_url)
         time.sleep(3)
         
-        if verify_calendar_page(driver):
-            print("   ✅ Cached URL is still valid! Skipping CAPTCHA process.")
-            calendar_url = cached_url
+        if is_valid_calendar_page(driver):
+            print("Cached URL is valid")
+            return True
         else:
-            print("   ❌ Cached URL expired or invalid, will do full process...")
-            cached_url = None
+            print("Cached URL is invalid or expired")
+            return False
+    finally:
+        driver.quit()
+
+
+def navigate_to_calendar_link(driver):
+    """Navigate from main page to calendar CAPTCHA page."""
+    print(f"\nNavigating to {MAIN_URL}")
+    driver.get(MAIN_URL)
+    time.sleep(3)
     
-    # If no valid cached URL, do the full process
-    if not cached_url:
-        # Navigate to the main ITS page
-        print("\n1. Navigating to https://as.its-kenpo.or.jp")
-        driver.get("https://as.its-kenpo.or.jp")
-        time.sleep(3)
+    print("Looking for calendar link...")
+    driver.wait.load_start()
     
-        # Find and click the "カレンダーから探す" link
-        print("2. Looking for 'カレンダーから探す' link...")
+    # Try multiple selectors to find the calendar link
+    calendar_link = None
+    selectors = [
+        ("text:カレンダーから探す", 5),
+        ("tag:a@text():カレンダーから探す", 5),
+        ("tag:a@href*=/calendar_apply", 5),
+    ]
     
-        # Wait for page to load
-        driver.wait.load_start()
-        
-        # Try multiple approaches to find the link
-        calendar_link = None
+    for selector, timeout in selectors:
         try:
-            calendar_link = driver.ele("text:カレンダーから探す", timeout=5)
+            calendar_link = driver.ele(selector, timeout=timeout)
+            if calendar_link:
+                break
         except:
-            try:
-                calendar_link = driver.ele("tag:a@text():カレンダーから探す", timeout=5)
-            except:
-                try:
-                    calendar_link = driver.ele("tag:a@href*=/calendar_apply", timeout=5)
-                except:
-                    pass
-        
-        if calendar_link:
-            print(f"   ✓ Found link!")
-            calendar_link.click()
-            time.sleep(3)
-            
-            print(f"3. Current URL: {driver.url}")
-            
-            # Check if we're on the CAPTCHA page
-            if "calendar_apply" in driver.url:
-                print("4. On CAPTCHA verification page")
-                print("5. Attempting to solve CAPTCHA...")
-                time.sleep(3)  # Wait for CAPTCHA to load
-                
-                captcha_solved = False
-                
-                # Try the automated solver
-                try:
-                    t0 = time.time()
-                    recaptchaSolver.solveCaptcha()
-                    print(f"   ✓ CAPTCHA solved automatically in {time.time()-t0:.2f} seconds")
-                    captcha_solved = True
-                except Exception as e:
-                    # If automated solving fails, assume checkbox solved it and proceed
-                    print(f"   Automated solver encountered an issue, but CAPTCHA appears solved")
-                    time.sleep(2)
-                    captcha_solved = True
-                
-                if captcha_solved:
-                    # Click the "次へ" (Next) button
-                    print("\n6. Clicking '次へ' button...")
-                    time.sleep(3)
-                    
-                    clicked = False
-                    
-                    try:
-                        # Try to find and click the button
-                        try:
-                            next_button = driver.ele("tag:input@type=button", timeout=5)
-                            next_button.click()
-                            clicked = True
-                            print("   ✓ Clicked next button")
-                        except:
-                            # Try form submission
-                            driver.run_js("document.querySelector('form').submit();")
-                            clicked = True
-                            print("   ✓ Submitted form")
-                        
-                        if clicked:
-                            time.sleep(4)
-                            
-                            print(f"\n✅ SUCCESS! Navigated to calendar page!")
-                            calendar_url = driver.url
-                            print(f"📅 Current URL: {calendar_url}")
-                            
-                            # Check if we're on the calendar page
-                            if "calendar_select" in calendar_url:
-                                print(f"✅ You are now on the calendar selection page!\n")
-                                
-                                # Save the calendar URL for future use
-                                save_calendar_url(calendar_url)
-                            else:
-                                print(f"Note: Not on expected calendar page")
-                                time.sleep(10)
-                    except Exception as e:
-                        print(f"   ✗ Error: {str(e)}")
-                        time.sleep(10)
-            else:
-                print("   ✗ Not on expected CAPTCHA page")
-                print(f"   Current URL: {driver.url}")
-        else:
-            print("   ✗ Could not find 'カレンダーから探す' link")
+            continue
     
-    # If we have a valid calendar URL (either cached or new), scan for Saturdays
-    if calendar_url or verify_calendar_page(driver):
-        if not calendar_url:
-            calendar_url = driver.url
-            save_calendar_url(calendar_url)
-        
-        # Scan for available Saturdays
-        available_saturdays = scan_saturdays(driver, num_months=3)
-        
-        # Print final summary
-        print(f"\n{'='*60}")
-        print(f"FINAL SUMMARY: Available Saturdays")
-        print(f"{'='*60}")
-        
-        if available_saturdays:
-            print(f"\nFound {len(available_saturdays)} available Saturday(s):\n")
-            for sat in available_saturdays:
-                print(f"  ✅ {sat['month']} - {sat['date']}日 ({sat['full_date']})")
-        else:
-            print("\n❌ No available Saturdays found in the next 3 months")
-        
-        print(f"\n{'='*60}\n")
-        
-        # Brief pause to ensure everything is displayed
-        print("Scan complete! Closing browser...")
+    if not calendar_link:
+        raise Exception("Could not find calendar link")
+    
+    print("Found calendar link, clicking...")
+    calendar_link.click()
+    time.sleep(3)
+    
+    if "calendar_apply" not in driver.url:
+        raise Exception(f"Not on expected CAPTCHA page. Current URL: {driver.url}")
+    
+    print("On CAPTCHA verification page")
+
+
+def solve_captcha_and_proceed(driver):
+    """Solve CAPTCHA and proceed to calendar page."""
+    print("Attempting to solve CAPTCHA...")
+    time.sleep(3)
+    
+    recaptcha_solver = RecaptchaSolver(driver)
+    
+    try:
+        t0 = time.time()
+        recaptcha_solver.solveCaptcha()
+        print(f"CAPTCHA solved in {time.time()-t0:.2f} seconds")
+    except Exception as e:
+        print(f"Automated solver encountered issue: {e}")
+        print("CAPTCHA may have been solved via checkbox")
         time.sleep(2)
+    
+    print("Clicking next button...")
+    time.sleep(3)
+    
+    # Try to click the next button or submit form
+    try:
+        next_button = driver.ele("tag:input@type=button", timeout=5)
+        next_button.click()
+        print("Clicked next button")
+    except:
+        driver.run_js("document.querySelector('form').submit();")
+        print("Submitted form via JavaScript")
+    
+    time.sleep(4)
+    
+    calendar_url = driver.url
+    print(f"Navigated to: {calendar_url}")
+    
+    if "calendar_select" not in calendar_url:
+        raise Exception(f"Not on expected calendar page. Current URL: {calendar_url}")
+    
+    print("Successfully reached calendar page")
+    return calendar_url
 
-except Exception as e:
-    print(f"\n✗ Unexpected error: {str(e)}")
-    import traceback
-    traceback.print_exc()
 
-finally:
-    print("\nClosing browser...")
-    driver.quit()
+def acquire_calendar_url_with_captcha():
+    """Get calendar URL by solving CAPTCHA in non-headless mode."""
+    print("\n" + "="*60)
+    print("ACQUIRING NEW CALENDAR URL (NON-HEADLESS MODE)")
+    print("="*60)
+    
+    driver = create_driver(headless=False)
+    try:
+        navigate_to_calendar_link(driver)
+        calendar_url = solve_captcha_and_proceed(driver)
+        return calendar_url
+    except Exception as e:
+        print(f"Error acquiring calendar URL: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    finally:
+        print("Closing browser...")
+        driver.quit()
+
+
+def navigate_to_next_month(driver):
+    """Navigate to the next month in the calendar."""
+    # Try multiple selectors for the next month button
+    selectors = [
+        ("@id=nextMonth", 3),
+        ("tag:input@value=翌月＞", 3),
+        ("css:.next-month input", 3),
+    ]
+    
+    for selector, timeout in selectors:
+        try:
+            next_button = driver.ele(selector, timeout=timeout)
+            if next_button:
+                next_button.click()
+                time.sleep(3)
+                return True
+        except:
+            continue
+    
+    return False
+
+
+def scan_month_saturdays(driver):
+    """Scan current month for available Saturdays."""
+    try:
+        month_element = driver.ele("css:.month", timeout=3)
+        current_month = month_element.text
+    except:
+        current_month = "Unknown"
+    
+    print(f"Scanning: {current_month}")
+    
+    available_saturdays = []
+    
+    try:
+        saturday_cells = driver.eles("css:td.td-sat")
+        print(f"Found {len(saturday_cells)} Saturday(s)")
+        
+        for cell in saturday_cells:
+            try:
+                date_text = cell.ele("tag:p").text
+                icon_element = cell.ele("css:.icon")
+                icon = icon_element.text
+                full_date = cell.attr("data-join-time")
+                
+                status = "Available" if icon == "○" else "Full"
+                print(f"  {date_text}日: {icon} ({status}) - {full_date}")
+                
+                if icon == "○":
+                    available_saturdays.append({
+                        'month': current_month,
+                        'date': date_text,
+                        'full_date': full_date,
+                        'icon': icon
+                    })
+            except Exception as e:
+                print(f"  Error processing cell: {str(e)[:50]}")
+    except Exception as e:
+        print(f"Error finding Saturday cells: {e}")
+    
+    return available_saturdays
+
+
+def scan_calendar(driver, num_months=3):
+    """Scan calendar for available Saturdays across multiple months."""
+    print("\n" + "="*60)
+    print(f"SCANNING SATURDAYS FOR {num_months} MONTHS")
+    print("="*60 + "\n")
+    
+    all_available = []
+    
+    for month_num in range(num_months):
+        print(f"Month {month_num + 1}/{num_months}")
+        print("-"*60)
+        
+        month_saturdays = scan_month_saturdays(driver)
+        all_available.extend(month_saturdays)
+        
+        # Navigate to next month if not the last iteration
+        if month_num < num_months - 1:
+            print("Navigating to next month...\n")
+            if not navigate_to_next_month(driver):
+                print("Could not navigate to next month, stopping scan")
+                break
+    
+    return all_available
+
+
+def print_summary(available_saturdays):
+    """Print summary of available Saturdays."""
+    print("\n" + "="*60)
+    print("FINAL SUMMARY: Available Saturdays")
+    print("="*60)
+    
+    if available_saturdays:
+        print(f"\nFound {len(available_saturdays)} available Saturday(s):\n")
+        for sat in available_saturdays:
+            print(f"  {sat['month']} - {sat['date']}日 ({sat['full_date']})")
+    else:
+        print("\nNo available Saturdays found")
+    
+    print("\n" + "="*60 + "\n")
+
+
+def scan_calendar_headless(calendar_url):
+    """Scan calendar in headless mode using the provided URL."""
+    print("\n" + "="*60)
+    print("SCANNING CALENDAR (HEADLESS MODE)")
+    print("="*60)
+    
+    driver = create_driver(headless=True)
+    try:
+        driver.get(calendar_url)
+        time.sleep(3)
+        
+        if not is_valid_calendar_page(driver):
+            raise Exception("Failed to load valid calendar page")
+        
+        available_saturdays = scan_calendar(driver, num_months=3)
+        print_summary(available_saturdays)
+        
+        print("Scan complete")
+        time.sleep(2)
+    finally:
+        driver.quit()
+
+
+def scan_once():
+    """Perform a single scan iteration."""
+    # Step 1: Try using cached URL in headless mode
+    cached_url = load_cached_url()
+    
+    if cached_url:
+        if validate_cached_url(cached_url):
+            # Cached URL is valid - scan in headless mode
+            scan_calendar_headless(cached_url)
+            return True
+    
+    # Step 2: Cache invalid or doesn't exist - acquire new URL
+    print("\nNeed to acquire new calendar URL")
+    new_url = acquire_calendar_url_with_captcha()
+    
+    if not new_url:
+        print("Failed to acquire calendar URL")
+        return False
+    
+    # Step 3: Save new URL and scan in headless mode
+    save_calendar_url(new_url)
+    print("\n" + "="*60)
+    print("URL ACQUIRED - RESTARTING IN HEADLESS MODE")
+    print("="*60)
+    time.sleep(2)
+    scan_calendar_headless(new_url)
+    return True
+
+
+def main():
+    """Main execution flow with continuous loop."""
+    print("="*60)
+    print("ITS CALENDAR SCANNER - CONTINUOUS MODE")
+    print(f"Checking every {SCAN_INTERVAL_SECONDS} seconds")
+    print("Press Ctrl+C to stop")
+    print("="*60 + "\n")
+    
+    iteration = 0
+    
+    try:
+        while True:
+            iteration += 1
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            print("\n" + "="*60)
+            print(f"ITERATION #{iteration} - {timestamp}")
+            print("="*60)
+            
+            try:
+                scan_once()
+            except Exception as e:
+                print(f"\nError during scan: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            print(f"\n[{timestamp}] Waiting {SCAN_INTERVAL_SECONDS} seconds until next scan...")
+            time.sleep(SCAN_INTERVAL_SECONDS)
+            
+    except KeyboardInterrupt:
+        print("\n\n" + "="*60)
+        print("SCANNER STOPPED BY USER")
+        print(f"Total iterations completed: {iteration}")
+        print("="*60)
+
+
+if __name__ == "__main__":
+    main()
     print("Done!")
