@@ -8,13 +8,13 @@ from pydoll.browser.options import ChromiumOptions
 # Configuration
 CALENDAR_URL_CACHE = "calendar_url_cache.txt"
 MAIN_URL = "https://as.its-kenpo.or.jp"
-SCAN_INTERVAL_SECONDS = 60  # Check every 1 minute
+SCAN_INTERVAL_SECONDS = 10  # Check every 1 minute
 TARGET_EMAIL = "waylonh@apple.com"
 NUM_GUESTS = 2
 
 # Day of week configuration (for testing)
 # Use "td-sun" for Sunday, "td-sat" for Saturday
-TARGET_DAY_CLASS = "td-sun"  # Testing with Sunday (change to "td-sat" for Saturday)
+TARGET_DAY_CLASS = "td-sat"  # Testing with Sunday (change to "td-sat" for Saturday)
 TARGET_DAY_NAME = "Sunday" if TARGET_DAY_CLASS == "td-sun" else "Saturday"
 
 # Booking mode
@@ -871,13 +871,13 @@ def print_summary(available_dates):
     print("\n" + "="*60 + "\n")
 
 
-async def scan_calendar_visible(calendar_url):
-    """Scan calendar in visible mode (for watching automation)."""
+async def scan_calendar_headless(calendar_url):
+    """Scan calendar in headless mode."""
     print("\n" + "="*60)
-    print("SCANNING CALENDAR (VISIBLE MODE)")
+    print("SCANNING CALENDAR (HEADLESS MODE)")
     print("="*60)
     
-    options = create_browser_options(headless=False)
+    options = create_browser_options(headless=True)
     async with Chrome(options=options) as browser:
         tab = await browser.start()
         await tab.go_to(calendar_url)
@@ -899,7 +899,7 @@ async def scan_once():
     
     if cached_url:
         if await validate_cached_url(cached_url):
-            await scan_calendar_visible(cached_url)
+            await scan_calendar_headless(cached_url)
             return True
     
     print("\nNeed to acquire new calendar URL")
@@ -911,10 +911,10 @@ async def scan_once():
     
     save_calendar_url(new_url)
     print("\n" + "="*60)
-    print("URL ACQUIRED - RESTARTING IN VISIBLE MODE")
+    print("URL ACQUIRED - RESTARTING IN HEADLESS MODE")
     print("="*60)
     await asyncio.sleep(2)
-    await scan_calendar_visible(new_url)
+    await scan_calendar_headless(new_url)
     return True
 
 
