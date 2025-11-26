@@ -14,7 +14,7 @@ NUM_GUESTS = 2
 
 # Day of week configuration (for testing)
 # Use "td-sun" for Sunday, "td-sat" for Saturday
-TARGET_DAY_CLASS = "td-sat"  # Testing with Sunday (change to "td-sat" for Saturday)
+TARGET_DAY_CLASS = "td-sun"  # Testing with Sunday (change to "td-sat" for Saturday)
 TARGET_DAY_NAME = "Sunday" if TARGET_DAY_CLASS == "td-sun" else "Saturday"
 
 # Booking mode
@@ -877,7 +877,7 @@ async def scan_calendar_headless(calendar_url):
     print("SCANNING CALENDAR (HEADLESS MODE)")
     print("="*60)
     
-    options = create_browser_options(headless=True)
+    options = create_browser_options(headless=False)
     async with Chrome(options=options) as browser:
         tab = await browser.start()
         await tab.go_to(calendar_url)
