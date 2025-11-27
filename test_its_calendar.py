@@ -89,12 +89,6 @@ EXTENDED_TIMEOUT = 5
 # Sleep/wait durations (in seconds)
 SLEEP_SHORT = 0.5
 SLEEP_STANDARD = 1
-SLEEP_MEDIUM = 1.5
-SLEEP_LONG = 2
-SLEEP_EXTENDED = 3
-SLEEP_CAPTCHA_WAIT = 4
-SLEEP_CAPTCHA_LOAD = 5
-SLEEP_DIALOG_WAIT = 5
 
 # ============================================================
 # DOM SELECTORS AND ATTRIBUTES
@@ -251,6 +245,8 @@ def save_calendar_url(url):
             f.write(url)
         print(f"Saved calendar URL to cache")
     except Exception as e:
+        print(f"Error saving cache: {e}")
+
 
 # ============================================================
 # BOOKING TRACKING FUNCTIONS
@@ -330,8 +326,6 @@ def get_booked_hotels_for_date(date):
     bookings = load_bookings()
     return bookings.get(date, [])
 
-        print(f"Error saving cache: {e}")
-
 
 async def is_valid_calendar_page(tab):
     """Check if current page is a valid calendar page."""
@@ -373,7 +367,7 @@ async def validate_cached_url(cached_url):
     async with Chrome(options=options) as browser:
         tab = await browser.start()
         await tab.go_to(cached_url)
-        await asyncio.sleep(SLEEP_EXTENDED)
+        await asyncio.sleep(SLEEP_STANDARD)
         
         if await is_valid_calendar_page(tab):
             print("Cached URL is valid")
@@ -387,7 +381,7 @@ async def navigate_to_calendar_link(tab):
     """Navigate from main page to calendar CAPTCHA page."""
     print(f"\nNavigating to {MAIN_URL}")
     await tab.go_to(MAIN_URL)
-    await asyncio.sleep(SLEEP_EXTENDED)
+    await asyncio.sleep(SLEEP_STANDARD)
     
     print("Looking for calendar link...")
     
@@ -420,7 +414,7 @@ async def navigate_to_calendar_link(tab):
     
     print("Found calendar link, clicking...")
     await calendar_link.click()
-    await asyncio.sleep(SLEEP_EXTENDED)
+    await asyncio.sleep(SLEEP_STANDARD)
     
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     current_url = url_response['result']['result']['value'] if isinstance(url_response, dict) else url_response
@@ -434,9 +428,9 @@ async def bypass_captcha_and_proceed(tab):
     """Bypass CAPTCHA by clicking checkbox and proceeding."""
     print("Bypassing CAPTCHA with pydoll's stealth capabilities...")
     
-    await asyncio.sleep(SLEEP_EXTENDED)
+    await asyncio.sleep(SLEEP_STANDARD)
     print("Waiting for CAPTCHA to load...")
-    await asyncio.sleep(SLEEP_CAPTCHA_LOAD)
+    await asyncio.sleep(SLEEP_STANDARD)
     
     # Simulate natural behavior
     try:
@@ -444,7 +438,7 @@ async def bypass_captcha_and_proceed(tab):
         from pydoll.constants import ScrollPosition
         
         await tab.scroll.by(ScrollPosition.DOWN, SCROLL_DOWN_DISTANCE, smooth=True)
-        await asyncio.sleep(SLEEP_MEDIUM)
+        await asyncio.sleep(SLEEP_STANDARD)
         await tab.scroll.by(ScrollPosition.UP, SCROLL_UP_DISTANCE, smooth=True)
         await asyncio.sleep(SLEEP_STANDARD)
         print("Human-like behavior simulation complete")
@@ -458,19 +452,19 @@ async def bypass_captcha_and_proceed(tab):
         
         if recaptcha_iframe:
             print("Found reCAPTCHA checkbox iframe")
-            await asyncio.sleep(SLEEP_LONG)
+            await asyncio.sleep(SLEEP_STANDARD)
             
             try:
                 await recaptcha_iframe.scroll_into_view()
                 await asyncio.sleep(SLEEP_STANDARD)
                 await recaptcha_iframe.click()
                 print("Clicked reCAPTCHA iframe area")
-                await asyncio.sleep(SLEEP_EXTENDED)
+                await asyncio.sleep(SLEEP_STANDARD)
             except Exception as click_err:
                 print(f"Could not click iframe directly: {click_err}")
             
             print("Waiting for captcha to be solved...")
-            await asyncio.sleep(SLEEP_CAPTCHA_LOAD)
+            await asyncio.sleep(SLEEP_STANDARD)
         else:
             print("No reCAPTCHA iframe found, proceeding anyway...")
     except Exception as e:
@@ -478,7 +472,7 @@ async def bypass_captcha_and_proceed(tab):
     
     # Click next button
     print(f"Looking for {TEXT_NEXT_BUTTON} (Next) button...")
-    await asyncio.sleep(SLEEP_LONG)
+    await asyncio.sleep(SLEEP_STANDARD)
     
     try:
         buttons = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
@@ -507,7 +501,7 @@ async def bypass_captcha_and_proceed(tab):
         await tab.execute_script(FORM_SUBMIT_SCRIPT)
         print("Submitted form via JavaScript (fallback)")
     
-    await asyncio.sleep(SLEEP_CAPTCHA_WAIT)
+    await asyncio.sleep(SLEEP_STANDARD)
     
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     calendar_url = url_response['result']['result']['value'] if isinstance(url_response, dict) else url_response
@@ -546,7 +540,7 @@ async def navigate_to_next_month(tab):
         next_button = await tab.find(id=ID_NEXT_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
         if next_button:
             await next_button.click()
-            await asyncio.sleep(SLEEP_EXTENDED)
+            await asyncio.sleep(SLEEP_STANDARD)
             return True
     except:
         pass
@@ -559,7 +553,7 @@ async def navigate_to_next_month(tab):
                     value = await input_elem.get_property("value")
                     if value and TEXT_NEXT_MONTH in value:
                         await input_elem.click()
-                        await asyncio.sleep(SLEEP_EXTENDED)
+                        await asyncio.sleep(SLEEP_STANDARD)
                         return True
                 except:
                     pass
@@ -738,11 +732,92 @@ async def click_available_date_cell(cell):
         # Use JavaScript click to avoid visibility issues
         await cell.execute_script("this.click()")
         print("Clicked date cell")
-        await asyncio.sleep(SLEEP_EXTENDED)
+        await asyncio.sleep(SLEEP_STANDARD)
         return True
     except Exception as e:
         print(f"Error clicking date cell: {e}")
         return False
+
+
+async def click_date_by_attribute(tab, target_date):
+    """Click a date cell by finding it via data-join-time attribute.
+    
+    This is more reliable than using stored cell references after page reload.
+    
+    Args:
+        tab: Browser tab
+        target_date: Date string in format 'YYYY-MM-DD'
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        print(f"Looking for date cell with data-join-time='{target_date}'...")
+        await asyncio.sleep(SLEEP_STANDARD)
+        
+        # Get all td elements
+        all_cells = await tab.find(tag_name=TAG_TD, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+        if not all_cells:
+            print("No td elements found")
+            return False
+        
+        # Find the cell with matching data-join-time
+        for cell in all_cells:
+            try:
+                attr_result = await cell.execute_script(f"return this.getAttribute('{ATTR_DATA_JOIN_TIME}')")
+                if isinstance(attr_result, dict) and 'result' in attr_result:
+                    if 'result' in attr_result['result']:
+                        date_attr = attr_result['result']['result'].get('value')
+                    else:
+                        date_attr = attr_result['result'].get('value')
+                else:
+                    date_attr = str(attr_result) if attr_result else None
+                
+                if date_attr == target_date:
+                    print(f"Found date cell for {target_date}")
+                    await cell.scroll_into_view()
+                    await asyncio.sleep(SLEEP_STANDARD)
+                    await cell.execute_script("this.click()")
+                    print(f"Clicked date cell for {target_date}")
+                    await asyncio.sleep(SLEEP_STANDARD * 2)  # Extra wait for navigation
+                    return True
+            except Exception as e:
+                continue
+        
+        print(f"Could not find date cell for {target_date}")
+        return False
+    except Exception as e:
+        print(f"Error clicking date by attribute: {e}")
+        return False
+
+
+async def verify_on_service_group_page(tab, max_attempts=3):
+    """Verify we're on the service_group_select page with retry.
+    
+    Args:
+        tab: Browser tab
+        max_attempts: Maximum number of attempts to verify
+    
+    Returns:
+        True if on service_group_select page, False otherwise
+    """
+    for attempt in range(max_attempts):
+        try:
+            await asyncio.sleep(SLEEP_STANDARD)
+            url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
+            current_url = url_response['result']['result']['value'] if isinstance(url_response, dict) else url_response
+            
+            if URL_SERVICE_GROUP_SELECT in current_url:
+                print(f"✓ On {URL_SERVICE_GROUP_SELECT} page")
+                return True
+            else:
+                print(f"Attempt {attempt + 1}/{max_attempts}: Not on {URL_SERVICE_GROUP_SELECT} page. Current: {current_url[:URL_TRUNCATE_LENGTH]}...")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(SLEEP_STANDARD)
+        except Exception as e:
+            print(f"Error verifying page: {e}")
+    
+    return False
 
 
 async def get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BLUEBERRY_HILL):
@@ -767,7 +842,7 @@ async def get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BL
     hotel_names = []
     
     try:
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
         links = await tab.find(tag_name=TAG_ANCHOR, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
         if links:
             for link in links:
@@ -826,7 +901,7 @@ async def click_hotel_by_name(tab, hotel_name):
         return False
     
     try:
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
         links = await tab.find(tag_name=TAG_ANCHOR, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
         if links:
             for link in links:
@@ -839,7 +914,7 @@ async def click_hotel_by_name(tab, hotel_name):
                         await link.scroll_into_view()
                         await asyncio.sleep(SLEEP_STANDARD)
                         await link.click()
-                        await asyncio.sleep(SLEEP_EXTENDED)
+                        await asyncio.sleep(SLEEP_STANDARD)
                         return True
                 except Exception as e:
                     print(f"Error checking link: {e}")
@@ -882,7 +957,7 @@ async def select_service_on_apply_page(tab):
         return False
     
     try:
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
         links = await tab.find(tag_name=TAG_ANCHOR, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
         if links:
             for link in links:
@@ -903,7 +978,7 @@ async def select_service_on_apply_page(tab):
                         await link.scroll_into_view()
                         await asyncio.sleep(SLEEP_STANDARD)
                         await link.click()
-                        await asyncio.sleep(SLEEP_EXTENDED)
+                        await asyncio.sleep(SLEEP_STANDARD)
                         return True
                 except Exception as e:
                     print(f"Error checking link: {e}")
@@ -928,7 +1003,7 @@ async def fill_booking_form_and_search(tab, target_date):
         return False
     
     try:
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
         print(f"Verifying date matches: {target_date}")
         print(f"Filling in number of guests: {NUM_GUESTS}")
         
@@ -973,7 +1048,7 @@ async def fill_booking_form_and_search(tab, target_date):
                         await asyncio.sleep(SLEEP_STANDARD)
                         await button.click()
                         print(f"Clicked {TEXT_SEARCH_AVAILABILITY} button")
-                        await asyncio.sleep(SLEEP_CAPTCHA_WAIT)
+                        await asyncio.sleep(SLEEP_STANDARD)
                         return True
                 except:
                     pass
@@ -990,7 +1065,7 @@ async def select_room_and_proceed(tab):
     print("\nSelecting room and proceeding...")
     
     try:
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
         print("Looking for room checkboxes...")
         all_inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
         
@@ -1047,7 +1122,7 @@ async def select_room_and_proceed(tab):
                         await asyncio.sleep(SLEEP_STANDARD)
                         await button.click()
                         print(f"Clicked {TEXT_PROCEED_TO_BOOKING} button")
-                        await asyncio.sleep(SLEEP_EXTENDED)
+                        await asyncio.sleep(SLEEP_STANDARD)
                         return True
                 except:
                     pass
@@ -1071,7 +1146,7 @@ async def agree_to_rules(tab):
         return False
     
     try:
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
         buttons = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
         if buttons:
             for button in buttons:
@@ -1084,7 +1159,7 @@ async def agree_to_rules(tab):
                         await asyncio.sleep(SLEEP_STANDARD)
                         await button.click()
                         print(f"Clicked {TEXT_AGREE}する button")
-                        await asyncio.sleep(SLEEP_EXTENDED)
+                        await asyncio.sleep(SLEEP_STANDARD)
                         return True
                 except:
                     pass
@@ -1108,7 +1183,7 @@ async def fill_email_and_submit(tab):
         return False
     
     try:
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
         print(f"Filling email: {TARGET_EMAIL}")
         inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
         
@@ -1164,7 +1239,7 @@ async def fill_email_and_submit(tab):
             pass
         
         # Wait for dialog handling and navigation
-        await asyncio.sleep(SLEEP_DIALOG_WAIT)
+        await asyncio.sleep(SLEEP_STANDARD)
         
         # Check if we reached send_complete page
         final_url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
@@ -1183,15 +1258,19 @@ async def fill_email_and_submit(tab):
 
 
 async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUEBERRY_HILL):
-    """Process complete booking flow for a date, trying all available hotels.
+    """Process booking for ONE hotel only per call.
+    
+    Strategy: Book only the FIRST available (unbooked) hotel, then return.
+    Next iteration will handle the next hotel (bookings.json prevents re-booking).
+    This makes each iteration fast - one hotel per scan cycle.
     
     Args:
         tab: Browser tab
         date_info: Dictionary containing date information and cell reference
-        skip_blueberry_hill: If True, skip hotel named "ブルーベリーヒル勝浦" (default: SKIP_BLUEBERRY_HILL)
+        skip_blueberry_hill: If True, skip hotel named "ブルーベリーヒル勝浦"
     
     Returns:
-        tuple: (success: bool, hotel_name: str or None) - True if booking succeeded with hotel name, False otherwise
+        list: List with single hotel name if successful, empty list otherwise
     """
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
     print(f"BOOKING: {date_info['date']}日 ({date_info['full_date']})")
@@ -1200,130 +1279,79 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
     booking_date = date_info['full_date']
     
     try:
-        # Click the date cell to get to service_group_select page
-        if not await click_available_date_cell(date_info['cell']):
+        # Click the date cell
+        if not await click_date_by_attribute(tab, date_info['full_date']):
             print("Failed to click date cell")
-            return False, None
+            return []
         
-        # Get all hotel names from the service_group_select page
+        # Verify we're on service_group_select page
+        if not await verify_on_service_group_page(tab):
+            print("Failed to navigate to service_group_select page")
+            return []
+        
+        # Get all hotel names
         all_hotel_names = await get_hotel_names_on_service_group_page(tab, skip_blueberry_hill)
         
         if not all_hotel_names:
-            print("No hotels found to try")
-            return False, None
+            print("No hotels found")
+            return []
         
         # Filter out already-booked hotels
         already_booked = get_booked_hotels_for_date(booking_date)
-        if already_booked:
-            print(f"\nAlready booked hotels for {booking_date}:")
-            for hotel in already_booked:
-                print(f"  ✓ {hotel[:TEXT_TRUNCATE_LENGTH]}")
-        
         hotel_names = [h for h in all_hotel_names if h not in already_booked]
         
         if not hotel_names:
             print(f"\n⊘ All {len(all_hotel_names)} hotel(s) already booked for this date")
-            return False, None
+            return []
         
-        print(f"\nWill try {len(hotel_names)} hotel(s) for this date ({len(already_booked)} already booked)")
+        # CRITICAL: Book ONLY the FIRST available hotel
+        hotel_name = hotel_names[0]
+        print(f"\nBooking hotel 1 of {len(hotel_names)} remaining: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
+        print(f"({len(already_booked)} already booked)")
         
-        # Try each hotel
-        for hotel_idx, hotel_name in enumerate(hotel_names):
-            print("\n" + SUBSEPARATOR_CHAR * SEPARATOR_WIDTH)
-            print(f"Hotel {hotel_idx + 1}/{len(hotel_names)}: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
-            print(SUBSEPARATOR_CHAR * SEPARATOR_WIDTH)
-            
-            try:
-                # Click the hotel link
-                if not await click_hotel_by_name(tab, hotel_name):
-                    print(f"Failed to click hotel: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
-                    continue
-                
-                # Select service
-                if not await select_service_on_apply_page(tab):
-                    print("Failed to select service")
-                    # Go back to hotel selection page for next hotel
-                    if hotel_idx < len(hotel_names) - 1:
-                        print("Going back to hotel selection...")
-                        await tab.execute_script(HISTORY_BACK)
-                        await asyncio.sleep(SLEEP_EXTENDED)
-                    continue
-                
-                # Fill booking form and search
-                if not await fill_booking_form_and_search(tab, date_info['full_date']):
-                    print("Failed to fill booking form")
-                    # Go back to hotel selection page for next hotel
-                    if hotel_idx < len(hotel_names) - 1:
-                        print("Going back to hotel selection...")
-                        await tab.execute_script(HISTORY_GO_BACK_2)
-                        await asyncio.sleep(SLEEP_EXTENDED)
-                    continue
-                
-                # Select room and proceed
-                if not await select_room_and_proceed(tab):
-                    print("No rooms available or failed to select room")
-                    # Go back to hotel selection page for next hotel
-                    if hotel_idx < len(hotel_names) - 1:
-                        print("Going back to hotel selection...")
-                        await tab.execute_script(HISTORY_GO_BACK_3)
-                        await asyncio.sleep(SLEEP_EXTENDED)
-                    continue
-                
-                # Agree to rules
-                if not await agree_to_rules(tab):
-                    print("Failed to agree to rules")
-                    # Go back to hotel selection page for next hotel
-                    if hotel_idx < len(hotel_names) - 1:
-                        print("Going back to hotel selection...")
-                        await tab.execute_script(HISTORY_GO_BACK_4)
-                        await asyncio.sleep(SLEEP_EXTENDED)
-                    continue
-                
-                # Fill email and submit
-                if not await fill_email_and_submit(tab):
-                    print("Failed to submit email")
-                    # Go back to hotel selection page for next hotel
-                    if hotel_idx < len(hotel_names) - 1:
-                        print("Going back to hotel selection...")
-                        await tab.execute_script(HISTORY_GO_BACK_5)
-                        await asyncio.sleep(SLEEP_EXTENDED)
-                    continue
-                
-                # If we got here, booking succeeded!
-                print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-                print(f"BOOKING COMPLETED SUCCESSFULLY FOR: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
-                print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
-                
-                # Record the successful booking
-                save_booking(booking_date, hotel_name)
-                
-                return True, hotel_name
-                
-            except Exception as e:
-                print(f"Error processing hotel {hotel_name[:TEXT_TRUNCATE_LENGTH]}: {e}")
-                import traceback
-                traceback.print_exc()
-                # Try to go back to hotel selection page for next hotel
-                if hotel_idx < len(hotel_names) - 1:
-                    try:
-                        print("Going back to hotel selection after error...")
-                        await tab.execute_script(HISTORY_GO_BACK_6)
-                        await asyncio.sleep(SLEEP_EXTENDED)
-                    except:
-                        pass
-                continue
+        # Click the hotel
+        if not await click_hotel_by_name(tab, hotel_name):
+            print(f"Failed to click hotel")
+            return []
         
-        # If we got here, all hotels failed
+        # Select service
+        if not await select_service_on_apply_page(tab):
+            print("Failed to select service")
+            return []
+        
+        # Fill booking form
+        if not await fill_booking_form_and_search(tab, date_info['full_date']):
+            print("Failed to fill booking form")
+            return []
+        
+        # Select room
+        if not await select_room_and_proceed(tab):
+            print("No rooms available or failed to select room")
+            return []
+        
+        # Agree to rules
+        if not await agree_to_rules(tab):
+            print("Failed to agree to rules")
+            return []
+        
+        # Submit email
+        if not await fill_email_and_submit(tab):
+            print("Failed to submit email")
+            return []
+        
+        # Success!
         print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-        print(f"BOOKING FAILED FOR ALL {len(hotel_names)} HOTELS")
+        print(f"✓ BOOKING COMPLETED: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
         print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
-        return False, None
+        
+        save_booking(booking_date, hotel_name)
+        return [hotel_name]
         
     except Exception as e:
         print(f"Error in booking: {e}")
         import traceback
         traceback.print_exc()
-        return False, None
+        return []
 
 
 async def navigate_to_month(tab, target_month_num):
@@ -1359,25 +1387,25 @@ async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=Fals
         if attempt_booking and month_dates:
             print(f"\nFound {len(month_dates)} available date(s)")
             
-            # Track which dates we've tried in this month
-            date_index = 0
-            while date_index < len(month_dates):
-                date_info = month_dates[date_index]
+            # Process each date in this month
+            for date_idx, date_info in enumerate(month_dates):
                 day_name = date_info.get('day_name', 'Unknown')
-                print(f"\nAttempting to book: {date_info['date']}日 ({day_name})")
+                print(f"\nAttempting to book: {date_info['date']}日 ({day_name}) [{date_idx + 1}/{len(month_dates)} in this month]")
                 
-                success, hotel_name = await process_booking_for_date(tab, date_info)
-                if success:
-                    print(f"✓ Booking successful for {date_info['date']}日 ({day_name}) at {hotel_name}")
-                    return all_available
+                booked_hotels = await process_booking_for_date(tab, date_info)
+                
+                if booked_hotels:
+                    print(f"✓ Successfully booked {len(booked_hotels)} hotel(s) for {date_info['date']}日 ({day_name})")
                 else:
-                    print(f"✗ Booking failed for {date_info['date']}日 ({day_name})")
-                    # Navigate back to calendar and restore month position
+                    print(f"✗ No bookings completed for {date_info['date']}日 ({day_name})")
+                
+                # Navigate back to calendar and restore month position for next date
+                if date_idx < len(month_dates) - 1:
                     print(f"Reloading calendar and navigating to month {month_num + 1}...")
                     cached_url = load_cached_url()
                     if cached_url:
                         await tab.go_to(cached_url)
-                        await asyncio.sleep(SLEEP_EXTENDED)
+                        await asyncio.sleep(SLEEP_STANDARD)
                         
                         # Navigate forward to the month we were on
                         if month_num > 0:
@@ -1393,19 +1421,12 @@ async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=Fals
                         print("Re-scanning month for fresh cell references...")
                         month_dates = await scan_month_days(tab)
                         
-                        if not month_dates:
-                            print("No more dates found in this month after re-scan")
-                            break
-                        
-                        # Continue with next date in the refreshed list
-                        # Since we've already tried date_index, move to next
-                        date_index += 1
-                        if date_index >= len(month_dates):
-                            print("All dates in this month have been attempted")
+                        if not month_dates or date_idx + 1 >= len(month_dates):
+                            print("No more dates to process in this month")
                             break
                     else:
                         print("Warning: No cached URL to reload")
-                        date_index += 1
+                        break
         
         if month_num < num_months - 1:
             print("Navigating to next month...\n")
@@ -1446,7 +1467,7 @@ async def scan_calendar_headless(calendar_url):
     async with Chrome(options=options) as browser:
         tab = await browser.start()
         await tab.go_to(calendar_url)
-        await asyncio.sleep(SLEEP_EXTENDED)
+        await asyncio.sleep(SLEEP_STANDARD)
         
         if not await is_valid_calendar_page(tab):
             raise Exception("Failed to load valid calendar page")
@@ -1455,7 +1476,7 @@ async def scan_calendar_headless(calendar_url):
         print_summary(available_dates)
         
         print("Scan complete")
-        await asyncio.sleep(SLEEP_LONG)
+        await asyncio.sleep(SLEEP_STANDARD)
 
 
 async def scan_once():
@@ -1478,7 +1499,7 @@ async def scan_once():
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
     print("URL ACQUIRED - RESTARTING IN HEADLESS MODE")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    await asyncio.sleep(SLEEP_LONG)
+    await asyncio.sleep(SLEEP_STANDARD)
     await scan_calendar_headless(new_url)
     return True
 
