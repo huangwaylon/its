@@ -1141,10 +1141,6 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                 # Click the hotel link
                 if not await click_hotel_by_name(tab, hotel_name):
                     print(f"Failed to click hotel: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
-                    # Go back to hotel selection page for next hotel
-                    if hotel_idx < len(hotel_names) - 1:
-                        await tab.execute_script(HISTORY_BACK)
-                        await asyncio.sleep(SLEEP_EXTENDED)
                     continue
                 
                 # Select service
@@ -1152,7 +1148,8 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                     print("Failed to select service")
                     # Go back to hotel selection page for next hotel
                     if hotel_idx < len(hotel_names) - 1:
-                        await tab.execute_script(HISTORY_GO_BACK_2)
+                        print("Going back to hotel selection...")
+                        await tab.execute_script(HISTORY_BACK)
                         await asyncio.sleep(SLEEP_EXTENDED)
                     continue
                 
@@ -1161,7 +1158,8 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                     print("Failed to fill booking form")
                     # Go back to hotel selection page for next hotel
                     if hotel_idx < len(hotel_names) - 1:
-                        await tab.execute_script(HISTORY_GO_BACK_3)
+                        print("Going back to hotel selection...")
+                        await tab.execute_script(HISTORY_GO_BACK_2)
                         await asyncio.sleep(SLEEP_EXTENDED)
                     continue
                 
@@ -1170,7 +1168,8 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                     print("No rooms available or failed to select room")
                     # Go back to hotel selection page for next hotel
                     if hotel_idx < len(hotel_names) - 1:
-                        await tab.execute_script(HISTORY_GO_BACK_4)
+                        print("Going back to hotel selection...")
+                        await tab.execute_script(HISTORY_GO_BACK_3)
                         await asyncio.sleep(SLEEP_EXTENDED)
                     continue
                 
@@ -1179,7 +1178,8 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                     print("Failed to agree to rules")
                     # Go back to hotel selection page for next hotel
                     if hotel_idx < len(hotel_names) - 1:
-                        await tab.execute_script(HISTORY_GO_BACK_5)
+                        print("Going back to hotel selection...")
+                        await tab.execute_script(HISTORY_GO_BACK_4)
                         await asyncio.sleep(SLEEP_EXTENDED)
                     continue
                 
@@ -1188,7 +1188,8 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                     print("Failed to submit email")
                     # Go back to hotel selection page for next hotel
                     if hotel_idx < len(hotel_names) - 1:
-                        await tab.execute_script(HISTORY_GO_BACK_6)
+                        print("Going back to hotel selection...")
+                        await tab.execute_script(HISTORY_GO_BACK_5)
                         await asyncio.sleep(SLEEP_EXTENDED)
                     continue
                 
@@ -1205,6 +1206,7 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                 # Try to go back to hotel selection page for next hotel
                 if hotel_idx < len(hotel_names) - 1:
                     try:
+                        print("Going back to hotel selection after error...")
                         await tab.execute_script(HISTORY_GO_BACK_6)
                         await asyncio.sleep(SLEEP_EXTENDED)
                     except:
@@ -1222,6 +1224,15 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
         import traceback
         traceback.print_exc()
         return False
+
+
+async def navigate_to_month(tab, target_month_num):
+    """Navigate to a specific month number (0=current, 1=next, 2=next+1, etc.)."""
+    for i in range(target_month_num):
+        if not await navigate_to_next_month(tab):
+            print(f"Could not navigate to month {i+1}")
+            return False
+    return True
 
 
 async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=False):
@@ -1247,7 +1258,11 @@ async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=Fals
         # Auto-booking if enabled
         if attempt_booking and month_dates:
             print(f"\nFound {len(month_dates)} available date(s)")
-            for date_info in month_dates:
+            
+            # Track which dates we've tried in this month
+            date_index = 0
+            while date_index < len(month_dates):
+                date_info = month_dates[date_index]
                 day_name = date_info.get('day_name', 'Unknown')
                 print(f"\nAttempting to book: {date_info['date']}日 ({day_name})")
                 
@@ -1256,10 +1271,40 @@ async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=Fals
                     return all_available
                 else:
                     print(f"✗ Booking failed for {date_info['date']}日 ({day_name})")
-                    # Navigate back to calendar using current page's history
-                    print("Navigating back to calendar...")
-                    await tab.execute_script(HISTORY_GO_BACK_5)
-                    await asyncio.sleep(SLEEP_EXTENDED)
+                    # Navigate back to calendar and restore month position
+                    print(f"Reloading calendar and navigating to month {month_num + 1}...")
+                    cached_url = load_cached_url()
+                    if cached_url:
+                        await tab.go_to(cached_url)
+                        await asyncio.sleep(SLEEP_EXTENDED)
+                        
+                        # Navigate forward to the month we were on
+                        if month_num > 0:
+                            print(f"Navigating forward {month_num} month(s)...")
+                            if await navigate_to_month(tab, month_num):
+                                print(f"Successfully restored to month {month_num + 1}")
+                            else:
+                                print(f"Warning: Could not navigate to month {month_num + 1}")
+                        else:
+                            print("Already on first month")
+                        
+                        # Re-scan the month to get fresh cell references
+                        print("Re-scanning month for fresh cell references...")
+                        month_dates = await scan_month_days(tab)
+                        
+                        if not month_dates:
+                            print("No more dates found in this month after re-scan")
+                            break
+                        
+                        # Continue with next date in the refreshed list
+                        # Since we've already tried date_index, move to next
+                        date_index += 1
+                        if date_index >= len(month_dates):
+                            print("All dates in this month have been attempted")
+                            break
+                    else:
+                        print("Warning: No cached URL to reload")
+                        date_index += 1
         
         if month_num < num_months - 1:
             print("Navigating to next month...\n")
