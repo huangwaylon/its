@@ -1,0 +1,479 @@
+<html lang="ja"><head>
+  <meta charset="utf-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store">
+  <meta http-equiv="Expires" content="0">
+  <title>施設予約システム</title>
+  <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1, maximum-scale=1">
+  <link rel="stylesheet" media="all" href="/assets/application-95671e0fa36f733a7e76f7ede97af30f9f517884b5afac39bfd3c24b7dd04087.css">
+  <script src="/assets/application-7f4020bebe73e70274eb35400381b1f849317a06773f0297284f1f5c53a845ed.js" media="all"></script>
+  <script src="/javascripts/ajaxzip3/ajaxzip3.js"></script>
+  <script src="/javascripts/My97DatePicker/WdatePicker.js"></script><link href="/javascripts/My97DatePicker/skin/WdatePicker.css" rel="stylesheet" type="text/css">
+  <script src="/assets/html5shiv-4e02ba12d524f0df958982946bcbb9e1de2c2eb95bcfb71601b74b3c6d5f47e3.js"></script>
+  <script src="/javascripts/davidjbradshaw-iframe-resizer-e3fb068/js/iframeResizer.min.js"></script>
+  <script>
+      function beginRequest() {
+          document.getElementById('Div_SearchNotice').style.display = '';
+      }
+      function offlineLoading() {
+          beginRequest();
+          document.getElementById("Div_SearchNotice").style.visibility = 'visible';
+      }
+      $(function() {
+          $('.ajax-indicator-user').hide();
+          $(document).ajaxStart(function() {
+              $('.ajax-indicator-user').show();
+          });
+          $(document).ajaxStop(function() {
+              $('.ajax-indicator-user').hide();
+          });
+      });
+//      $(function(){
+//          setInterval(function(){
+//              update_auto_selecting();
+//          }, 500000)
+//
+//      });
+//      function update_auto_selecting(){
+//          $.ajax({
+//              method: 'post',
+//              dataType: 'json',
+//              url: "",
+//              beforeSend: function(){
+//                  $('.ajax-indicator-user').hide();
+//              },
+//              success: function(data){
+//                  if(data["auto_selecting_flag"]){
+//                      $("#is_auto_selecting").show();
+//                  }else{
+//                      $("#is_auto_selecting").hide();
+//                  }
+//              }
+//          })
+//      }
+  </script>
+  
+  <meta name="csrf-param" content="authenticity_token">
+<meta name="csrf-token" content="W9vyivfqtL9r1fiENbOFKeBqJyI+GUrZ1XsHju1heFScfmmRei8c2T2I80xnYoiET4tFy3KvZvtj51LuZ9h+zg==">
+</head>
+<body>
+<noscript>
+  <div class="no_script">あなたのブラウザはJavaScriptが利用できません。</br >JavaScriptを有効にしてからご利用ください。</div>
+</noscript>
+<div id="its_container" style="display: block;">
+  <header id="header">
+    <div id="page-top">
+      <h2 class="logo">
+        <a href="/"><img src="/assets/users/logo_its-bc37093703ff0ae9b7e9891375ea24c5a0ea0bfc3ded539d5ebb7fa270a266cf.png"></a>
+        <a href="/">
+          <span>関東ITソフトウェア</span>
+          <span class="ad">健康保険組合</span>
+        </a>
+      </h2>
+    </div>
+  </header>
+  <div id="container" style="">
+    <div class="innerCont">
+      <div id="flash_error_messages">
+</div>
+      <div class="tips" style="display:none" id="is_auto_selecting">現在、保養施設の抽選処理を実施しております。<br>ご不便をおかけしますが、直営・通年・夏季保養施設の空き照会につきましては、抽選処理が終了するまでしばらくお待ちください。</div>
+    </div>
+    <div id="flash_error_messages">
+</div>
+    <section class="request-box">
+  <form>
+    <h1>直営・通年・夏季・冬季保養施設(空き照会)</h1>
+    <div class="mb5 ml15"><p>直営・通年・夏季・冬季保養施設の空き照会及び申し込みが出来ます。<br>
+申込方法は以下ページをご覧ください。<br>
+<a href="https://www.its-kenpo.or.jp/shisetsu/hoyou/chokuei/moushikomi.html">https://www.its-kenpo.or.jp/shisetsu/hoyou/chokuei/moushikomi.html</a></p>
+
+<p><br>
+※直営保養施設（トスラブ3館）・ブルーベリーヒル勝浦・日光千姫物語・夏季保養施設・冬季保養施設の申し込みは利用日の４日前まで、ブルーベリーヒル勝浦・日光千姫物語を除く通年保養施設の申し込みは利用日の１０日前までとなります。<br>
+<br>
+※トスラブ湯沢は、2025年3月30日（日）宿泊をもって営業を終了いたしました。これまでの長年にわたるご愛顧に心から感謝を申し上げます。<br>
+<br>
+≪Go To トラベルキャンペーン・県民割などの取扱いについて≫<br>
+直営保養施設（トスラブ3館）、通年・夏季・冬季保養施設<br>
+Go Toトラベルや全国旅行支援、県民割などは対象とはなりません。<br>
+<br>
+&lt;都リゾート奥志摩アクアフォレスト&gt;<br>
+利用期間が令和7年7月1日から年8月31日までに変更となりました。<br>
+<br>
+&lt;和倉温泉 あえの風&gt;<br>
+2024年1月1日に発生いたしました令和6年能登半島地震の影響により、2024年1月2日～当面の間休館となります。<br>
+詳細は「<a href="https://www.aenokaze.jp/news/">あえの風 公式サイト</a>」をご覧ください。</p>
+</div>
+
+    <h2>カレンダ一選択</h2>
+    <p class="mb5 ml15">空きがある日付は「 ○ 」で表示し、空きがない日付は「」で表示します。</p>
+
+
+
+    <div id="calendarContent" class="tcas_1">
+      <div class="month-navi">
+  <span class="prev-month"><input id="prevMonth" type="button" value="＜前月" disabled="" onclick="toPrevMonth('2025-10-31','PUVUTXlFek13UWpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw==');" class="button prev-month"></span>
+  <span class="month">2025年11月</span>
+  <span class="next-month"><input id="nextMonth" type="button" value="翌月＞" onclick="toNextMonth('2025-12-01','PUVUTXlFek13UWpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw==');" class="button next-month"></span>
+</div>
+<table class="tb-calendar mb10">
+  <thead>
+  <tr>
+        <th class="td-sun">日</th>
+        <th class="td-n">月</th>
+        <th class="td-n">火</th>
+        <th class="td-n">水</th>
+        <th class="td-n">木</th>
+        <th class="td-n">金</th>
+        <th class="td-sat">土</th>
+  </tr>
+  </thead>
+  <tbody>
+      <tr>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td class="full td-sat" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-01" data-person="" data-service-catrgroy="1">
+                  <p>1</p>
+                  <span class="icon">☓</span>
+                </td>
+      </tr>
+      <tr>
+                <td class="full td-sun" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-02" data-person="" data-service-catrgroy="1">
+                  <p>2</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-hol" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-03" data-person="" data-service-catrgroy="1">
+                  <p>3</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-04" data-person="" data-service-catrgroy="1">
+                  <p>4</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-05" data-person="" data-service-catrgroy="1">
+                  <p>5</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-06" data-person="" data-service-catrgroy="1">
+                  <p>6</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-07" data-person="" data-service-catrgroy="1">
+                  <p>7</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-sat" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-08" data-person="" data-service-catrgroy="1">
+                  <p>8</p>
+                  <span class="icon">☓</span>
+                </td>
+      </tr>
+      <tr>
+                <td class="full td-sun" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-09" data-person="" data-service-catrgroy="1">
+                  <p>9</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-10" data-person="" data-service-catrgroy="1">
+                  <p>10</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-11" data-person="" data-service-catrgroy="1">
+                  <p>11</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-12" data-person="" data-service-catrgroy="1">
+                  <p>12</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-13" data-person="" data-service-catrgroy="1">
+                  <p>13</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-14" data-person="" data-service-catrgroy="1">
+                  <p>14</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-sat" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-15" data-person="" data-service-catrgroy="1">
+                  <p>15</p>
+                  <span class="icon">☓</span>
+                </td>
+      </tr>
+      <tr>
+                <td class="full td-sun" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-16" data-person="" data-service-catrgroy="1">
+                  <p>16</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-17" data-person="" data-service-catrgroy="1">
+                  <p>17</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-18" data-person="" data-service-catrgroy="1">
+                  <p>18</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-19" data-person="" data-service-catrgroy="1">
+                  <p>19</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-20" data-person="" data-service-catrgroy="1">
+                  <p>20</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-21" data-person="" data-service-catrgroy="1">
+                  <p>21</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-sat" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-22" data-person="" data-service-catrgroy="1">
+                  <p>22</p>
+                  <span class="icon">☓</span>
+                </td>
+      </tr>
+      <tr>
+                <td class="full td-hol" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-23" data-person="" data-service-catrgroy="1">
+                  <p>23</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-hol" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-24" data-person="" data-service-catrgroy="1">
+                  <p>24</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-25" data-person="" data-service-catrgroy="1">
+                  <p>25</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-26" data-person="" data-service-catrgroy="1">
+                  <p>26</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-27" data-person="" data-service-catrgroy="1">
+                  <p>27</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-n" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-28" data-person="" data-service-catrgroy="1">
+                  <p>28</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td class="full td-sat" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-29" data-person="" data-service-catrgroy="1">
+                  <p>29</p>
+                  <span class="icon">☓</span>
+                </td>
+      </tr>
+      <tr>
+                <td class="full td-sun" onclick="selectJoinTime(this);" data-night-count="1" data-join-time="2025-11-30" data-person="" data-service-catrgroy="1">
+                  <p>30</p>
+                  <span class="icon">☓</span>
+                </td>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td></td>
+                <td></td>
+      </tr>
+
+  </tbody>
+</table>
+
+    </div>
+
+    <script type="text/javascript">
+    function loading(flag){
+        if(flag){
+            $('#loadingView').show();
+        }else{
+            $('#loadingView').hide();
+        }
+    }
+    function toNextMonth(date,s){
+        getWeekDays(date,s);
+    }
+    function toPrevMonth(date,s){
+        getWeekDays(date,s);
+    }
+
+    function getWeekDays(join_date,s){
+        loading(true);
+        $.ajax({
+            type: 'post',
+            url: '/calendar_apply/calendar_select',
+            data: {join_date: join_date, s: s},
+            dataType: 'script'
+        });
+    }
+
+    function selectJoinTime(self){
+        if($(self).hasClass('full')) return;
+        if($(self).hasClass('over')) return;
+
+        $("#join_time").val($(self).data('join-time'));
+        $("#service_group_select").click();
+    }
+
+</script>
+
+
+<style type="text/css">
+  td.empty{
+    background:#C5EFCE;
+    background:-webkit-gradient(linear,0% 0%,0% 100%,from(#C5EFCE),to(#B5DFBE));
+    background:-moz-linear-gradient(to bottom, #C5EFCE 0%,#B5DFBE 100%);
+    background: -o-linear-gradient(to bottom, #C5EFCE 0%,#B5DFBE 100%); /* Opera 11.1 - 12.0 */
+    background: linear-gradient(to bottom, #C5EFCE 0%,#B5DFBE 100%);
+    cursor: pointer;
+    color:#1C751D;
+  }
+  td.a_little{
+    background:#FFCC99;
+    background:-webkit-gradient(linear,0% 0%,0% 100%,from(#FFCC99),to(#EFBC89));
+    background:-moz-linear-gradient(to bottom, #FFCC99 0%,#EFBC89 100%);
+    background: -o-linear-gradient(to bottom, #FFCC99 0%,#EFBC89 100%); /* Opera 11.1 - 12.0 */
+    background: linear-gradient(to bottom, #FFCC99 0%,#EFBC89 100%);
+    cursor: pointer;
+    color:black;
+  }
+  td.empty:hover{
+    background:-webkit-gradient(linear,0% 0%,0% 100%,from(#BFE9C8),to(#B5DFBE));
+    background:-moz-linear-gradient(to bottom, #BFE9C8 0%,#B5DFBE 100%);
+    background: -o-linear-gradient(to bottom, #BFE9C8 0%,#B5DFBE 100%); /* Opera 11.1 - 12.0 */
+    background: linear-gradient(to bottom, #BFE9C8 0%,#B5DFBE 100%);
+  }
+
+  td.a_little:hover{
+    background:-webkit-gradient(linear,0% 0%,0% 100%,from(#F9C694),to(#EFBC89));
+    background:-moz-linear-gradient(to bottom, #F9C694 0%,#EFBC89 100%);
+    background: -o-linear-gradient(to bottom, #F9C694 0%,#EFBC89 100%); /* Opera 11.1 - 12.0 */
+    background: linear-gradient(to bottom, #F9C694 0%,#EFBC89 100%);
+  }
+
+  td.full{
+    background-color:#FFC7CE;
+    /*color:#A6141A;*/
+    cursor: no-drop;
+  }
+  td.over {
+    background-color: #eee;
+    cursor: no-drop;
+  }
+  td.td-sat{
+    color: blue;
+  }
+  td.td-sun {
+    color: red;/*#FFCC99;*/
+  }
+  td.td-hol{
+    color: red;/*#ffa07a;*/
+  }
+  td.td-n{
+    color: #333;
+  }
+  .tb-calendar thead th.td-sat{
+    color: blue;
+  }
+  .tb-calendar thead th.td-sun {
+    color: red;
+  }
+
+  td span.icon {
+    color: #333;
+    font-family: Meiryo,'ＭＳ Ｐゴシック',sans-serif,'メイリオ';
+    font-weight: bold;
+  }
+
+  .tb-calendar{
+    width: 100%;
+    border: 1px solid black;
+  }
+  .month-navi{
+    margin-top: 10px;
+    margin-bottom: 10px;
+    /*position: relative;*/
+    display: table;
+    width: 100%;
+  }
+  .month-navi > * {
+    display: table-cell;
+  }
+  .month-navi > .month {
+    text-align: center;
+    vertical-align: middle;
+    font-size: 20px;
+  }
+  .month-navi > .prev-month {
+    text-align: left;
+  }
+  .month-navi > .next-month {
+    text-align: right;
+  }
+
+  .tb-calendar thead th{
+    text-align: center;
+    background-color: #ddd;
+    border: 1px solid black;
+    font-size: 18px;
+    padding: 5px;
+  }
+  .tb-calendar tbody td{
+    border: 1px solid black;
+    font-size: 18px;
+    text-align: center;
+  }
+  .tb-calendar tbody td.time-row{
+    background-color: #D8E4BC;
+  }
+
+  .tb-calendar td {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  #top_tabs + .tabContent > .tabConBody{
+    /*width: 470px;*/
+    vertical-align: middle;
+    text-align: center;
+    margin: auto;
+  }
+</style>
+  </form>
+</section>
+
+<div style="display: none">
+  <form action="/calendar_apply/service_group_select" accept-charset="UTF-8" method="post"><input name="utf8" type="hidden" value="✓"><input type="hidden" name="authenticity_token" value="W9vyivfqtL9r1fiENbOFKeBqJyI+GUrZ1XsHju1heFScfmmRei8c2T2I80xnYoiET4tFy3KvZvtj51LuZ9h+zg==">
+      <input type="hidden" name="join_time" id="join_time">
+      <input type="hidden" name="s" id="s" value="PUVUTXlFek13UWpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw==">
+      <input type="submit" id="service_group_select">
+</form></div>
+<div id="loadingView" class="ajax-indicator" style="display: none;">
+  <div></div>
+  <table class="loading">
+  </table>
+</div>
+
+    <div class="page_top innerCont"><a href="javascript:scroll(0,0)">↑ページ先頭へ</a></div>
+  </div>
+
+  <footer id="footer">
+    <small>©2025 関東ITソフトウェア 健康保険組合</small>
+  </footer>
+  <div id="Div_SearchNotice" class="ajax-indicator-user" style="display: none;">
+    <div></div>
+    <table class="loading">
+      <tbody><tr>
+        <td>
+          <div>
+            <img src="/assets/users/loading-15e2090fa296d47216afec6ada0cddd81e3a411172323c1d31934565d8589196.gif" alt="ajax-loader.gif" width="200">
+          </div>
+        </td>
+      </tr>
+    </tbody></table>
+  </div>
+</div>
+<script type="text/javascript">
+    document.getElementById("its_container").style.display = "block";
+    $(function () {
+       if ($('.show_screen').size()!=0) $('.page_top').removeClass('innerCont');
+    });
+</script>
+
+
+</body></html>

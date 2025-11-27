@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import os
+import re
 from datetime import datetime
 from pydoll.browser.chromium import Chrome
 from pydoll.browser.options import ChromiumOptions
+from datetime import datetime as dt
 
 # ============================================================
 # CONFIGURATION
@@ -16,7 +18,7 @@ CALENDAR_URL_CACHE = "calendar_url_cache.txt"
 MAIN_URL = "https://as.its-kenpo.or.jp"
 
 # User configuration
-TARGET_EMAIL = "waylonh@apple.com"
+TARGET_EMAIL = "wwaylonhuang@gmail.com"
 NUM_GUESTS = 2
 
 # Scanning configuration
@@ -24,9 +26,27 @@ SCAN_INTERVAL_SECONDS = 10  # Check every X seconds
 NUM_MONTHS_TO_SCAN = 3
 
 # Day of week configuration
-# Use "td-sun" for Sunday, "td-sat" for Saturday
-TARGET_DAY_CLASS = "td-sun"  # Testing with Sunday (change to "td-sat" for Saturday)
-TARGET_DAY_NAME = "Sunday" if TARGET_DAY_CLASS == "td-sun" else "Saturday"
+# Available day classes and their display names
+DAY_CONFIG = {
+    "td-sun": "Sunday",
+    "td-sat": "Saturday",
+    "td-n": "Weekday",  # Mon-Fri are all td-n
+    "td-hol": "Holiday"
+}
+
+# Day name mapping
+WEEKDAY_NAMES = {
+    0: "Monday",
+    1: "Tuesday",
+    2: "Wednesday",
+    3: "Thursday",
+    4: "Friday",
+    5: "Saturday",
+    6: "Sunday"
+}
+
+# Specify which days to scan by weekday number (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
+TARGET_WEEKDAYS = [2]  # Wednesday = 2
 
 # Booking mode
 AUTO_BOOK = True  # Set to True to automatically attempt booking when available dates found
@@ -236,8 +256,29 @@ async def is_valid_calendar_page(tab):
     """Check if current page is a valid calendar page."""
     try:
         month_element = await tab.find(class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
-        day_cells = await tab.find(tag_name=TAG_TD, class_name=TARGET_DAY_CLASS, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
-        return month_element is not None and day_cells is not None and len(day_cells) > 0
+        if month_element is None:
+            return False
+        
+        # Check if any td elements with data-join-time are present
+        all_cells = await tab.find(tag_name=TAG_TD, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+        if all_cells:
+            for cell in all_cells[:10]:  # Check first 10 cells
+                try:
+                    attr_result = await cell.execute_script(f"return this.getAttribute('{ATTR_DATA_JOIN_TIME}')")
+                    if isinstance(attr_result, dict) and 'result' in attr_result:
+                        if 'result' in attr_result['result']:
+                            date_attr = attr_result['result']['result'].get('value')
+                        else:
+                            date_attr = attr_result['result'].get('value')
+                    else:
+                        date_attr = str(attr_result) if attr_result else None
+                    
+                    if date_attr and date_attr != NONE_STRING and date_attr != 'None':
+                        return True
+                except:
+                    pass
+        
+        return False
     except:
         return False
 
@@ -447,8 +488,28 @@ async def navigate_to_next_month(tab):
     return False
 
 
+def is_target_weekday(date_string):
+    """Check if a date string matches any of our target weekdays.
+    
+    Args:
+        date_string: Date in format 'YYYY-MM-DD'
+    
+    Returns:
+        tuple: (is_match, weekday_name) or (False, None) if invalid
+    """
+    try:
+        date_obj = dt.strptime(date_string, '%Y-%m-%d')
+        weekday = date_obj.weekday()  # 0=Monday, 6=Sunday
+        
+        if weekday in TARGET_WEEKDAYS:
+            return True, WEEKDAY_NAMES[weekday]
+        return False, None
+    except:
+        return False, None
+
+
 async def scan_month_days(tab):
-    """Scan current month for available days."""
+    """Scan current month for available days on target weekdays."""
     try:
         month_element = await tab.find(class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
         if month_element:
@@ -470,20 +531,56 @@ async def scan_month_days(tab):
     
     available_days = []
     
+    # Get all td elements with data-join-time (actual date cells)
     try:
-        day_cells = await tab.find(tag_name=TAG_TD, class_name=TARGET_DAY_CLASS, find_all=True, raise_exc=False)
-        if not day_cells:
-            print(f"Found 0 {TARGET_DAY_NAME}(s)")
+        all_cells = await tab.find(tag_name=TAG_TD, find_all=True, raise_exc=False)
+        if not all_cells:
+            print("No td elements found")
             return available_days
         
-        print(f"Found {len(day_cells)} {TARGET_DAY_NAME}(s)")
-        
-        for cell in day_cells:
+        # Filter to cells with data-join-time attribute
+        date_cells = []
+        for cell in all_cells:
             try:
-                # Get date text
+                attr_result = await cell.execute_script(f"return this.getAttribute('{ATTR_DATA_JOIN_TIME}')")
+                if isinstance(attr_result, dict) and 'result' in attr_result:
+                    if 'result' in attr_result['result']:
+                        date_attr = attr_result['result']['result'].get('value')
+                    else:
+                        date_attr = attr_result['result'].get('value')
+                else:
+                    date_attr = str(attr_result) if attr_result else None
+                
+                if date_attr and date_attr != NONE_STRING and date_attr != 'None':
+                    date_cells.append((cell, date_attr))
+            except:
+                pass
+        
+        if not date_cells:
+            print("No date cells found with data-join-time attribute")
+            return available_days
+        
+        print(f"Found {len(date_cells)} total date cells")
+        
+        # Filter to target weekdays
+        target_cells = []
+        for cell, date_str in date_cells:
+            is_match, day_name = is_target_weekday(date_str)
+            if is_match:
+                target_cells.append((cell, date_str, day_name))
+        
+        target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
+        days_str = ", ".join(target_day_names)
+        print(f"Found {len(target_cells)} {days_str} date(s)")
+        
+        # Process each target weekday cell
+        for cell, full_date, day_name in target_cells:
+            try:
+                # Get date text from <p> tag
+                date_text = ""
                 date_elem = await cell.find(tag_name=TAG_PARAGRAPH, raise_exc=False)
                 if date_elem:
-                    text_result = await date_elem.execute_script("return this.textContent")
+                    text_result = await date_elem.execute_script("return this.textContent.trim()")
                     if isinstance(text_result, dict) and 'result' in text_result:
                         if 'result' in text_result['result']:
                             date_text = text_result['result']['result'].get('value', '')
@@ -491,51 +588,59 @@ async def scan_month_days(tab):
                             date_text = text_result['result'].get('value', '')
                     else:
                         date_text = str(text_result)
-                else:
-                    date_text = ""
                 
-                # Get icon
-                icon_element = await cell.find(class_name=CLASS_ICON, raise_exc=False)
-                if icon_element:
-                    text_result = await icon_element.execute_script("return this.textContent")
+                # Fallback: extract from cell text
+                if not date_text:
+                    text_result = await cell.execute_script("return this.textContent.trim()")
                     if isinstance(text_result, dict) and 'result' in text_result:
                         if 'result' in text_result['result']:
-                            icon = text_result['result']['result'].get('value', '')
+                            cell_text = text_result['result']['result'].get('value', '')
                         else:
-                            icon = text_result['result'].get('value', '')
+                            cell_text = text_result['result'].get('value', '')
                     else:
-                        icon = str(text_result)
+                        cell_text = str(text_result)
+                    
+                    match = re.search(r'(\d+)', cell_text)
+                    if match:
+                        date_text = match.group(1)
+                
+                # Get availability icon from cell text
+                text_result = await cell.execute_script("return this.textContent.trim()")
+                if isinstance(text_result, dict) and 'result' in text_result:
+                    if 'result' in text_result['result']:
+                        cell_text = text_result['result']['result'].get('value', '')
+                    else:
+                        cell_text = text_result['result'].get('value', '')
+                else:
+                    cell_text = str(text_result)
+                
+                # Check for availability markers
+                if ICON_AVAILABLE in cell_text or "○" in cell_text:
+                    icon = ICON_AVAILABLE
+                    status = STATUS_AVAILABLE
+                elif "☓" in cell_text or "×" in cell_text or "X" in cell_text:
+                    icon = "×"
+                    status = STATUS_FULL
                 else:
                     icon = ""
+                    status = STATUS_UNKNOWN
                 
-                # Get full date
-                attr_result = await cell.execute_script(f"return this.getAttribute('{ATTR_DATA_JOIN_TIME}')")
-                if isinstance(attr_result, dict) and 'result' in attr_result:
-                    if 'result' in attr_result['result']:
-                        full_date = attr_result['result']['result'].get('value', '')
-                    else:
-                        full_date = attr_result['result'].get('value', '')
-                else:
-                    full_date = str(attr_result)
-                    
-                if not full_date or full_date == NONE_STRING:
-                    full_date = ""
-                
-                status = STATUS_AVAILABLE if icon == ICON_AVAILABLE else STATUS_FULL
-                print(f"  {date_text}日: {icon} ({status}) - {full_date}")
+                print(f"  {date_text}日 ({day_name}): {icon} ({status}) - {full_date}")
                 
                 if icon == ICON_AVAILABLE:
                     available_days.append({
                         'month': current_month,
                         'date': date_text,
+                        'day_name': day_name,
                         'full_date': full_date,
                         'icon': icon,
                         'cell': cell  # Store cell reference for booking
                     })
             except Exception as e:
                 print(f"  Error processing cell: {str(e)[:TEXT_TRUNCATE_LENGTH]}")
+    
     except Exception as e:
-        print(f"Error finding {TARGET_DAY_NAME} cells: {e}")
+        print(f"Error scanning calendar: {e}")
     
     return available_days
 
@@ -1121,8 +1226,11 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
 
 async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=False):
     """Scan calendar for available dates."""
+    target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
+    days_str = ", ".join(target_day_names)
+    
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    print(f"SCANNING {TARGET_DAY_NAME.upper()}S FOR {num_months} MONTHS")
+    print(f"SCANNING {days_str.upper()} FOR {num_months} MONTHS")
     if attempt_booking:
         print("AUTO-BOOKING ENABLED")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH + "\n")
@@ -1138,15 +1246,16 @@ async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=Fals
         
         # Auto-booking if enabled
         if attempt_booking and month_dates:
-            print(f"\nFound {len(month_dates)} available {TARGET_DAY_NAME}(s)")
+            print(f"\nFound {len(month_dates)} available date(s)")
             for date_info in month_dates:
-                print(f"\nAttempting to book: {date_info['date']}日")
+                day_name = date_info.get('day_name', 'Unknown')
+                print(f"\nAttempting to book: {date_info['date']}日 ({day_name})")
                 
                 if await process_booking_for_date(tab, date_info):
-                    print(f"✓ Booking successful for {date_info['date']}日")
+                    print(f"✓ Booking successful for {date_info['date']}日 ({day_name})")
                     return all_available
                 else:
-                    print(f"✗ Booking failed for {date_info['date']}日")
+                    print(f"✗ Booking failed for {date_info['date']}日 ({day_name})")
                     # Navigate back to calendar using current page's history
                     print("Navigating back to calendar...")
                     await tab.execute_script(HISTORY_GO_BACK_5)
@@ -1163,16 +1272,20 @@ async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=Fals
 
 def print_summary(available_dates):
     """Print summary of available dates."""
+    target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
+    days_str = ", ".join(target_day_names)
+    
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    print(f"SUMMARY: Available {TARGET_DAY_NAME}s")
+    print(f"SUMMARY: Available {days_str}")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
     
     if available_dates:
-        print(f"\nFound {len(available_dates)} available {TARGET_DAY_NAME}(s):\n")
+        print(f"\nFound {len(available_dates)} available date(s):\n")
         for date in available_dates:
-            print(f"  {date['month']} - {date['date']}日 ({date['full_date']})")
+            day_name = date.get('day_name', 'Unknown')
+            print(f"  {date['month']} - {date['date']}日 ({day_name}) [{date['full_date']}]")
     else:
-        print(f"\nNo available {TARGET_DAY_NAME}s found")
+        print(f"\nNo available dates found for: {days_str}")
     
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH + "\n")
 
@@ -1226,9 +1339,12 @@ async def scan_once():
 
 async def main():
     """Main execution flow."""
+    target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
+    days_str = ", ".join(target_day_names)
+    
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
     print("ITS CALENDAR SCANNER - CONTINUOUS MODE")
-    print(f"Target: {TARGET_DAY_NAME}s")
+    print(f"Target Days: {days_str}")
     print(f"Auto-booking: {'ENABLED' if AUTO_BOOK and not SCAN_ONLY else 'DISABLED'}")
     print(f"Checking every {SCAN_INTERVAL_SECONDS} seconds")
     print("Press Ctrl+C to stop")
