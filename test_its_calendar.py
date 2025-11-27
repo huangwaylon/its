@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import json
 import os
 import re
 from datetime import datetime
@@ -13,6 +14,7 @@ from datetime import datetime as dt
 
 # File paths
 CALENDAR_URL_CACHE = "calendar_url_cache.txt"
+BOOKINGS_FILE = "bookings.json"
 
 # URLs and API endpoints
 MAIN_URL = "https://as.its-kenpo.or.jp"
@@ -46,7 +48,7 @@ WEEKDAY_NAMES = {
 }
 
 # Specify which days to scan by weekday number (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
-TARGET_WEEKDAYS = [2]  # Wednesday = 2
+TARGET_WEEKDAYS = [3]  # Wednesday = 2
 
 # Booking mode
 AUTO_BOOK = True  # Set to True to automatically attempt booking when available dates found
@@ -249,6 +251,85 @@ def save_calendar_url(url):
             f.write(url)
         print(f"Saved calendar URL to cache")
     except Exception as e:
+
+# ============================================================
+# BOOKING TRACKING FUNCTIONS
+# ============================================================
+
+def load_bookings():
+    """Load bookings history from JSON file.
+    
+    Returns:
+        dict: Dictionary with date as key and list of hotel names as value.
+              Example: {"2024-03-15": ["Hotel A", "Hotel B"]}
+    """
+    if not os.path.exists(BOOKINGS_FILE):
+        return {}
+    
+    try:
+        with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
+            bookings = json.load(f)
+            return bookings
+    except Exception as e:
+        print(f"Error loading bookings: {e}")
+        return {}
+
+
+def save_booking(date, hotel_name):
+    """Record a successful booking to avoid rebooking.
+    
+    Args:
+        date: Date string in format 'YYYY-MM-DD'
+        hotel_name: Name of the hotel booked
+    """
+    try:
+        bookings = load_bookings()
+        
+        # Initialize date entry if it doesn't exist
+        if date not in bookings:
+            bookings[date] = []
+        
+        # Add hotel to the date if not already there
+        if hotel_name not in bookings[date]:
+            bookings[date].append(hotel_name)
+            
+            # Save to file
+            with open(BOOKINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(bookings, f, ensure_ascii=False, indent=2)
+            
+            print(f"✓ Recorded booking: {date} - {hotel_name}")
+        else:
+            print(f"Booking already recorded: {date} - {hotel_name}")
+    except Exception as e:
+        print(f"Error saving booking: {e}")
+
+
+def is_already_booked(date, hotel_name):
+    """Check if a date and hotel combination is already booked.
+    
+    Args:
+        date: Date string in format 'YYYY-MM-DD'
+        hotel_name: Name of the hotel to check
+    
+    Returns:
+        bool: True if already booked, False otherwise
+    """
+    bookings = load_bookings()
+    return date in bookings and hotel_name in bookings[date]
+
+
+def get_booked_hotels_for_date(date):
+    """Get list of hotels already booked for a specific date.
+    
+    Args:
+        date: Date string in format 'YYYY-MM-DD'
+    
+    Returns:
+        list: List of hotel names already booked for this date
+    """
+    bookings = load_bookings()
+    return bookings.get(date, [])
+
         print(f"Error saving cache: {e}")
 
 
@@ -1110,26 +1191,41 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
         skip_blueberry_hill: If True, skip hotel named "ブルーベリーヒル勝浦" (default: SKIP_BLUEBERRY_HILL)
     
     Returns:
-        True if booking succeeded for any hotel, False otherwise
+        tuple: (success: bool, hotel_name: str or None) - True if booking succeeded with hotel name, False otherwise
     """
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
     print(f"BOOKING: {date_info['date']}日 ({date_info['full_date']})")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
     
+    booking_date = date_info['full_date']
+    
     try:
         # Click the date cell to get to service_group_select page
         if not await click_available_date_cell(date_info['cell']):
             print("Failed to click date cell")
-            return False
+            return False, None
         
         # Get all hotel names from the service_group_select page
-        hotel_names = await get_hotel_names_on_service_group_page(tab, skip_blueberry_hill)
+        all_hotel_names = await get_hotel_names_on_service_group_page(tab, skip_blueberry_hill)
+        
+        if not all_hotel_names:
+            print("No hotels found to try")
+            return False, None
+        
+        # Filter out already-booked hotels
+        already_booked = get_booked_hotels_for_date(booking_date)
+        if already_booked:
+            print(f"\nAlready booked hotels for {booking_date}:")
+            for hotel in already_booked:
+                print(f"  ✓ {hotel[:TEXT_TRUNCATE_LENGTH]}")
+        
+        hotel_names = [h for h in all_hotel_names if h not in already_booked]
         
         if not hotel_names:
-            print("No hotels found to try")
-            return False
+            print(f"\n⊘ All {len(all_hotel_names)} hotel(s) already booked for this date")
+            return False, None
         
-        print(f"\nWill try {len(hotel_names)} hotel(s) for this date")
+        print(f"\nWill try {len(hotel_names)} hotel(s) for this date ({len(already_booked)} already booked)")
         
         # Try each hotel
         for hotel_idx, hotel_name in enumerate(hotel_names):
@@ -1197,7 +1293,11 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
                 print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
                 print(f"BOOKING COMPLETED SUCCESSFULLY FOR: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
                 print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
-                return True
+                
+                # Record the successful booking
+                save_booking(booking_date, hotel_name)
+                
+                return True, hotel_name
                 
             except Exception as e:
                 print(f"Error processing hotel {hotel_name[:TEXT_TRUNCATE_LENGTH]}: {e}")
@@ -1217,13 +1317,13 @@ async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUE
         print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
         print(f"BOOKING FAILED FOR ALL {len(hotel_names)} HOTELS")
         print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
-        return False
+        return False, None
         
     except Exception as e:
         print(f"Error in booking: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return False, None
 
 
 async def navigate_to_month(tab, target_month_num):
@@ -1266,8 +1366,9 @@ async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=Fals
                 day_name = date_info.get('day_name', 'Unknown')
                 print(f"\nAttempting to book: {date_info['date']}日 ({day_name})")
                 
-                if await process_booking_for_date(tab, date_info):
-                    print(f"✓ Booking successful for {date_info['date']}日 ({day_name})")
+                success, hotel_name = await process_booking_for_date(tab, date_info)
+                if success:
+                    print(f"✓ Booking successful for {date_info['date']}日 ({day_name}) at {hotel_name}")
                     return all_available
                 else:
                     print(f"✗ Booking failed for {date_info['date']}日 ({day_name})")
