@@ -127,7 +127,7 @@ async def scan_calendar_and_book(calendar_url):
     print("STARTING BOOKING SCAN")
     print("=" * SEPARATOR_WIDTH)
     
-    options = create_browser_options(headless=False)
+    options = create_browser_options(headless=True)
     async with Chrome(options=options) as browser:
         tab = await browser.start()
         await tab.go_to(calendar_url)
