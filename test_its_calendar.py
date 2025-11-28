@@ -47,12 +47,10 @@ WEEKDAY_NAMES = {
 }
 
 # Specify which days to scan by weekday number (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
-TARGET_WEEKDAYS = [3]  # Wednesday = 2
+TARGET_WEEKDAYS = [3]  # Thursday = 3
 
 # Booking mode
 AUTO_BOOK = True  # Set to True to automatically attempt booking when available dates found
-SCAN_ONLY = False  # Set to True to only scan without booking
-MANUAL_MODE = False  # Set to True for manual interaction/testing
 
 # Hotel filtering
 SKIP_BLUEBERRY_HILL = True
@@ -88,6 +86,7 @@ EXTENDED_TIMEOUT = 5
 # Sleep/wait durations (in seconds)
 SLEEP_SHORT = 0.2
 SLEEP_STANDARD = 0.5
+SLEEP_MONTH_NAV = 1.0  # Longer wait for month navigation
 
 # ============================================================
 # DOM SELECTORS AND ATTRIBUTES
@@ -266,7 +265,10 @@ def load_bookings():
     
     try:
         with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
-            bookings = json.load(f)
+            content = f.read().strip()
+            if not content:
+                return {}
+            bookings = json.loads(content)
             return bookings
     except Exception as e:
         print(f"Error loading bookings: {e}")
@@ -527,32 +529,65 @@ async def acquire_calendar_url_with_captcha():
 
 
 async def navigate_to_next_month(tab):
-    """Navigate to the next month in the calendar."""
+    """Navigate to the next month in the calendar with validation."""
+    # Get current month before navigation  
+    current_month = None
+    try:
+        month_element = await tab.find(class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+        if month_element:
+            text_result = await month_element.execute_script("return this.textContent")
+            current_month = extract_script_value(text_result)
+    except:
+        pass
+    
+    # Try clicking next month button
+    clicked = False
     try:
         next_button = await tab.find(id=ID_NEXT_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
         if next_button:
             await next_button.click()
-            await asyncio.sleep(SLEEP_SHORT)
-            return True
+            clicked = True
     except:
         pass
     
-    try:
-        inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
-        if inputs:
-            for input_elem in inputs:
-                try:
-                    value = await input_elem.get_property("value")
-                    if value and TEXT_NEXT_MONTH in value:
-                        await input_elem.click()
-                        await asyncio.sleep(SLEEP_SHORT)
-                        return True
-                except:
-                    pass
-    except:
-        pass
+    if not clicked:
+        try:
+            inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+            if inputs:
+                for input_elem in inputs:
+                    try:
+                        value = await input_elem.get_property("value")
+                        if value and TEXT_NEXT_MONTH in value:
+                            await input_elem.click()
+                            clicked = True
+                            break
+                    except:
+                        pass
+        except:
+            pass
     
-    return False
+    if not clicked:
+        return False
+    
+    # Wait longer for page to update
+    await asyncio.sleep(SLEEP_MONTH_NAV)
+    
+    # Verify month changed
+    if current_month:
+        try:
+            month_element = await tab.find(class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+            if month_element:
+                text_result = await month_element.execute_script("return this.textContent")
+                new_month = extract_script_value(text_result)
+                if new_month != current_month:
+                    return True
+                else:
+                    print(f"Warning: Month didn't change after navigation, still on: {new_month}")
+                    return False
+        except:
+            pass
+    
+    return True
 
 
 def is_target_weekday(date_string):
@@ -670,7 +705,6 @@ async def scan_month_days(tab):
                         'day_name': day_name,
                         'full_date': full_date,
                         'icon': icon,
-                        'cell': cell  # Store cell reference for booking
                     })
             except Exception as e:
                 print(f"  Error processing cell: {str(e)[:TEXT_TRUNCATE_LENGTH]}")
@@ -685,33 +719,8 @@ async def scan_month_days(tab):
 # BOOKING AUTOMATION FUNCTIONS
 # ============================================================
 
-async def click_available_date_cell(cell):
-    """Click on an available date cell to start booking process."""
-    try:
-        await cell.scroll_into_view()
-        await asyncio.sleep(SLEEP_SHORT)
-        # Use JavaScript click to avoid visibility issues
-        await cell.execute_script("this.click()")
-        print("Clicked date cell")
-        await asyncio.sleep(SLEEP_SHORT)
-        return True
-    except Exception as e:
-        print(f"Error clicking date cell: {e}")
-        return False
-
-
 async def click_date_by_attribute(tab, target_date):
-    """Click a date cell by finding it via data-join-time attribute.
-    
-    This is more reliable than using stored cell references after page reload.
-    
-    Args:
-        tab: Browser tab
-        target_date: Date string in format 'YYYY-MM-DD'
-    
-    Returns:
-        True if successful, False otherwise
-    """
+    """Click a date cell by finding it via data-join-time attribute."""
     try:
         print(f"Looking for date cell with data-join-time='{target_date}'...")
         await asyncio.sleep(SLEEP_SHORT)
@@ -747,14 +756,7 @@ async def click_date_by_attribute(tab, target_date):
 
 
 async def verify_on_service_group_page(tab):
-    """Verify we're on the service_group_select page.
-    
-    Args:
-        tab: Browser tab
-    
-    Returns:
-        True if on service_group_select page, False otherwise
-    """
+    """Verify we're on the service_group_select page."""
     try:
         await asyncio.sleep(SLEEP_SHORT)
         url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
@@ -772,15 +774,7 @@ async def verify_on_service_group_page(tab):
 
 
 async def get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BLUEBERRY_HILL):
-    """On service_group_select page, collect all hotel names.
-    
-    Args:
-        tab: Browser tab
-        skip_blueberry_hill: If True, skip hotel named "ブルーベリーヒル勝浦" (default: SKIP_BLUEBERRY_HILL)
-    
-    Returns:
-        List of hotel names
-    """
+    """On service_group_select page, collect all hotel names."""
     print(f"\nOn {URL_SERVICE_GROUP_SELECT} page, collecting hotel names...")
     
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
@@ -822,9 +816,9 @@ async def get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BL
                         hotel_names.append(link_text)
                         print(f"Found hotel: {link_text[:TEXT_TRUNCATE_LENGTH]}")
                 except Exception as e:
-                    print(f"Error checking link: {e}")
+                    continue
         
-        print(f"Total hotels to try: {len(hotel_names)}")
+        print(f"Total hotels: {len(hotel_names)}")
         return hotel_names
     except Exception as e:
         print(f"Error collecting hotel names: {e}")
@@ -832,15 +826,7 @@ async def get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BL
 
 
 async def click_hotel_by_name(tab, hotel_name):
-    """Click a hotel link by its name on service_group_select page.
-    
-    Args:
-        tab: Browser tab
-        hotel_name: Exact name of the hotel to click
-    
-    Returns:
-        True if successful, False otherwise
-    """
+    """Click a hotel link by its name on service_group_select page."""
     print(f"Looking for hotel: {hotel_name[:TEXT_TRUNCATE_LENGTH]}...")
     
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
@@ -867,7 +853,7 @@ async def click_hotel_by_name(tab, hotel_name):
                         await asyncio.sleep(SLEEP_SHORT)
                         return True
                 except Exception as e:
-                    print(f"Error checking link: {e}")
+                    continue
         
         print(f"Could not find hotel: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
         return False
@@ -876,26 +862,8 @@ async def click_hotel_by_name(tab, hotel_name):
         return False
 
 
-async def select_hotel_on_service_group_page(tab, skip_blueberry_hill=SKIP_BLUEBERRY_HILL):
-    """On service_group_select page, click the first hotel link.
-    
-    Note: For processing all hotels, use get_hotel_names_on_service_group_page instead.
-    
-    Args:
-        tab: Browser tab
-        skip_blueberry_hill: If True, skip hotel named "ブルーベリーヒル勝浦" (default: SKIP_BLUEBERRY_HILL)
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    hotel_names = await get_hotel_names_on_service_group_page(tab, skip_blueberry_hill)
-    if hotel_names:
-        return await click_hotel_by_name(tab, hotel_names[0])
-    return False
-
-
 async def select_service_on_apply_page(tab):
-    """On apply_service_select page, click the service link (ends with 申込)."""
+    """On apply_service_select page, click the service link."""
     print(f"\nOn {URL_APPLY_SERVICE_SELECT} page, looking for service link...")
     
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
@@ -906,9 +874,12 @@ async def select_service_on_apply_page(tab):
         return False
     
     try:
-        await asyncio.sleep(SLEEP_SHORT)
+        # Wait longer for page to fully load
+        await asyncio.sleep(SLEEP_STANDARD)
         links = await tab.find(tag_name=TAG_ANCHOR, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
         if links:
+            # Collect all valid service links
+            service_links = []
             for link in links:
                 try:
                     text_result = await link.execute_script("return this.textContent.trim()")
@@ -921,18 +892,37 @@ async def select_service_on_apply_page(tab):
                     if any(skip in link_text for skip in SKIP_LINK_TEXTS_SERVICE):
                         continue
                     
-                    # Service link ends with 申込 and has javascript: href
-                    if link_text and TEXT_SERVICE_APPLICATION in link_text and PROTOCOL_JAVASCRIPT in href:
-                        print(f"Clicking service link: {link_text[:TEXT_TRUNCATE_LENGTH]}...")
-                        await link.scroll_into_view()
-                        await asyncio.sleep(SLEEP_SHORT)
-                        await link.click()
-                        await asyncio.sleep(SLEEP_SHORT)
-                        return True
+                    # Service link: has javascript: href and substantial text
+                    # Can end with 申込 or just be the hotel name
+                    if link_text and len(link_text.strip()) > MIN_LINK_TEXT_LENGTH and PROTOCOL_JAVASCRIPT in href:
+                        service_links.append((link, link_text))
                 except Exception as e:
-                    print(f"Error checking link: {e}")
+                    continue
+            
+            # Try to click the first valid service link
+            if service_links:
+                link, link_text = service_links[0]
+                print(f"Clicking service link: {link_text[:TEXT_TRUNCATE_LENGTH]}...")
+                await link.scroll_into_view()
+                await asyncio.sleep(SLEEP_STANDARD)  # Wait longer before clicking
+                await link.click()
+                await asyncio.sleep(SLEEP_STANDARD)  # Wait longer after clicking
+                return True
+            else:
+                print("No valid service links found")
+                # Debug: print all links found
+                print("Available links:")
+                for link in links[:10]:  # Show first 10 links
+                    try:
+                        text_result = await link.execute_script("return this.textContent.trim()")
+                        link_text = extract_script_value(text_result) or ""
+                        if link_text and len(link_text) > 2:
+                            print(f"  - {link_text[:TEXT_TRUNCATE_LENGTH]}")
+                    except:
+                        pass
+                return False
         
-        print("Could not find service link")
+        print("No links found on page")
         return False
     except Exception as e:
         print(f"Error selecting service: {e}")
@@ -1205,208 +1195,199 @@ async def fill_email_and_submit(tab):
         return False
 
 
-async def process_booking_for_date(tab, date_info, skip_blueberry_hill=SKIP_BLUEBERRY_HILL):
-    """Process booking for ONE hotel only per call.
-    
-    Strategy: Book only the FIRST available (unbooked) hotel, then return.
-    Next iteration will handle the next hotel (bookings.json prevents re-booking).
-    This makes each iteration fast - one hotel per scan cycle.
-    
-    Args:
-        tab: Browser tab
-        date_info: Dictionary containing date information and cell reference
-        skip_blueberry_hill: If True, skip hotel named "ブルーベリーヒル勝浦"
+async def try_book_hotel_for_date(tab, date, hotel):
+    """Attempt to book a specific hotel for a date.
     
     Returns:
-        list: List with single hotel name if successful, empty list otherwise
+        bool: True if booking successful, False otherwise
     """
+    print(f"\n→ Attempting to book: {date} - {hotel[:TEXT_TRUNCATE_LENGTH]}")
+    
+    # Click hotel (we should already be on service_group_select page)
+    if not await click_hotel_by_name(tab, hotel):
+        print("Failed to click hotel")
+        return False
+    
+    if not await select_service_on_apply_page(tab):
+        print("Failed to select service")
+        return False
+    
+    if not await fill_booking_form_and_search(tab, date):
+        print("Failed to fill form")
+        return False
+    
+    if not await select_room_and_proceed(tab):
+        print("No rooms available")
+        return False
+    
+    if not await agree_to_rules(tab):
+        print("Failed to agree to rules")
+        return False
+    
+    if not await fill_email_and_submit(tab):
+        print("Failed to submit email")
+        return False
+    
+    # Success!
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    print(f"BOOKING: {date_info['date']}日 ({date_info['full_date']})")
+    print(f"✓ BOOKING COMPLETED: {hotel[:TEXT_TRUNCATE_LENGTH]}")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
     
-    booking_date = date_info['full_date']
-    
-    try:
-        # Click the date cell
-        if not await click_date_by_attribute(tab, date_info['full_date']):
-            print("Failed to click date cell")
-            return []
-        
-        # Verify we're on service_group_select page
-        if not await verify_on_service_group_page(tab):
-            print("Failed to navigate to service_group_select page")
-            return []
-        
-        # Get all hotel names
-        all_hotel_names = await get_hotel_names_on_service_group_page(tab, skip_blueberry_hill)
-        
-        if not all_hotel_names:
-            print("No hotels found")
-            return []
-        
-        # Filter out already-booked hotels
-        already_booked = get_booked_hotels_for_date(booking_date)
-        hotel_names = [h for h in all_hotel_names if h not in already_booked]
-        
-        if not hotel_names:
-            print(f"\n⊘ All {len(all_hotel_names)} hotel(s) already booked for this date")
-            return []
-        
-        # CRITICAL: Book ONLY the FIRST available hotel
-        hotel_name = hotel_names[0]
-        print(f"\nBooking hotel 1 of {len(hotel_names)} remaining: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
-        print(f"({len(already_booked)} already booked)")
-        
-        # Click the hotel
-        if not await click_hotel_by_name(tab, hotel_name):
-            print(f"Failed to click hotel")
-            return []
-        
-        # Select service
-        if not await select_service_on_apply_page(tab):
-            print("Failed to select service")
-            return []
-        
-        # Fill booking form
-        if not await fill_booking_form_and_search(tab, date_info['full_date']):
-            print("Failed to fill booking form")
-            return []
-        
-        # Select room
-        if not await select_room_and_proceed(tab):
-            print("No rooms available or failed to select room")
-            return []
-        
-        # Agree to rules
-        if not await agree_to_rules(tab):
-            print("Failed to agree to rules")
-            return []
-        
-        # Submit email
-        if not await fill_email_and_submit(tab):
-            print("Failed to submit email")
-            return []
-        
-        # Success!
-        print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-        print(f"✓ BOOKING COMPLETED: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
-        print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
-        
-        save_booking(booking_date, hotel_name)
-        return [hotel_name]
-        
-    except Exception as e:
-        print(f"Error in booking: {e}")
-        return []
-
-
-async def navigate_to_month(tab, target_month_num):
-    """Navigate to a specific month number (0=current, 1=next, 2=next+1, etc.)."""
-    for i in range(target_month_num):
-        if not await navigate_to_next_month(tab):
-            print(f"Could not navigate to month {i+1}")
-            return False
+    save_booking(date, hotel)
     return True
 
 
-async def scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=False):
-    """Scan calendar for available dates."""
+async def process_available_day(tab, date_info, calendar_url):
+    """Process a single available day: check hotels and attempt booking.
+    
+    Returns:
+        bool: True if a booking was made, False otherwise
+    """
+    date = date_info['full_date']
+    print(f"\nProcessing date: {date} ({date_info['day_name']})")
+    
+    # Click date to see hotels
+    if not await click_date_by_attribute(tab, date):
+        print(f"Could not click date {date}")
+        return False
+    
+    if not await verify_on_service_group_page(tab):
+        print(f"Not on service group page for {date}")
+        return False
+    
+    # Get hotel names (Blueberry Hills already filtered by get_hotel_names_on_service_group_page)
+    hotels = await get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BLUEBERRY_HILL)
+    
+    if not hotels:
+        print("No hotels available")
+        return False
+    
+    # Get already booked hotels for this date
+    booked_hotels = get_booked_hotels_for_date(date)
+    
+    # Filter out already booked hotels
+    available_hotels = [h for h in hotels if h not in booked_hotels]
+    
+    if not available_hotels:
+        print(f"All hotels already booked for {date}")
+        return False
+    
+    print(f"Available hotels: {len(available_hotels)}")
+    
+    # Try to book first available hotel
+    for hotel in available_hotels:
+        if await try_book_hotel_for_date(tab, date, hotel):
+            return True
+        
+        # Booking failed, return to calendar to try next hotel or next date
+        print("Returning to calendar...")
+        await tab.go_to(calendar_url)
+        await asyncio.sleep(SLEEP_MONTH_NAV)
+        
+        if not await is_valid_calendar_page(tab):
+            print("Failed to return to calendar")
+            return False
+        
+        # Click date again to see hotels for next attempt
+        if not await click_date_by_attribute(tab, date):
+            print("Failed to navigate back to date")
+            return False
+    
+    return False
+
+
+async def scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN):
+    """Scan all months first, then process available days.
+    
+    Two-phase approach:
+    Phase 1: Scan through ALL months and collect available days
+    Phase 2: For each available day, check hotels and attempt booking
+    
+    Returns:
+        bool: True if a booking was made, False otherwise
+    """
     target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
     days_str = ", ".join(target_day_names)
     
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
     print(f"SCANNING {days_str.upper()} FOR {num_months} MONTHS")
-    if attempt_booking:
-        print("AUTO-BOOKING ENABLED")
+    print("FINDING FIRST BOOKING OPPORTUNITY")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH + "\n")
     
-    all_available = []
+    calendar_url = load_cached_url()
     
+    # PHASE 1: Scan all months and collect available days
+    print("=" * SEPARATOR_WIDTH)
+    print("PHASE 1: Scanning all months for available days")
+    print("=" * SEPARATOR_WIDTH + "\n")
+    
+    all_available_days = []
     for month_num in range(num_months):
-        print(f"Month {month_num + 1}/{num_months}")
-        print(SUBSEPARATOR_CHAR * SEPARATOR_WIDTH)
+        print(f"\nMONTH {month_num + 1}/{num_months}")
+        print("-" * SEPARATOR_WIDTH)
         
-        month_dates = await scan_month_days(tab)
-        all_available.extend(month_dates)
+        # Scan current month for available days
+        available_days = await scan_month_days(tab)
         
-        # Auto-booking if enabled
-        if attempt_booking and month_dates:
-            print(f"\nFound {len(month_dates)} available date(s)")
-            
-            # Process each date in this month
-            for date_idx, date_info in enumerate(month_dates):
-                day_name = date_info.get('day_name', 'Unknown')
-                print(f"\nAttempting to book: {date_info['date']}日 ({day_name}) [{date_idx + 1}/{len(month_dates)} in this month]")
-                
-                booked_hotels = await process_booking_for_date(tab, date_info)
-                
-                if booked_hotels:
-                    print(f"✓ Successfully booked {len(booked_hotels)} hotel(s) for {date_info['date']}日 ({day_name})")
-                else:
-                    print(f"✗ No bookings completed for {date_info['date']}日 ({day_name})")
-                
-                # Navigate back to calendar and restore month position for next date
-                if date_idx < len(month_dates) - 1:
-                    print(f"Reloading calendar and navigating to month {month_num + 1}...")
-                    cached_url = load_cached_url()
-                    if cached_url:
-                        await tab.go_to(cached_url)
-                        await asyncio.sleep(SLEEP_SHORT)
-                        
-                        # Navigate forward to the month we were on
-                        if month_num > 0:
-                            print(f"Navigating forward {month_num} month(s)...")
-                            if await navigate_to_month(tab, month_num):
-                                print(f"Successfully restored to month {month_num + 1}")
-                            else:
-                                print(f"Warning: Could not navigate to month {month_num + 1}")
-                        else:
-                            print("Already on first month")
-                        
-                        # Re-scan the month to get fresh cell references
-                        print("Re-scanning month for fresh cell references...")
-                        month_dates = await scan_month_days(tab)
-                        
-                        if not month_dates or date_idx + 1 >= len(month_dates):
-                            print("No more dates to process in this month")
-                            break
-                    else:
-                        print("Warning: No cached URL to reload")
-                        break
+        if available_days:
+            # Store days with their month number for later navigation
+            for day_info in available_days:
+                day_info['month_num'] = month_num
+                all_available_days.append(day_info)
+        else:
+            print("No available days found in this month")
         
+        # Move to next month if not last
         if month_num < num_months - 1:
-            print("Navigating to next month...\n")
+            print("\nNavigating to next month...")
             if not await navigate_to_next_month(tab):
                 print("Could not navigate to next month")
                 break
     
-    return all_available
-
-
-def print_summary(available_dates):
-    """Print summary of available dates."""
-    target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
-    days_str = ", ".join(target_day_names)
+    # PHASE 2: Process each available day
+    print(f"\n\n" + "=" * SEPARATOR_WIDTH)
+    print(f"PHASE 2: Processing {len(all_available_days)} available days")
+    print("=" * SEPARATOR_WIDTH + "\n")
     
+    if not all_available_days:
+        print("No available days found in any month")
+        return False
+    
+    for day_info in all_available_days:
+        month_num = day_info['month_num']
+        date = day_info['full_date']
+        
+        print(f"\n{'='*SEPARATOR_WIDTH}")
+        print(f"Processing: {date} ({day_info['day_name']}) - Month {month_num + 1}")
+        print('='*SEPARATOR_WIDTH)
+        
+        # Return to calendar and navigate to correct month
+        await tab.go_to(calendar_url)
+        await asyncio.sleep(SLEEP_MONTH_NAV)
+        
+        if not await is_valid_calendar_page(tab):
+            print("Failed to return to calendar")
+            continue
+        
+        # Navigate forward to the correct month
+        for i in range(month_num):
+            if not await navigate_to_next_month(tab):
+                print(f"Failed to navigate to month {month_num + 1}")
+                break
+        
+        # Try to book for this day
+        if await process_available_day(tab, day_info, calendar_url):
+            print("\n✓ Booking successful!")
+            return True
+    
+    print("\nNo booking opportunities found")
+    return False
+
+
+async def scan_calendar_and_book(calendar_url):
+    """Scan calendar and attempt one booking per iteration."""
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    print(f"SUMMARY: Available {days_str}")
-    print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    
-    if available_dates:
-        print(f"\nFound {len(available_dates)} available date(s):\n")
-        for date in available_dates:
-            day_name = date.get('day_name', 'Unknown')
-            print(f"  {date['month']} - {date['date']}日 ({day_name}) [{date['full_date']}]")
-    else:
-        print(f"\nNo available dates found for: {days_str}")
-    
-    print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH + "\n")
-
-
-async def scan_calendar_headless(calendar_url):
-    """Scan calendar in headless mode."""
-    print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    print("SCANNING CALENDAR (HEADLESS MODE)")
+    print("STARTING BOOKING SCAN")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
     
     options = create_browser_options(headless=False)
@@ -1418,11 +1399,16 @@ async def scan_calendar_headless(calendar_url):
         if not await is_valid_calendar_page(tab):
             raise Exception("Failed to load valid calendar page")
         
-        available_dates = await scan_calendar(tab, num_months=NUM_MONTHS_TO_SCAN, attempt_booking=(AUTO_BOOK and not SCAN_ONLY))
-        print_summary(available_dates)
+        # Scan and book one
+        booking_made = await scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN)
         
-        print("Scan complete")
+        if booking_made:
+            print("\n✓ Iteration complete: 1 booking made")
+        else:
+            print("\n✗ Iteration complete: No bookings made")
+        
         await asyncio.sleep(SLEEP_SHORT)
+        return booking_made
 
 
 async def scan_once():
@@ -1431,7 +1417,7 @@ async def scan_once():
     
     if cached_url:
         if await validate_cached_url(cached_url):
-            await scan_calendar_headless(cached_url)
+            await scan_calendar_and_book(cached_url)
             return True
     
     print("\nNeed to acquire new calendar URL")
@@ -1443,10 +1429,10 @@ async def scan_once():
     
     save_calendar_url(new_url)
     print("\n" + SEPARATOR_CHAR * SEPARATOR_WIDTH)
-    print("URL ACQUIRED - RESTARTING IN HEADLESS MODE")
+    print("URL ACQUIRED - STARTING SCAN")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
     await asyncio.sleep(SLEEP_SHORT)
-    await scan_calendar_headless(new_url)
+    await scan_calendar_and_book(new_url)
     return True
 
 
@@ -1458,7 +1444,7 @@ async def main():
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH)
     print("ITS CALENDAR SCANNER - CONTINUOUS MODE")
     print(f"Target Days: {days_str}")
-    print(f"Auto-booking: {'ENABLED' if AUTO_BOOK and not SCAN_ONLY else 'DISABLED'}")
+    print(f"Auto-booking: {'ENABLED' if AUTO_BOOK else 'DISABLED'}")
     print(f"Checking every {SCAN_INTERVAL_SECONDS} seconds")
     print("Press Ctrl+C to stop")
     print(SEPARATOR_CHAR * SEPARATOR_WIDTH + "\n")
