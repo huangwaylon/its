@@ -12,6 +12,7 @@ from pydoll.browser.chromium import Chrome
 
 from config import (
     SCAN_INTERVAL_SECONDS,
+    NUM_MONTHS_TO_SKIP,
     NUM_MONTHS_TO_SCAN,
     TARGET_WEEKDAYS,
     WEEKDAY_NAMES,
@@ -31,7 +32,7 @@ from calendar_scanner import scan_month_days, navigate_to_next_month
 from booking import process_available_day
 
 
-async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN):
+async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, skip_months=NUM_MONTHS_TO_SKIP):
     """Scan all months and process available days.
     
     Two-phase approach:
@@ -42,6 +43,7 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN):
         tab: Browser tab instance
         calendar_url: Calendar URL to use for navigation
         num_months: Number of months to scan
+        skip_months: Number of months to skip before scanning
         
     Returns:
         bool: True if booking made
@@ -50,9 +52,20 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN):
     days_str = ", ".join(target_day_names)
     holiday_note = " + National Holidays" if INCLUDE_HOLIDAYS else ""
     
+    skip_note = f" (skipping first {skip_months} month{'s' if skip_months != 1 else ''})" if skip_months > 0 else ""
     print("\n" + "=" * SEPARATOR_WIDTH)
-    print(f"SCANNING {days_str.upper()}{holiday_note.upper()} FOR {num_months} MONTHS")
+    print(f"SCANNING {days_str.upper()}{holiday_note.upper()} FOR {num_months} MONTHS{skip_note.upper()}")
     print("=" * SEPARATOR_WIDTH)
+    
+    # Skip initial months if configured
+    if skip_months > 0:
+        print(f"\n[SKIPPING] First {skip_months} month{'s' if skip_months != 1 else ''}")
+        print("─" * SEPARATOR_WIDTH)
+        for skip_idx in range(skip_months):
+            print(f"Skipping month {skip_idx + 1}/{skip_months}")
+            if not await navigate_to_next_month(tab):
+                print("✗ Skip navigation failed")
+                return False
     
     # PHASE 1: Scan all months
     print("\n[PHASE 1] Scanning for available dates")
@@ -67,6 +80,7 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN):
         if available_days:
             for day_info in available_days:
                 day_info['month_num'] = month_num
+                day_info['skip_months'] = skip_months
                 all_available_days.append(day_info)
         
         # Move to next month
@@ -85,6 +99,7 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN):
     
     for day_info in all_available_days:
         month_num = day_info['month_num']
+        skip_months = day_info['skip_months']
         date = day_info['full_date']
         
         print(f"\n{'='*SEPARATOR_WIDTH}")
@@ -99,10 +114,11 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN):
             print("✗ Failed to return to calendar")
             continue
         
-        # Navigate to correct month
-        for i in range(month_num):
+        # Navigate to correct month (skip + scan position)
+        total_nav_months = skip_months + month_num
+        for i in range(total_nav_months):
             if not await navigate_to_next_month(tab):
-                print(f"✗ Failed to navigate to month {month_num + 1}")
+                print(f"✗ Failed to navigate to month {total_nav_months + 1}")
                 break
         
         # Try to book
@@ -147,7 +163,7 @@ async def scan_calendar_and_book(calendar_url, validate=False):
         if validate:
             print("✓ Cached URL valid")
         
-        booking_made = await scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN)
+        booking_made = await scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, skip_months=NUM_MONTHS_TO_SKIP)
         
         if booking_made:
             print("\n✓ Iteration complete: 1 booking made")
