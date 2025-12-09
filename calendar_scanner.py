@@ -8,6 +8,7 @@ from browser import extract_script_value
 from holidays import is_exceptional_date, get_exceptional_date_reason
 from config import (
     INCLUDE_HOLIDAYS,
+    DATE_SKIP_LIST,
     TAG_TD,
     TAG_PARAGRAPH,
     TAG_INPUT,
@@ -26,6 +27,18 @@ from config import (
     DEFAULT_TIMEOUT,
     TEXT_TRUNCATE_LENGTH
 )
+
+
+def is_skipped_date(date_string):
+    """Check if date should be skipped based on skip list.
+    
+    Args:
+        date_string: Date in format 'YYYY-MM-DD'
+        
+    Returns:
+        bool: True if date should be skipped
+    """
+    return date_string in DATE_SKIP_LIST
 
 
 def is_target_weekday(date_string):
@@ -237,16 +250,20 @@ async def scan_month_days(tab):
                     icon = ""
                     status = STATUS_UNKNOWN
                 
-                print(f"  {date_text}日 ({description}): {icon} ({status})")
-                
-                if icon == ICON_AVAILABLE:
-                    available_days.append({
-                        'month': current_month,
-                        'date': date_text,
-                        'day_name': description,
-                        'full_date': full_date,
-                        'icon': icon,
-                    })
+                # Check if date should be skipped
+                if is_skipped_date(full_date):
+                    print(f"  {date_text}日 ({description}): {icon} ({status}) [SKIPPED]")
+                else:
+                    print(f"  {date_text}日 ({description}): {icon} ({status})")
+                    
+                    if icon == ICON_AVAILABLE:
+                        available_days.append({
+                            'month': current_month,
+                            'date': date_text,
+                            'day_name': description,
+                            'full_date': full_date,
+                            'icon': icon,
+                        })
             except Exception as e:
                 print(f"  ✗ Cell error: {str(e)[:TEXT_TRUNCATE_LENGTH]}")
     
