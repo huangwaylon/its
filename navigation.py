@@ -19,7 +19,6 @@ from config import (
     TEXT_CALENDAR_SEARCH,
     TEXT_NEXT_BUTTON,
     SLEEP_SHORT,
-    SLEEP_STANDARD,
     DEFAULT_TIMEOUT,
     EXTENDED_TIMEOUT,
     SCROLL_DOWN_DISTANCE,
@@ -55,31 +54,6 @@ async def is_valid_calendar_page(tab):
         return False
     except:
         return False
-
-
-async def validate_cached_url(cached_url):
-    """Validate cached URL in headless mode.
-    
-    Args:
-        cached_url: URL to validate
-        
-    Returns:
-        bool: True if valid
-    """
-    print(f"→ Validating cached URL...")
-    
-    options = create_browser_options(headless=True)
-    async with Chrome(options=options) as browser:
-        tab = await browser.start()
-        await tab.go_to(cached_url)
-        await asyncio.sleep(SLEEP_SHORT)
-        
-        if await is_valid_calendar_page(tab):
-            print("✓ Cached URL valid")
-            return True
-        else:
-            print("✗ Cached URL invalid")
-            return False
 
 
 async def navigate_to_calendar_link(tab):

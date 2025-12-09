@@ -24,7 +24,6 @@ from config import (
 from browser import create_browser_options
 from cache import load_cached_url, save_calendar_url
 from navigation import (
-    validate_cached_url,
     acquire_calendar_url_with_captcha,
     is_valid_calendar_page
 )
@@ -32,7 +31,7 @@ from calendar_scanner import scan_month_days, navigate_to_next_month
 from booking import process_available_day
 
 
-async def scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN):
+async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN):
     """Scan all months and process available days.
     
     Two-phase approach:
@@ -41,6 +40,7 @@ async def scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN):
     
     Args:
         tab: Browser tab instance
+        calendar_url: Calendar URL to use for navigation
         num_months: Number of months to scan
         
     Returns:
@@ -53,8 +53,6 @@ async def scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN):
     print("\n" + "=" * SEPARATOR_WIDTH)
     print(f"SCANNING {days_str.upper()}{holiday_note.upper()} FOR {num_months} MONTHS")
     print("=" * SEPARATOR_WIDTH)
-    
-    calendar_url = load_cached_url()
     
     # PHASE 1: Scan all months
     print("\n[PHASE 1] Scanning for available dates")
@@ -116,14 +114,17 @@ async def scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN):
     return False
 
 
-async def scan_calendar_and_book(calendar_url):
+async def scan_calendar_and_book(calendar_url, validate=False):
     """Scan calendar and attempt booking.
     
     Args:
         calendar_url: Calendar URL to scan
+        validate: Whether to validate the URL first (for cached URLs)
         
     Returns:
-        bool: True if booking made
+        tuple: (success: bool, booking_made: bool)
+               success indicates if URL was valid and scan completed
+               booking_made indicates if a booking was actually made
     """
     print("\n" + "=" * SEPARATOR_WIDTH)
     print("STARTING BOOKING SCAN")
@@ -135,10 +136,18 @@ async def scan_calendar_and_book(calendar_url):
         await tab.go_to(calendar_url)
         await asyncio.sleep(SLEEP_SHORT)
         
+        # Validate page if requested (for cached URLs)
         if not await is_valid_calendar_page(tab):
-            raise Exception("Failed to load calendar page")
+            if validate:
+                print("✗ Cached URL invalid")
+                return False, False
+            else:
+                raise Exception("Failed to load calendar page")
         
-        booking_made = await scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN)
+        if validate:
+            print("✓ Cached URL valid")
+        
+        booking_made = await scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN)
         
         if booking_made:
             print("\n✓ Iteration complete: 1 booking made")
@@ -146,7 +155,7 @@ async def scan_calendar_and_book(calendar_url):
             print("\n✗ Iteration complete: No bookings made")
         
         await asyncio.sleep(SLEEP_SHORT)
-        return booking_made
+        return True, booking_made
 
 
 async def scan_once():
@@ -157,11 +166,15 @@ async def scan_once():
     """
     cached_url = load_cached_url()
     
+    # Try cached URL first
     if cached_url:
-        if await validate_cached_url(cached_url):
-            await scan_calendar_and_book(cached_url)
+        print("→ Validating cached URL...")
+        success, booking_made = await scan_calendar_and_book(cached_url, validate=True)
+        if success:
             return True
+        # Cached URL invalid, continue to acquire new one
     
+    # Acquire new URL
     print("\n→ Acquiring new calendar URL...")
     new_url = await acquire_calendar_url_with_captcha()
     
@@ -174,8 +187,9 @@ async def scan_once():
     print("URL ACQUIRED - STARTING SCAN")
     print("=" * SEPARATOR_WIDTH)
     await asyncio.sleep(SLEEP_SHORT)
-    await scan_calendar_and_book(new_url)
-    return True
+    
+    success, booking_made = await scan_calendar_and_book(new_url, validate=False)
+    return success
 
 
 async def main():
