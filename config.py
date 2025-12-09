@@ -13,7 +13,7 @@ TARGET_EMAIL = "wwaylonhuang@gmail.com"
 NUM_GUESTS = 2
 
 # Scanning configuration
-SCAN_INTERVAL_SECONDS = 10
+SCAN_INTERVAL_SECONDS = 1
 NUM_MONTHS_TO_SCAN = 3
 
 # Target weekdays (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
@@ -67,7 +67,7 @@ EXTENDED_TIMEOUT = 5
 # Sleep durations (seconds)
 SLEEP_SHORT = 0.2
 SLEEP_STANDARD = 0.5
-SLEEP_MONTH_NAV = 3.0
+SLEEP_MONTH_NAV = 2.0
 
 # HTML selectors and attributes
 TAG_INPUT = "input"
