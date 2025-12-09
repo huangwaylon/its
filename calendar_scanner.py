@@ -5,7 +5,9 @@ import asyncio
 import re
 from datetime import datetime
 from browser import extract_script_value
+from holidays import is_exceptional_date, get_exceptional_date_reason
 from config import (
+    INCLUDE_HOLIDAYS,
     TAG_TD,
     TAG_PARAGRAPH,
     TAG_INPUT,
@@ -44,6 +46,41 @@ def is_target_weekday(date_string):
         return False, None
     except:
         return False, None
+
+
+def is_target_date(date_string):
+    """Check if date matches target criteria (weekdays or exceptional dates).
+    
+    Combines regular weekday checking with exceptional holiday dates.
+    Exceptional dates are pre-computed and include:
+    - Friday national holidays (for Fri-Sat-Sun breaks)
+    - Sundays before Monday holidays (for Sun-Mon breaks)
+    
+    Args:
+        date_string: Date in format 'YYYY-MM-DD'
+        
+    Returns:
+        tuple: (is_match, description) or (False, None)
+        description includes the day name and optional holiday info
+    """
+    # Check regular weekday match
+    is_weekday_match, day_name = is_target_weekday(date_string)
+    if is_weekday_match:
+        return True, day_name
+    
+    # Check exceptional dates if enabled
+    if INCLUDE_HOLIDAYS and is_exceptional_date(date_string):
+        try:
+            date_obj = datetime.strptime(date_string, '%Y-%m-%d')
+            day_name = WEEKDAY_NAMES[date_obj.weekday()]
+            holiday_name = get_exceptional_date_reason(date_string)
+            # Create descriptive label
+            description = f"{day_name} (Holiday: {holiday_name})"
+            return True, description
+        except:
+            pass
+    
+    return False, None
 
 
 async def navigate_to_next_month(tab):
@@ -157,19 +194,20 @@ async def scan_month_days(tab):
             print("  No valid date cells")
             return available_days
         
-        # Filter to target weekdays
+        # Filter to target dates (weekdays + holidays)
         target_cells = []
         for cell, date_str in date_cells:
-            is_match, day_name = is_target_weekday(date_str)
+            is_match, description = is_target_date(date_str)
             if is_match:
-                target_cells.append((cell, date_str, day_name))
+                target_cells.append((cell, date_str, description))
         
         target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
         days_str = ", ".join(target_day_names)
-        print(f"  Found {len(target_cells)} {days_str} date(s)")
+        holiday_note = " + holidays" if INCLUDE_HOLIDAYS else ""
+        print(f"  Found {len(target_cells)} target date(s) ({days_str}{holiday_note})")
         
         # Process each target cell
-        for cell, full_date, day_name in target_cells:
+        for cell, full_date, description in target_cells:
             try:
                 # Get date text
                 date_text = ""
@@ -199,13 +237,13 @@ async def scan_month_days(tab):
                     icon = ""
                     status = STATUS_UNKNOWN
                 
-                print(f"  {date_text}日 ({day_name}): {icon} ({status})")
+                print(f"  {date_text}日 ({description}): {icon} ({status})")
                 
                 if icon == ICON_AVAILABLE:
                     available_days.append({
                         'month': current_month,
                         'date': date_text,
-                        'day_name': day_name,
+                        'day_name': description,
                         'full_date': full_date,
                         'icon': icon,
                     })

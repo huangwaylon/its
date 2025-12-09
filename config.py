@@ -19,6 +19,9 @@ NUM_MONTHS_TO_SCAN = 3
 # Target weekdays (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
 TARGET_WEEKDAYS = [5]  # Sat
 
+# Holiday booking configuration
+INCLUDE_HOLIDAYS = True  # Check for national holidays (Fridays and Sundays before Mondays)
+
 # Weekday names mapping
 WEEKDAY_NAMES = {
     0: "Monday",

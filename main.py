@@ -16,6 +16,7 @@ from config import (
     TARGET_WEEKDAYS,
     WEEKDAY_NAMES,
     AUTO_BOOK,
+    INCLUDE_HOLIDAYS,
     SEPARATOR_WIDTH,
     SLEEP_SHORT,
     SLEEP_MONTH_NAV
@@ -47,9 +48,10 @@ async def scan_and_book_one(tab, num_months=NUM_MONTHS_TO_SCAN):
     """
     target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
     days_str = ", ".join(target_day_names)
+    holiday_note = " + National Holidays" if INCLUDE_HOLIDAYS else ""
     
     print("\n" + "=" * SEPARATOR_WIDTH)
-    print(f"SCANNING {days_str.upper()} FOR {num_months} MONTHS")
+    print(f"SCANNING {days_str.upper()}{holiday_note.upper()} FOR {num_months} MONTHS")
     print("=" * SEPARATOR_WIDTH)
     
     calendar_url = load_cached_url()
@@ -180,11 +182,12 @@ async def main():
     """Main execution flow - continuous scanning mode."""
     target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
     days_str = ", ".join(target_day_names)
+    holiday_note = " + National Holidays" if INCLUDE_HOLIDAYS else ""
     
     print("=" * SEPARATOR_WIDTH)
     print("ITS CALENDAR SCANNER")
     print("=" * SEPARATOR_WIDTH)
-    print(f"Target Days: {days_str}")
+    print(f"Target Days: {days_str}{holiday_note}")
     print(f"Auto-booking: {'ENABLED' if AUTO_BOOK else 'DISABLED'}")
     print(f"Scan interval: {SCAN_INTERVAL_SECONDS}s")
     print("Press Ctrl+C to stop")
