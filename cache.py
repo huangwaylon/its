@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """Cache and persistence utilities for ITS Calendar Scanner."""
 
+import csv
 import json
 import os
-from config import CALENDAR_URL_CACHE, BOOKINGS_FILE
+from datetime import datetime
+from config import CALENDAR_URL_CACHE, CALENDAR_URL_HISTORY, BOOKINGS_FILE
 
 
 def load_cached_url():
@@ -25,17 +27,49 @@ def load_cached_url():
 
 
 def save_calendar_url(url):
-    """Save the calendar URL to cache file.
+    """Save the calendar URL to cache file and log to history CSV.
     
     Args:
         url: URL to cache
     """
     try:
+        # Check if URL is different from cached URL
+        cached_url = load_cached_url()
+        is_new_url = cached_url != url
+        
+        # Save to cache file
         with open(CALENDAR_URL_CACHE, 'w') as f:
             f.write(url)
         print("✓ Calendar URL cached")
+        
+        # Append to CSV history only if URL is new
+        if is_new_url:
+            _append_url_to_history(url)
+            
     except Exception as e:
         print(f"✗ Cache write error: {e}")
+
+
+def _append_url_to_history(url):
+    """Append URL to history CSV file with timestamp.
+    
+    Args:
+        url: URL to log
+    """
+    try:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        file_exists = os.path.exists(CALENDAR_URL_HISTORY)
+        
+        with open(CALENDAR_URL_HISTORY, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            # Write header if file is new
+            if not file_exists:
+                writer.writerow(['url', 'timestamp'])
+            writer.writerow([url, timestamp])
+        
+        print(f"✓ URL logged to history: {timestamp}")
+    except Exception as e:
+        print(f"✗ History log error: {e}")
 
 
 def load_bookings():

@@ -3,6 +3,7 @@
 
 # File paths
 CALENDAR_URL_CACHE = "calendar_url_cache.txt"
+CALENDAR_URL_HISTORY = "calendar_url_history.csv"
 BOOKINGS_FILE = "bookings.json"
 
 # URLs
