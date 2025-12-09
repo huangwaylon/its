@@ -14,7 +14,7 @@ TARGET_EMAIL = "wwaylonhuang@gmail.com"
 NUM_GUESTS = 2
 
 # Scanning configuration
-SCAN_INTERVAL_SECONDS = 1
+SCAN_INTERVAL_SECONDS = 10
 NUM_MONTHS_TO_SCAN = 3
 
 # Target weekdays (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
