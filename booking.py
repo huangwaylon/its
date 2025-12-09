@@ -11,8 +11,7 @@ from config import (
     TAG_TD,
     NUM_GUESTS,
     TARGET_EMAIL,
-    SKIP_BLUEBERRY_HILL,
-    BLUEBERRY_HILL_NAME,
+    SKIP_HOTELS,
     ATTR_DATA_JOIN_TIME,
     INPUT_NAME_STAY_PERSONS,
     INPUT_NAME_EMAIL,
@@ -108,15 +107,14 @@ async def verify_on_service_group_page(tab):
         return False
 
 
-async def get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BLUEBERRY_HILL):
+async def get_hotel_names_on_service_group_page(tab):
     """Collect hotel names on service_group_select page.
     
     Args:
         tab: Browser tab instance
-        skip_blueberry_hill: Whether to skip Blueberry Hill
         
     Returns:
-        list: Hotel names
+        list: Hotel names (excluding hotels in SKIP_HOTELS list)
     """
     print(f"→ Collecting hotels...")
     
@@ -148,7 +146,8 @@ async def get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BL
                         continue
                     
                     if link_text and len(link_text.strip()) > MIN_LINK_TEXT_LENGTH and PROTOCOL_JAVASCRIPT in href:
-                        if skip_blueberry_hill and BLUEBERRY_HILL_NAME in link_text:
+                        # Skip hotels in the SKIP_HOTELS list
+                        if any(skip_name in link_text for skip_name in SKIP_HOTELS):
                             print(f"  ⊗ Skipped: {link_text[:TEXT_TRUNCATE_LENGTH]}")
                             continue
                         
@@ -590,7 +589,7 @@ async def process_available_day(tab, date_info, calendar_url):
         print(f"✗ Not on service group page")
         return False
     
-    hotels = await get_hotel_names_on_service_group_page(tab, skip_blueberry_hill=SKIP_BLUEBERRY_HILL)
+    hotels = await get_hotel_names_on_service_group_page(tab)
     
     if not hotels:
         print("✗ No hotels available")

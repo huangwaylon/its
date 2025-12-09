@@ -37,8 +37,9 @@ WEEKDAY_NAMES = {
 AUTO_BOOK = True
 
 # Hotel filtering
-SKIP_BLUEBERRY_HILL = True
-BLUEBERRY_HILL_NAME = "ブルーベリーヒル勝浦"
+SKIP_HOTELS = [
+    "ブルーベリーヒル勝浦"
+]
 
 # Chrome browser arguments
 CHROME_ARGUMENTS = [
