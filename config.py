@@ -63,7 +63,7 @@ EXTENDED_TIMEOUT = 5
 # Sleep durations (seconds)
 SLEEP_SHORT = 0.2
 SLEEP_STANDARD = 0.5
-SLEEP_MONTH_NAV = 1.0
+SLEEP_MONTH_NAV = 3.0
 
 # HTML selectors and attributes
 TAG_INPUT = "input"
