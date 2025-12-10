@@ -53,29 +53,13 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, sk
         
     Returns:
         bool: True if booking made
-    """
-    target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
-    days_str = ", ".join(target_day_names)
-    holiday_note = " + National Holidays" if INCLUDE_HOLIDAYS else ""
-    
-    skip_note = f" (skip: {skip_months})" if skip_months > 0 else ""
-    print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
-    print(f"SCAN: {days_str.upper()}{holiday_note.upper()} - {num_months} months{skip_note}")
-    print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
-    
+    """    
     # Skip initial months if configured
-    if skip_months > 0:
-        print(f"\n[SKIP] {skip_months} month{'s' if skip_months != 1 else ''}")
-        print(f"{LOG_SEPARATOR * SEPARATOR_WIDTH}")
-        for skip_idx in range(skip_months):
-            print(f"{LOG_ARROW} Month {skip_idx + 1}/{skip_months}")
-            if not await navigate_to_next_month(tab):
-                print(f"{LOG_ERROR} Skip navigation failed")
-                return False
-    
-    # PHASE 1: Scan all months
-    print(f"\n[PHASE 1] Scanning")
-    print(f"{LOG_SEPARATOR * SEPARATOR_WIDTH}")
+    for skip_idx in range(skip_months):
+        print(f"{LOG_ARROW} Skip month {skip_idx + 1}/{skip_months}")
+        if not await navigate_to_next_month(tab):
+            print(f"{LOG_ERROR} Skip navigation failed")
+            return False
     
     all_available_days = []
     for month_num in range(num_months):
@@ -94,10 +78,6 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, sk
             if not await navigate_to_next_month(tab):
                 print(f"{LOG_ERROR} Navigation failed")
                 break
-    
-    # PHASE 2: Process available days
-    print(f"\n[PHASE 2] Processing {len(all_available_days)} dates")
-    print(f"{LOG_SEPARATOR * SEPARATOR_WIDTH}")
     
     if not all_available_days:
         print(f"{LOG_ERROR} No available dates")
