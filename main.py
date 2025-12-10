@@ -193,7 +193,7 @@ async def main():
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
-            print(f"ITERATION #{iteration} | {timestamp}")
+            print(f"ITERATION {timestamp}")
             print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
             
             try:
