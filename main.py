@@ -20,7 +20,13 @@ from config import (
     INCLUDE_HOLIDAYS,
     SEPARATOR_WIDTH,
     SLEEP_SHORT,
-    SLEEP_MONTH_NAV
+    SLEEP_MONTH_NAV,
+    LOG_ARROW,
+    LOG_SUCCESS,
+    LOG_ERROR,
+    LOG_WARNING,
+    LOG_SEPARATOR,
+    LOG_EQUALS
 )
 from browser import create_browser_options
 from cache import load_cached_url, save_calendar_url
@@ -52,28 +58,28 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, sk
     days_str = ", ".join(target_day_names)
     holiday_note = " + National Holidays" if INCLUDE_HOLIDAYS else ""
     
-    skip_note = f" (skipping first {skip_months} month{'s' if skip_months != 1 else ''})" if skip_months > 0 else ""
-    print("\n" + "=" * SEPARATOR_WIDTH)
-    print(f"SCANNING {days_str.upper()}{holiday_note.upper()} FOR {num_months} MONTHS{skip_note.upper()}")
-    print("=" * SEPARATOR_WIDTH)
+    skip_note = f" (skip: {skip_months})" if skip_months > 0 else ""
+    print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
+    print(f"SCAN: {days_str.upper()}{holiday_note.upper()} - {num_months} months{skip_note}")
+    print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
     
     # Skip initial months if configured
     if skip_months > 0:
-        print(f"\n[SKIPPING] First {skip_months} month{'s' if skip_months != 1 else ''}")
-        print("─" * SEPARATOR_WIDTH)
+        print(f"\n[SKIP] {skip_months} month{'s' if skip_months != 1 else ''}")
+        print(f"{LOG_SEPARATOR * SEPARATOR_WIDTH}")
         for skip_idx in range(skip_months):
-            print(f"Skipping month {skip_idx + 1}/{skip_months}")
+            print(f"{LOG_ARROW} Month {skip_idx + 1}/{skip_months}")
             if not await navigate_to_next_month(tab):
-                print("✗ Skip navigation failed")
+                print(f"{LOG_ERROR} Skip navigation failed")
                 return False
     
     # PHASE 1: Scan all months
-    print("\n[PHASE 1] Scanning for available dates")
-    print("─" * SEPARATOR_WIDTH)
+    print(f"\n[PHASE 1] Scanning")
+    print(f"{LOG_SEPARATOR * SEPARATOR_WIDTH}")
     
     all_available_days = []
     for month_num in range(num_months):
-        print(f"\nMonth {month_num + 1}/{num_months}")
+        print(f"\n{LOG_ARROW} Month {month_num + 1}/{num_months}")
         
         available_days = await scan_month_days(tab)
         
@@ -86,15 +92,15 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, sk
         # Move to next month
         if month_num < num_months - 1:
             if not await navigate_to_next_month(tab):
-                print("✗ Navigation failed")
+                print(f"{LOG_ERROR} Navigation failed")
                 break
     
     # PHASE 2: Process available days
-    print(f"\n[PHASE 2] Processing {len(all_available_days)} available dates")
-    print("─" * SEPARATOR_WIDTH)
+    print(f"\n[PHASE 2] Processing {len(all_available_days)} dates")
+    print(f"{LOG_SEPARATOR * SEPARATOR_WIDTH}")
     
     if not all_available_days:
-        print("✗ No available dates found")
+        print(f"{LOG_ERROR} No available dates")
         return False
     
     for day_info in all_available_days:
@@ -102,31 +108,31 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, sk
         skip_months = day_info['skip_months']
         date = day_info['full_date']
         
-        print(f"\n{'='*SEPARATOR_WIDTH}")
-        print(f"Date: {date} ({day_info['day_name']}) - Month {month_num + 1}")
-        print('='*SEPARATOR_WIDTH)
+        print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
+        print(f"{date} ({day_info['day_name']}) - Month {month_num + 1}")
+        print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
         
         # Return to calendar and navigate to correct month
         await tab.go_to(calendar_url)
         await asyncio.sleep(SLEEP_MONTH_NAV)
         
         if not await is_valid_calendar_page(tab):
-            print("✗ Failed to return to calendar")
+            print(f"{LOG_ERROR} Failed to return to calendar")
             continue
         
         # Navigate to correct month (skip + scan position)
         total_nav_months = skip_months + month_num
         for i in range(total_nav_months):
             if not await navigate_to_next_month(tab):
-                print(f"✗ Failed to navigate to month {total_nav_months + 1}")
+                print(f"{LOG_ERROR} Failed to navigate to month {total_nav_months + 1}")
                 break
         
         # Try to book
         if await process_available_day(tab, day_info, calendar_url):
-            print("\n✓✓✓ BOOKING SUCCESSFUL ✓✓✓")
+            print(f"\n{LOG_SUCCESS * 3} BOOKING SUCCESSFUL {LOG_SUCCESS * 3}")
             return True
     
-    print("\n✗ No booking opportunities found")
+    print(f"\n{LOG_ERROR} No booking opportunities")
     return False
 
 
@@ -141,11 +147,7 @@ async def scan_calendar_and_book(calendar_url, validate=False):
         tuple: (success: bool, booking_made: bool)
                success indicates if URL was valid and scan completed
                booking_made indicates if a booking was actually made
-    """
-    print("\n" + "=" * SEPARATOR_WIDTH)
-    print("STARTING BOOKING SCAN")
-    print("=" * SEPARATOR_WIDTH)
-    
+    """    
     options = create_browser_options(headless=True)
     async with Chrome(options=options) as browser:
         tab = await browser.start()
@@ -155,20 +157,16 @@ async def scan_calendar_and_book(calendar_url, validate=False):
         # Validate page if requested (for cached URLs)
         if not await is_valid_calendar_page(tab):
             if validate:
-                print("✗ Cached URL invalid")
+                print(f"{LOG_ERROR} Cached URL invalid")
                 return False, False
-            else:
-                raise Exception("Failed to load calendar page")
+            raise Exception("Failed to load calendar page")
         
         if validate:
-            print("✓ Cached URL valid")
+            print(f"{LOG_SUCCESS} Cached URL valid")
         
         booking_made = await scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, skip_months=NUM_MONTHS_TO_SKIP)
         
-        if booking_made:
-            print("\n✓ Iteration complete: 1 booking made")
-        else:
-            print("\n✗ Iteration complete: No bookings made")
+        print(f"\n{LOG_SUCCESS if booking_made else LOG_ERROR} Iteration: {'1 booking' if booking_made else 'No bookings'}")
         
         await asyncio.sleep(SLEEP_SHORT)
         return True, booking_made
@@ -184,24 +182,22 @@ async def scan_once():
     
     # Try cached URL first
     if cached_url:
-        print("→ Validating cached URL...")
+        print(f"{LOG_ARROW} Validating cached URL...")
         success, booking_made = await scan_calendar_and_book(cached_url, validate=True)
         if success:
             return True
-        # Cached URL invalid, continue to acquire new one
     
-    # Acquire new URL
-    print("\n→ Acquiring new calendar URL...")
+    print(f"\n{LOG_ARROW} Acquiring new calendar URL...")
     new_url = await acquire_calendar_url_with_captcha()
     
     if not new_url:
-        print("✗ Failed to acquire calendar URL")
+        print(f"{LOG_ERROR} Failed to acquire URL")
         return False
     
     save_calendar_url(new_url)
-    print("\n" + "=" * SEPARATOR_WIDTH)
-    print("URL ACQUIRED - STARTING SCAN")
-    print("=" * SEPARATOR_WIDTH)
+    print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
+    print("URL ACQUIRED - SCAN START")
+    print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
     await asyncio.sleep(SLEEP_SHORT)
     
     success, booking_made = await scan_calendar_and_book(new_url, validate=False)
@@ -209,44 +205,29 @@ async def scan_once():
 
 
 async def main():
-    """Main execution flow - continuous scanning mode."""
-    target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
-    days_str = ", ".join(target_day_names)
-    holiday_note = " + National Holidays" if INCLUDE_HOLIDAYS else ""
-    
-    print("=" * SEPARATOR_WIDTH)
-    print("ITS CALENDAR SCANNER")
-    print("=" * SEPARATOR_WIDTH)
-    print(f"Target Days: {days_str}{holiday_note}")
-    print(f"Auto-booking: {'ENABLED' if AUTO_BOOK else 'DISABLED'}")
-    print(f"Scan interval: {SCAN_INTERVAL_SECONDS}s")
-    print("Press Ctrl+C to stop")
-    print("=" * SEPARATOR_WIDTH + "\n")
-    
+    """Main execution flow - continuous scanning mode."""    
     iteration = 0
-    
     try:
         while True:
             iteration += 1
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            print("\n" + "=" * SEPARATOR_WIDTH)
-            print(f"ITERATION #{iteration} - {timestamp}")
-            print("=" * SEPARATOR_WIDTH)
+            print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
+            print(f"ITERATION #{iteration} | {timestamp}")
+            print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
             
             try:
                 await scan_once()
             except Exception as e:
-                print(f"\n✗ Scan error: {e}")
+                print(f"\n{LOG_ERROR} Scan error: {e}")
             
-            print(f"\n[{timestamp}] Waiting {SCAN_INTERVAL_SECONDS}s...")
+            print(f"\n{LOG_ARROW} Wait {SCAN_INTERVAL_SECONDS}s | {timestamp}")
             await asyncio.sleep(SCAN_INTERVAL_SECONDS)
             
     except KeyboardInterrupt:
-        print("\n\n" + "=" * SEPARATOR_WIDTH)
-        print("SCANNER STOPPED BY USER")
-        print(f"Total iterations: {iteration}")
-        print("=" * SEPARATOR_WIDTH)
+        print(f"\n\n{LOG_EQUALS * SEPARATOR_WIDTH}")
+        print(f"STOPPED | Iterations: {iteration}")
+        print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
 
 
 if __name__ == "__main__":

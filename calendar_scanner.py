@@ -25,7 +25,12 @@ from config import (
     SLEEP_MONTH_NAV,
     SLEEP_SHORT,
     DEFAULT_TIMEOUT,
-    TEXT_TRUNCATE_LENGTH
+    TEXT_TRUNCATE_LENGTH,
+    MONTH_NAV_POLL_ATTEMPTS,
+    MONTH_NAV_POLL_INTERVAL,
+    LOG_ARROW,
+    LOG_ERROR,
+    LOG_WARNING
 )
 
 
@@ -96,70 +101,118 @@ def is_target_date(date_string):
     return False, None
 
 
-async def navigate_to_next_month(tab):
-    """Navigate to next month in calendar.
+async def _click_next_month_button(tab):
+    """Attempt to click next month button using multiple strategies.
     
     Args:
         tab: Browser tab instance
         
     Returns:
-        bool: True if successful
+        bool: True if click succeeded
     """
+    # Strategy 1: Find by ID
+    try:
+        next_button = await tab.find(id=ID_NEXT_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+        if next_button:
+            await next_button.click()
+            return True
+    except:
+        pass
+    
+    # Strategy 2: Find input with next month text
+    try:
+        inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+        if inputs:
+            for input_elem in inputs:
+                try:
+                    value = await input_elem.get_property("value")
+                    if value and TEXT_NEXT_MONTH in value:
+                        await input_elem.click()
+                        return True
+                except:
+                    pass
+    except:
+        pass
+    
+    return False
+
+
+async def verify_month_changed(tab, previous_month, max_attempts=MONTH_NAV_POLL_ATTEMPTS, poll_interval=MONTH_NAV_POLL_INTERVAL):
+    """Poll for month change verification with retries.
+    
+    Args:
+        tab: Browser tab instance
+        previous_month: Previous month text to compare
+        max_attempts: Number of polling attempts
+        poll_interval: Time between polls in seconds
+        
+    Returns:
+        tuple: (success: bool, new_month: str|None)
+    """
+    for attempt in range(max_attempts):
+        try:
+            month_element = await tab.find(class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+            if month_element:
+                text_result = await month_element.execute_script("return this.textContent")
+                new_month = extract_script_value(text_result)
+                
+                if new_month and new_month != previous_month:
+                    return True, new_month
+        except:
+            pass
+        
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(poll_interval)
+    
+    return False, None
+
+
+async def navigate_to_next_month(tab):
+    """Navigate to next month with polling verification for page load.
+    
+    Strategy:
+    1. Get current month
+    2. Click next button (try multiple methods)
+    3. Initial wait (SLEEP_MONTH_NAV = 0.5s)
+    4. Poll for month change (up to 5 attempts × 0.3s = 1.5s max additional wait)
+    
+    Args:
+        tab: Browser tab instance
+        
+    Returns:
+        bool: True if successful navigation
+    """
+    # Get current month
     current_month = None
     try:
         month_element = await tab.find(class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
         if month_element:
             text_result = await month_element.execute_script("return this.textContent")
             current_month = extract_script_value(text_result)
-    except:
-        pass
+    except Exception as e:
+        print(f"{LOG_WARNING} Could not get current month: {str(e)[:50]}")
     
-    clicked = False
-    try:
-        next_button = await tab.find(id=ID_NEXT_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
-        if next_button:
-            await next_button.click()
-            clicked = True
-    except:
-        pass
+    if not current_month:
+        print(f"{LOG_WARNING} No current month, attempting navigation")
+    
+    # Click next button
+    clicked = await _click_next_month_button(tab)
     
     if not clicked:
-        try:
-            inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
-            if inputs:
-                for input_elem in inputs:
-                    try:
-                        value = await input_elem.get_property("value")
-                        if value and TEXT_NEXT_MONTH in value:
-                            await input_elem.click()
-                            clicked = True
-                            break
-                    except:
-                        pass
-        except:
-            pass
-    
-    if not clicked:
+        print(f"{LOG_ERROR} Click failed - button not found")
         return False
     
+    # Initial wait for page to start loading
     await asyncio.sleep(SLEEP_MONTH_NAV)
     
-    # Verify month changed
-    if current_month:
-        try:
-            month_element = await tab.find(class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False)
-            if month_element:
-                text_result = await month_element.execute_script("return this.textContent")
-                new_month = extract_script_value(text_result)
-                if new_month != current_month:
-                    return True
-                else:
-                    print(f"⚠ Month unchanged: {new_month}")
-                    return False
-        except:
-            pass
+    # Poll for month change verification
+    success, new_month = await verify_month_changed(tab, current_month)
     
-    return True
+    if success:
+        return True
+    
+    print(f"{LOG_ERROR} Month unchanged after {MONTH_NAV_POLL_ATTEMPTS} polls")
+    return False
 
 
 async def scan_month_days(tab):
@@ -181,7 +234,7 @@ async def scan_month_days(tab):
     except Exception as e:
         current_month = STATUS_UNKNOWN
     
-    print(f"→ Scanning: {current_month}")
+    print(f"{LOG_ARROW} Scanning: {current_month}")
     
     available_days = []
     
@@ -217,7 +270,6 @@ async def scan_month_days(tab):
         target_day_names = [WEEKDAY_NAMES[wd] for wd in TARGET_WEEKDAYS]
         days_str = ", ".join(target_day_names)
         holiday_note = " + holidays" if INCLUDE_HOLIDAYS else ""
-        print(f"  Found {len(target_cells)} target date(s) ({days_str}{holiday_note})")
         
         # Process each target cell
         for cell, full_date, description in target_cells:
@@ -265,9 +317,9 @@ async def scan_month_days(tab):
                             'icon': icon,
                         })
             except Exception as e:
-                print(f"  ✗ Cell error: {str(e)[:TEXT_TRUNCATE_LENGTH]}")
+                print(f"  {LOG_ERROR} Cell: {str(e)[:TEXT_TRUNCATE_LENGTH]}")
     
     except Exception as e:
-        print(f"✗ Scan error: {e}")
+        print(f"{LOG_ERROR} Scan: {e}")
     
     return available_days

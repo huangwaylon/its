@@ -5,7 +5,14 @@ import csv
 import json
 import os
 from datetime import datetime
-from config import CALENDAR_URL_CACHE, CALENDAR_URL_HISTORY, BOOKINGS_FILE
+from config import (
+    CALENDAR_URL_CACHE,
+    CALENDAR_URL_HISTORY,
+    BOOKINGS_FILE,
+    LOG_SUCCESS,
+    LOG_ERROR,
+    LOG_WARNING
+)
 
 
 def load_cached_url():
@@ -22,7 +29,7 @@ def load_cached_url():
             url = f.read().strip()
             return url if url else None
     except Exception as e:
-        print(f"✗ Cache read error: {e}")
+        print(f"{LOG_ERROR} Cache read error: {e}")
         return None
 
 
@@ -40,14 +47,14 @@ def save_calendar_url(url):
         # Save to cache file
         with open(CALENDAR_URL_CACHE, 'w') as f:
             f.write(url)
-        print("✓ Calendar URL cached")
+        print(f"{LOG_SUCCESS} Calendar URL cached")
         
         # Append to CSV history only if URL is new
         if is_new_url:
             _append_url_to_history(url)
             
     except Exception as e:
-        print(f"✗ Cache write error: {e}")
+        print(f"{LOG_ERROR} Cache write error: {e}")
 
 
 def _append_url_to_history(url):
@@ -67,9 +74,9 @@ def _append_url_to_history(url):
                 writer.writerow(['url', 'timestamp'])
             writer.writerow([url, timestamp])
         
-        print(f"✓ URL logged to history: {timestamp}")
+        print(f"{LOG_SUCCESS} URL logged: {timestamp}")
     except Exception as e:
-        print(f"✗ History log error: {e}")
+        print(f"{LOG_ERROR} History log error: {e}")
 
 
 def load_bookings():
@@ -88,7 +95,7 @@ def load_bookings():
                 return {}
             return json.loads(content)
     except Exception as e:
-        print(f"✗ Bookings load error: {e}")
+        print(f"{LOG_ERROR} Bookings load error: {e}")
         return {}
 
 
@@ -111,25 +118,11 @@ def save_booking(date, hotel_name):
             with open(BOOKINGS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(bookings, f, ensure_ascii=False, indent=2)
             
-            print(f"✓ Booking recorded: {date} - {hotel_name}")
+            print(f"{LOG_SUCCESS} Booking recorded: {date} - {hotel_name}")
         else:
-            print(f"⚠ Already recorded: {date} - {hotel_name}")
+            print(f"{LOG_WARNING} Already recorded: {date} - {hotel_name}")
     except Exception as e:
-        print(f"✗ Booking save error: {e}")
-
-
-def is_already_booked(date, hotel_name):
-    """Check if date/hotel is already booked.
-    
-    Args:
-        date: Date string (YYYY-MM-DD)
-        hotel_name: Hotel name
-        
-    Returns:
-        bool: True if already booked
-    """
-    bookings = load_bookings()
-    return date in bookings and hotel_name in bookings[date]
+        print(f"{LOG_ERROR} Booking save error: {e}")
 
 
 def get_booked_hotels_for_date(date):

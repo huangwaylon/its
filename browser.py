@@ -2,10 +2,7 @@
 """Browser utilities and helpers for ITS Calendar Scanner."""
 
 from pydoll.browser.options import ChromiumOptions
-from config import (
-    CHROME_ARGUMENTS,
-    BROWSER_START_TIMEOUT
-)
+from config import CHROME_ARGUMENTS, BROWSER_START_TIMEOUT, LOG_ARROW
 
 
 def extract_script_value(result):
@@ -38,12 +35,8 @@ def create_browser_options(headless=False):
     """
     options = ChromiumOptions()
     
-    if headless:
-        options.headless = True
-        print("→ Browser mode: Headless")
-    else:
-        print("→ Browser mode: Visible")
-    
+    options.headless = headless
+    mode = "Headless" if headless else "Visible"    
     for argument in CHROME_ARGUMENTS:
         options.add_argument(argument)
     

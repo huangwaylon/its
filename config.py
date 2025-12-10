@@ -14,7 +14,7 @@ TARGET_EMAIL = "wwaylonhuang@gmail.com"
 NUM_GUESTS = 2
 
 # Scanning configuration
-SCAN_INTERVAL_SECONDS = 10
+SCAN_INTERVAL_SECONDS = 5
 NUM_MONTHS_TO_SKIP = 1  # Number of months to skip from current month before scanning
 NUM_MONTHS_TO_SCAN = 1
 
@@ -33,11 +33,6 @@ DATE_SKIP_LIST = [
 ]
 
 # Exceptional dates to book (creates extended weekend breaks)
-# These are manually curated dates based on Japanese national holidays
-# Booking Strategy:
-# - Friday holidays → Book the Friday (creates Fri-Sat-Sun break)
-# - Monday holidays → Book the Sunday before (creates Sun-Mon break)
-# - Tuesday holidays → Book the Monday before (creates Mon-Tue break, if Mon is not a holiday)
 EXCEPTIONAL_DATES = {
     '2026-01-02': 'Apple Holiday Shutdown',
     '2026-01-11': 'Coming of Age Day',
@@ -99,7 +94,11 @@ EXTENDED_TIMEOUT = 5
 # Sleep durations (seconds)
 SLEEP_SHORT = 0.2
 SLEEP_STANDARD = 0.5
-SLEEP_MONTH_NAV = 2.0
+SLEEP_MONTH_NAV = 0.5  # Reduced from 2.0s, with polling for page load
+
+# Month navigation polling configuration
+MONTH_NAV_POLL_ATTEMPTS = 5         # Verification polling attempts (5 × 0.3s = 1.5s max)
+MONTH_NAV_POLL_INTERVAL = 0.3       # Time between polls
 
 # HTML selectors and attributes
 TAG_INPUT = "input"
@@ -162,3 +161,12 @@ TEXT_TRUNCATE_LENGTH = 50
 MIN_LINK_TEXT_LENGTH = 3
 SCROLL_DOWN_DISTANCE = 100
 SCROLL_UP_DISTANCE = 50
+
+# Logging symbols
+LOG_ARROW = "→"
+LOG_SUCCESS = "✓"
+LOG_ERROR = "✗"
+LOG_WARNING = "⚠"
+LOG_SKIP = "⊗"
+LOG_SEPARATOR = "─"
+LOG_EQUALS = "="

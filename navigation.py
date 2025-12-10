@@ -23,7 +23,12 @@ from config import (
     EXTENDED_TIMEOUT,
     SCROLL_DOWN_DISTANCE,
     SCROLL_UP_DISTANCE,
-    SEPARATOR_WIDTH
+    SEPARATOR_WIDTH,
+    LOG_ARROW,
+    LOG_SUCCESS,
+    LOG_ERROR,
+    LOG_WARNING,
+    LOG_EQUALS
 )
 
 
@@ -62,11 +67,11 @@ async def navigate_to_calendar_link(tab):
     Args:
         tab: Browser tab instance
     """
-    print(f"→ Navigating to {MAIN_URL}")
+    print(f"{LOG_ARROW} Navigating to {MAIN_URL}")
     await tab.go_to(MAIN_URL)
     await asyncio.sleep(SLEEP_SHORT)
     
-    print("→ Looking for calendar link...")
+    print(f"{LOG_ARROW} Looking for calendar link...")
     
     calendar_link = None
     
@@ -93,7 +98,7 @@ async def navigate_to_calendar_link(tab):
     if not calendar_link:
         raise Exception("Could not find calendar link")
     
-    print("→ Clicking calendar link...")
+    print(f"{LOG_ARROW} Clicking calendar link...")
     await calendar_link.click()
     await asyncio.sleep(SLEEP_SHORT)
     
@@ -102,7 +107,7 @@ async def navigate_to_calendar_link(tab):
     if URL_CALENDAR_APPLY not in current_url:
         raise Exception(f"Not on CAPTCHA page. URL: {current_url}")
     
-    print("✓ On CAPTCHA page")
+    print(f"{LOG_SUCCESS} On CAPTCHA page")
 
 
 async def bypass_captcha_and_proceed(tab):
@@ -114,7 +119,7 @@ async def bypass_captcha_and_proceed(tab):
     Returns:
         str: Calendar URL
     """
-    print("→ Bypassing CAPTCHA...")
+    print(f"{LOG_ARROW} Bypassing CAPTCHA...")
     
     await asyncio.sleep(SLEEP_SHORT)
     
@@ -126,7 +131,7 @@ async def bypass_captcha_and_proceed(tab):
         await tab.scroll.by(ScrollPosition.UP, SCROLL_UP_DISTANCE, smooth=True)
         await asyncio.sleep(SLEEP_SHORT)
     except Exception as e:
-        print(f"⚠ Behavior simulation: {e}")
+        print(f"{LOG_WARNING} Behavior simulation: {e}")
     
     # Click reCAPTCHA
     try:
@@ -140,14 +145,13 @@ async def bypass_captcha_and_proceed(tab):
                 await recaptcha_iframe.click()
                 await asyncio.sleep(SLEEP_SHORT)
             except Exception as e:
-                print(f"⚠ CAPTCHA click: {e}")
+                print(f"{LOG_WARNING} CAPTCHA click: {e}")
         
         await asyncio.sleep(SLEEP_SHORT)
     except Exception as e:
-        print(f"⚠ CAPTCHA interaction: {e}")
+        print(f"{LOG_WARNING} CAPTCHA interaction: {e}")
     
-    # Click next button
-    print(f"→ Clicking {TEXT_NEXT_BUTTON} button...")
+    print(f"{LOG_ARROW} Clicking {TEXT_NEXT_BUTTON}...")
     await asyncio.sleep(SLEEP_SHORT)
     
     try:
@@ -171,7 +175,7 @@ async def bypass_captcha_and_proceed(tab):
         else:
             await tab.execute_script(FORM_SUBMIT_SCRIPT)
     except Exception as e:
-        print(f"⚠ Form submit: {e}")
+        print(f"{LOG_WARNING} Form submit: {e}")
         await tab.execute_script(FORM_SUBMIT_SCRIPT)
     
     await asyncio.sleep(SLEEP_SHORT)
@@ -182,7 +186,7 @@ async def bypass_captcha_and_proceed(tab):
     if URL_CALENDAR_SELECT not in calendar_url:
         raise Exception(f"Not on calendar page. URL: {calendar_url}")
     
-    print("✓ Reached calendar page")
+    print(f"{LOG_SUCCESS} Reached calendar page")
     return calendar_url
 
 
@@ -192,9 +196,9 @@ async def acquire_calendar_url_with_captcha():
     Returns:
         str: Calendar URL or None
     """
-    print("\n" + "=" * SEPARATOR_WIDTH)
+    print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
     print("ACQUIRING NEW CALENDAR URL")
-    print("=" * SEPARATOR_WIDTH)
+    print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
     
     options = create_browser_options(headless=False)
     async with Chrome(options=options) as browser:
@@ -204,5 +208,5 @@ async def acquire_calendar_url_with_captcha():
             calendar_url = await bypass_captcha_and_proceed(tab)
             return calendar_url
         except Exception as e:
-            print(f"✗ Error acquiring URL: {e}")
+            print(f"{LOG_ERROR} Error acquiring URL: {e}")
             return None
