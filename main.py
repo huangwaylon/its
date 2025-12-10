@@ -26,7 +26,10 @@ from config import (
     LOG_ERROR,
     LOG_WARNING,
     LOG_SEPARATOR,
-    LOG_EQUALS
+    LOG_EQUALS,
+    COLOR_GREEN,
+    COLOR_RED,
+    COLOR_RESET
 )
 from browser import create_browser_options
 from cache import load_cached_url, save_calendar_url
@@ -62,9 +65,7 @@ async def scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, sk
             return False
     
     all_available_days = []
-    for month_num in range(num_months):
-        print(f"\n{LOG_ARROW} Month {month_num + 1}/{num_months}")
-        
+    for month_num in range(num_months):        
         available_days = await scan_month_days(tab)
         
         if available_days:
@@ -137,12 +138,12 @@ async def scan_calendar_and_book(calendar_url, validate=False):
         # Validate page if requested (for cached URLs)
         if not await is_valid_calendar_page(tab):
             if validate:
-                print(f"{LOG_ERROR} Cached URL invalid")
+                print(f"{COLOR_RED}{LOG_ERROR} Cached URL invalid{COLOR_RESET}")
                 return False, False
             raise Exception("Failed to load calendar page")
         
         if validate:
-            print(f"{LOG_SUCCESS} Cached URL valid")
+            print(f"{COLOR_GREEN}{LOG_SUCCESS} Cached URL valid{COLOR_RESET}")
         
         booking_made = await scan_and_book_one(tab, calendar_url, num_months=NUM_MONTHS_TO_SCAN, skip_months=NUM_MONTHS_TO_SKIP)
         
@@ -186,29 +187,19 @@ async def scan_once():
 
 async def main():
     """Main execution flow - continuous scanning mode."""    
-    iteration = 0
-    try:
-        while True:
-            iteration += 1
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
-            print(f"ITERATION {timestamp}")
-            print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
-            
-            try:
-                await scan_once()
-            except Exception as e:
-                print(f"\n{LOG_ERROR} Scan error: {e}")
-            
-            print(f"\n{LOG_ARROW} Wait {SCAN_INTERVAL_SECONDS}s | {timestamp}")
-            await asyncio.sleep(SCAN_INTERVAL_SECONDS)
-            
-    except KeyboardInterrupt:
-        print(f"\n\n{LOG_EQUALS * SEPARATOR_WIDTH}")
-        print(f"STOPPED | Iterations: {iteration}")
-        print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
-
+    while True:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        print(f"\n{LOG_SEPARATOR * SEPARATOR_WIDTH}")
+        print(f"{timestamp}\n")
+        
+        try:
+            await scan_once()
+        except Exception as e:
+            print(f"\n{LOG_ERROR} Scan error: {e}")
+        
+        print(f"\n{LOG_ARROW} Wait {SCAN_INTERVAL_SECONDS}s")
+        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
     asyncio.run(main())

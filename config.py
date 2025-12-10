@@ -170,3 +170,8 @@ LOG_WARNING = "⚠"
 LOG_SKIP = "⊗"
 LOG_SEPARATOR = "─"
 LOG_EQUALS = "="
+
+# ANSI color codes
+COLOR_GREEN = "\033[92m"
+COLOR_RED = "\033[91m"
+COLOR_RESET = "\033[0m"

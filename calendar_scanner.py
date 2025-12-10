@@ -30,7 +30,10 @@ from config import (
     MONTH_NAV_POLL_INTERVAL,
     LOG_ARROW,
     LOG_ERROR,
-    LOG_WARNING
+    LOG_WARNING,
+    COLOR_GREEN,
+    COLOR_RED,
+    COLOR_RESET
 )
 
 
@@ -304,9 +307,19 @@ async def scan_month_days(tab):
                 
                 # Check if date should be skipped
                 if is_skipped_date(full_date):
-                    print(f"  {date_text}日 ({description}): {icon} ({status}) [SKIPPED]")
+                    if status == STATUS_AVAILABLE:
+                        print(f"  {date_text:>2}日 ({description}): {COLOR_GREEN}{icon} ({status}){COLOR_RESET} [SKIPPED]")
+                    elif status == STATUS_FULL:
+                        print(f"  {date_text:>2}日 ({description}): {COLOR_RED}{icon} ({status}){COLOR_RESET} [SKIPPED]")
+                    else:
+                        print(f"  {date_text:>2}日 ({description}): {icon} ({status}) [SKIPPED]")
                 else:
-                    print(f"  {date_text}日 ({description}): {icon} ({status})")
+                    if status == STATUS_AVAILABLE:
+                        print(f"  {date_text:>2}日 ({description}): {COLOR_GREEN}{icon} ({status}){COLOR_RESET}")
+                    elif status == STATUS_FULL:
+                        print(f"  {date_text:>2}日 ({description}): {COLOR_RED}{icon} ({status}){COLOR_RESET}")
+                    else:
+                        print(f"  {date_text:>2}日 ({description}): {icon} ({status})")
                     
                     if icon == ICON_AVAILABLE:
                         available_days.append({
