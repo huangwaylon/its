@@ -26,10 +26,9 @@ INCLUDE_HOLIDAYS = True  # Check for national holidays (Fridays and Sundays befo
 
 # Date skip list (YYYY-MM-DD format for specific dates)
 DATE_SKIP_LIST = [
-    "2025-12-13",
-    "2025-12-20",
-    "2025-12-27",
-    "2026-01-24"
+    "2026-02-07",
+    "2026-02-22",
+    "2026-02-28",
 ]
 
 # Exceptional dates to book (creates extended weekend breaks)
