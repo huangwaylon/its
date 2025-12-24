@@ -64,7 +64,9 @@ AUTO_BOOK = True
 
 # Hotel filtering
 SKIP_HOTELS = [
-    "ブルーベリーヒル勝浦"
+    "ブルーベリーヒル勝浦",
+    "ホテル日航プリンセス京都",
+    "ホテルハーヴェスト南紀田辺"
 ]
 
 # Chrome browser arguments
