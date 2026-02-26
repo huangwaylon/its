@@ -15,38 +15,15 @@ NUM_GUESTS = 2
 
 # Scanning configuration
 SCAN_INTERVAL_SECONDS = 10
-NUM_MONTHS_TO_SKIP = 1  # Number of months to skip from current month before scanning
+NUM_MONTHS_TO_SKIP = 2  # Number of months to skip from current month before scanning
 NUM_MONTHS_TO_SCAN = 1
 
-# Target weekdays (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
-TARGET_WEEKDAYS = [5]  # Sat
-
-# Holiday booking configuration
-INCLUDE_HOLIDAYS = True  # Check for national holidays (Fridays and Sundays before Mondays)
-
-# Date skip list (YYYY-MM-DD format for specific dates)
-DATE_SKIP_LIST = [
-    "2026-03-07",
-    "2026-03-14",
-    "2026-03-28",
+# Target dates to check for availability (YYYY-MM-DD format)
+# Add specific dates you want to monitor and book
+TARGET_DATES = [
+    "2026-03-21",
+    "2026-04-29",
 ]
-
-# Exceptional dates to book (creates extended weekend breaks)
-EXCEPTIONAL_DATES = {
-    '2026-01-02': 'Apple Holiday Shutdown',
-    '2026-01-11': 'Coming of Age Day',
-    '2026-02-22': "Emperor's Birthday",
-    '2026-03-20': 'Spring Equinox',
-    '2026-05-03': 'Greenery Day',
-    '2026-05-04': 'Childrens Day',
-    '2026-05-05': 'Constitution Day',
-    '2026-07-19': 'Marine Day',
-    '2026-09-20': 'Respect-for-the-Aged Day',
-    '2026-09-21': 'National Day',
-    '2026-09-22': 'Autumn Equinox',
-    '2026-10-11': 'Sports Day',
-    '2026-11-22': 'Labour Thanksgiving Day',
-}
 
 # Weekday names mapping
 WEEKDAY_NAMES = {
@@ -56,7 +33,7 @@ WEEKDAY_NAMES = {
     3: "Thursday",
     4: "Friday",
     5: "Saturday",
-    6: "Sunday"
+    6: "Sunday",
 }
 
 # Booking mode
@@ -66,7 +43,38 @@ AUTO_BOOK = True
 SKIP_HOTELS = [
     "ブルーベリーヒル勝浦",
     "ホテル日航プリンセス京都",
-    "ホテルハーヴェスト南紀田辺"
+    "ホテルハーヴェスト南紀田辺",
+    "草津温泉　ホテルヴィレッジ",
+    "ホテルハーヴェスト伊東",
+    "ホテルハーヴェスト　スキージャム勝山",
+    "ホテル琵琶レイクオーツカ",
+    "ホテルハーヴェスト南紀田辺",
+    "ホテルハーヴェスト有馬六彩",
+    "リソルの森",
+    "ホテルハーヴェスト浜名湖",
+    "ゆふいん山水館",
+    "ホテル日航アリビラ",
+    "ラビスタ函館ベイANNEX",
+    # "トスラブ箱根ビオーレ",
+    # "トスラブ箱根和奏林",
+    # "トスラブ館山ルアーナ",
+    # "ホテルハーヴェスト那須",
+    # "ホテルハーヴェスト斑尾",
+    # "ホテルハーヴェスト旧軽井沢",
+    # "ホテルハーヴェスト京都鷹峯",
+    # "日光千姫物語",
+    # "伊香保温泉 ホテル天坊",
+    # "和倉温泉 あえの風",
+    # "ラビスタ富士河口湖",
+    # "鳴子温泉　湯元　吉祥",
+    # "ホテルオークラ東京ベイ",
+    # "熱海後楽園ホテル",
+    # "ラビスタ横須賀観音崎テラス",
+    # "ラビスタ熱海テラス",
+    # "ホテルハーヴェスト鬼怒川",
+    # "蓼科東急ホテル",
+    # "NASPAニューオータニ",
+    # "NAGU 勝浦",
 ]
 
 # Chrome browser arguments
@@ -98,8 +106,8 @@ SLEEP_STANDARD = 0.5
 SLEEP_MONTH_NAV = 0.5  # Reduced from 2.0s, with polling for page load
 
 # Month navigation polling configuration
-MONTH_NAV_POLL_ATTEMPTS = 5         # Verification polling attempts (5 × 0.3s = 1.5s max)
-MONTH_NAV_POLL_INTERVAL = 0.3       # Time between polls
+MONTH_NAV_POLL_ATTEMPTS = 10  # Verification polling attempts (5 × 0.3s = 1.5s max)
+MONTH_NAV_POLL_INTERVAL = 0.3  # Time between polls
 
 # HTML selectors and attributes
 TAG_INPUT = "input"

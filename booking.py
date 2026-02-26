@@ -4,7 +4,6 @@
 import asyncio
 from browser import extract_script_value
 from cache import save_booking, get_booked_hotels_for_date
-from navigation import is_valid_calendar_page
 from config import (
     TAG_ANCHOR,
     TAG_INPUT,
@@ -46,33 +45,37 @@ from config import (
     LOG_WARNING,
     LOG_SKIP,
     LOG_SEPARATOR,
-    LOG_EQUALS
+    LOG_EQUALS,
 )
 
 
 async def click_date_by_attribute(tab, target_date):
     """Click date cell by data-join-time attribute.
-    
+
     Args:
         tab: Browser tab instance
         target_date: Date string to click
-        
+
     Returns:
         bool: True if successful
     """
     print(f"{LOG_ARROW} Clicking date: {target_date}")
     await asyncio.sleep(SLEEP_SHORT)
-    
-    all_cells = await tab.find(tag_name=TAG_TD, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False)
+
+    all_cells = await tab.find(
+        tag_name=TAG_TD, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False
+    )
     if not all_cells:
         print(f"  {LOG_ERROR} No date cells")
         return False
-    
+
     for cell in all_cells:
         try:
-            attr_result = await cell.execute_script(f"return this.getAttribute('{ATTR_DATA_JOIN_TIME}')")
+            attr_result = await cell.execute_script(
+                f"return this.getAttribute('{ATTR_DATA_JOIN_TIME}')"
+            )
             date_attr = extract_script_value(attr_result)
-            
+
             if date_attr == target_date:
                 await cell.scroll_into_view()
                 await asyncio.sleep(SLEEP_SHORT)
@@ -81,79 +84,90 @@ async def click_date_by_attribute(tab, target_date):
                 return True
         except:
             continue
-    
+
     print(f"  {LOG_ERROR} Date not found: {target_date}")
     return False
 
 
 async def verify_on_service_group_page(tab):
     """Verify on service_group_select page.
-    
+
     Args:
         tab: Browser tab instance
-        
+
     Returns:
         bool: True if on correct page
     """
     await asyncio.sleep(SLEEP_SHORT)
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     current_url = extract_script_value(url_response)
-    
+
     if URL_SERVICE_GROUP_SELECT in current_url:
         return True
-    
+
     print(f"  {LOG_ERROR} Not on {URL_SERVICE_GROUP_SELECT}")
     return False
 
 
 async def get_hotel_names_on_service_group_page(tab):
     """Collect hotel names on service_group_select page.
-    
+
     Args:
         tab: Browser tab instance
-        
+
     Returns:
         list: Hotel names (excluding hotels in SKIP_HOTELS list)
     """
     print(f"{LOG_ARROW} Collecting hotels...")
-    
+
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     current_url = extract_script_value(url_response)
-    
+
     if URL_SERVICE_GROUP_SELECT not in current_url:
         print(f"  {LOG_ERROR} Not on {URL_SERVICE_GROUP_SELECT}")
         return []
-    
+
     hotel_names = []
-    
+
     try:
         await asyncio.sleep(SLEEP_SHORT)
-        links = await tab.find(tag_name=TAG_ANCHOR, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
+        links = await tab.find(
+            tag_name=TAG_ANCHOR,
+            find_all=True,
+            timeout=EXTENDED_TIMEOUT,
+            raise_exc=False,
+        )
         if links:
             for link in links:
                 try:
-                    text_result = await link.execute_script("return this.textContent.trim()")
+                    text_result = await link.execute_script(
+                        "return this.textContent.trim()"
+                    )
                     link_text = extract_script_value(text_result) or ""
-                    
+
                     href_result = await link.execute_script("return this.href")
                     href = extract_script_value(href_result) or ""
-                    
+
                     if any(skip in link_text for skip in SKIP_LINK_TEXTS):
                         continue
-                    
+
                     if href and (PROTOCOL_HTTP in href or PROTOCOL_HTTPS in href):
                         continue
-                    
-                    if link_text and len(link_text.strip()) > MIN_LINK_TEXT_LENGTH and PROTOCOL_JAVASCRIPT in href:
+
+                    if (
+                        link_text
+                        and len(link_text.strip()) > MIN_LINK_TEXT_LENGTH
+                        and PROTOCOL_JAVASCRIPT in href
+                    ):
                         if any(skip_name in link_text for skip_name in SKIP_HOTELS):
                             print(f"  {LOG_SKIP} {link_text[:TEXT_TRUNCATE_LENGTH]}")
                             continue
-                        
+
                         hotel_names.append(link_text)
                         print(f"  • {link_text[:TEXT_TRUNCATE_LENGTH]}")
                 except:
                     continue
-        
+
         print(f"  Total: {len(hotel_names)} hotels")
         return hotel_names
     except Exception as e:
@@ -163,25 +177,32 @@ async def get_hotel_names_on_service_group_page(tab):
 
 async def click_hotel_by_name(tab, hotel_name):
     """Click hotel link by name.
-    
+
     Args:
         tab: Browser tab instance
         hotel_name: Hotel name to click
-        
+
     Returns:
         bool: True if successful
     """
     print(f"{LOG_ARROW} Selecting: {hotel_name[:TEXT_TRUNCATE_LENGTH]}")
-    
+
     try:
         await asyncio.sleep(SLEEP_SHORT)
-        links = await tab.find(tag_name=TAG_ANCHOR, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
+        links = await tab.find(
+            tag_name=TAG_ANCHOR,
+            find_all=True,
+            timeout=EXTENDED_TIMEOUT,
+            raise_exc=False,
+        )
         if links:
             for link in links:
                 try:
-                    text_result = await link.execute_script("return this.textContent.trim()")
+                    text_result = await link.execute_script(
+                        "return this.textContent.trim()"
+                    )
                     link_text = extract_script_value(text_result) or ""
-                    
+
                     if link_text == hotel_name:
                         await link.scroll_into_view()
                         await asyncio.sleep(SLEEP_SHORT)
@@ -190,7 +211,7 @@ async def click_hotel_by_name(tab, hotel_name):
                         return True
                 except:
                     continue
-        
+
         print(f"  {LOG_ERROR} Hotel not found")
         return False
     except Exception as e:
@@ -200,43 +221,54 @@ async def click_hotel_by_name(tab, hotel_name):
 
 async def select_service_on_apply_page(tab):
     """Select service on apply_service_select page.
-    
+
     Args:
         tab: Browser tab instance
-        
+
     Returns:
         bool: True if successful
     """
     print(f"{LOG_ARROW} Selecting service...")
-    
+
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     current_url = extract_script_value(url_response)
-    
+
     if URL_APPLY_SERVICE_SELECT not in current_url:
         print(f"  {LOG_ERROR} Not on {URL_APPLY_SERVICE_SELECT}")
         return False
-    
+
     try:
         await asyncio.sleep(SLEEP_STANDARD)
-        links = await tab.find(tag_name=TAG_ANCHOR, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
+        links = await tab.find(
+            tag_name=TAG_ANCHOR,
+            find_all=True,
+            timeout=EXTENDED_TIMEOUT,
+            raise_exc=False,
+        )
         if links:
             service_links = []
             for link in links:
                 try:
-                    text_result = await link.execute_script("return this.textContent.trim()")
+                    text_result = await link.execute_script(
+                        "return this.textContent.trim()"
+                    )
                     link_text = extract_script_value(text_result) or ""
-                    
+
                     href_result = await link.execute_script("return this.href")
                     href = extract_script_value(href_result) or ""
-                    
+
                     if any(skip in link_text for skip in SKIP_LINK_TEXTS_SERVICE):
                         continue
-                    
-                    if link_text and len(link_text.strip()) > MIN_LINK_TEXT_LENGTH and PROTOCOL_JAVASCRIPT in href:
+
+                    if (
+                        link_text
+                        and len(link_text.strip()) > MIN_LINK_TEXT_LENGTH
+                        and PROTOCOL_JAVASCRIPT in href
+                    ):
                         service_links.append((link, link_text))
                 except:
                     continue
-            
+
             if service_links:
                 link, link_text = service_links[0]
                 print(f"  {LOG_ARROW} {link_text[:TEXT_TRUNCATE_LENGTH]}")
@@ -245,10 +277,10 @@ async def select_service_on_apply_page(tab):
                 await link.click()
                 await asyncio.sleep(SLEEP_STANDARD)
                 return True
-            
+
             print(f"  {LOG_ERROR} No service links")
             return False
-        
+
         print(f"  {LOG_ERROR} No links found")
         return False
     except Exception as e:
@@ -258,35 +290,37 @@ async def select_service_on_apply_page(tab):
 
 async def fill_booking_form_and_search(tab, target_date):
     """Fill booking form and search.
-    
+
     Args:
         tab: Browser tab instance
         target_date: Target date
-        
+
     Returns:
         bool: True if successful
     """
     print(f"{LOG_ARROW} Form: {NUM_GUESTS} guests")
-    
+
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     current_url = extract_script_value(url_response)
-    
+
     if URL_APPLY_EMPTY_NEW not in current_url:
         print(f"  {LOG_ERROR} Not on {URL_APPLY_EMPTY_NEW}")
         return False
-    
+
     try:
         await asyncio.sleep(SLEEP_SHORT)
-        
-        inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
+
+        inputs = await tab.find(
+            tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False
+        )
         guest_filled = False
-        
+
         if inputs:
             for input_elem in inputs:
                 try:
                     name_result = await input_elem.execute_script("return this.name")
                     input_name = extract_script_value(name_result) or ""
-                    
+
                     if INPUT_NAME_STAY_PERSONS in input_name:
                         await input_elem.scroll_into_view()
                         await asyncio.sleep(SLEEP_SHORT)
@@ -297,18 +331,20 @@ async def fill_booking_form_and_search(tab, target_date):
                         break
                 except:
                     pass
-        
+
         if not guest_filled:
             print(f"  {LOG_WARNING} Guest count not filled")
-        
+
         print(f"{LOG_ARROW} {TEXT_SEARCH_AVAILABILITY}")
-        buttons = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
+        buttons = await tab.find(
+            tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False
+        )
         if buttons:
             for button in buttons:
                 try:
                     value_result = await button.execute_script("return this.value")
                     button_value = extract_script_value(value_result) or ""
-                    
+
                     if button_value == TEXT_SEARCH_AVAILABILITY:
                         await button.scroll_into_view()
                         await asyncio.sleep(SLEEP_SHORT)
@@ -317,7 +353,7 @@ async def fill_booking_form_and_search(tab, target_date):
                         return True
                 except:
                     pass
-        
+
         print(f"  {LOG_ERROR} Search button not found")
         return False
     except Exception as e:
@@ -327,37 +363,41 @@ async def fill_booking_form_and_search(tab, target_date):
 
 async def select_room_and_proceed(tab):
     """Select room and proceed.
-    
+
     Args:
         tab: Browser tab instance
-        
+
     Returns:
         bool: True if successful
     """
     print(f"{LOG_ARROW} Selecting room...")
-    
+
     try:
         await asyncio.sleep(SLEEP_SHORT)
-        all_inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
-        
+        all_inputs = await tab.find(
+            tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False
+        )
+
         room_selected = False
         if all_inputs:
             for inp in all_inputs:
                 try:
                     type_result = await inp.execute_script("return this.type")
                     input_type = extract_script_value(type_result) or ""
-                    
+
                     if input_type == "checkbox":
                         name_result = await inp.execute_script("return this.name")
                         input_name = extract_script_value(name_result) or ""
-                        
+
                         if input_name == INPUT_NAME_NO_NAME:
                             continue
-                        
+
                         if input_name and INPUT_NAME_ROOM_PREFIX in input_name:
-                            disabled_result = await inp.execute_script("return this.disabled")
+                            disabled_result = await inp.execute_script(
+                                "return this.disabled"
+                            )
                             is_disabled = extract_script_value(disabled_result)
-                            
+
                             if not is_disabled:
                                 await inp.scroll_into_view()
                                 await asyncio.sleep(SLEEP_SHORT)
@@ -367,19 +407,21 @@ async def select_room_and_proceed(tab):
                                 break
                 except:
                     pass
-        
+
         if not room_selected:
             print(f"  {LOG_ERROR} No room found")
             return False
-        
+
         print(f"{LOG_ARROW} {TEXT_PROCEED_TO_BOOKING}")
-        buttons = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
+        buttons = await tab.find(
+            tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False
+        )
         if buttons:
             for button in buttons:
                 try:
                     value_result = await button.execute_script("return this.value")
                     button_value = extract_script_value(value_result) or ""
-                    
+
                     if button_value == TEXT_PROCEED_TO_BOOKING:
                         await button.scroll_into_view()
                         await asyncio.sleep(SLEEP_SHORT)
@@ -388,7 +430,7 @@ async def select_room_and_proceed(tab):
                         return True
                 except:
                     pass
-        
+
         print(f"  {LOG_ERROR} Proceed button not found")
         return False
     except Exception as e:
@@ -398,31 +440,33 @@ async def select_room_and_proceed(tab):
 
 async def agree_to_rules(tab):
     """Agree to rules on rule page.
-    
+
     Args:
         tab: Browser tab instance
-        
+
     Returns:
         bool: True if successful
     """
     print(f"{LOG_ARROW} Agreeing to rules...")
-    
+
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     current_url = extract_script_value(url_response)
-    
+
     if URL_APPLY_RULE not in current_url:
         print(f"  {LOG_ERROR} Not on {URL_APPLY_RULE}")
         return False
-    
+
     try:
         await asyncio.sleep(SLEEP_SHORT)
-        buttons = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
+        buttons = await tab.find(
+            tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False
+        )
         if buttons:
             for button in buttons:
                 try:
                     value_result = await button.execute_script("return this.value")
                     button_value = extract_script_value(value_result) or ""
-                    
+
                     if TEXT_AGREE in button_value:
                         await button.scroll_into_view()
                         await asyncio.sleep(SLEEP_SHORT)
@@ -431,7 +475,7 @@ async def agree_to_rules(tab):
                         return True
                 except:
                     pass
-        
+
         print(f"  {LOG_ERROR} Agree button not found")
         return False
     except Exception as e:
@@ -441,33 +485,35 @@ async def agree_to_rules(tab):
 
 async def fill_email_and_submit(tab):
     """Fill email and submit.
-    
+
     Args:
         tab: Browser tab instance
-        
+
     Returns:
         bool: True if successful
     """
     print(f"{LOG_ARROW} Email: {TARGET_EMAIL}")
-    
+
     url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
     current_url = extract_script_value(url_response)
-    
+
     if URL_APPLY_EMAIL_INPUT not in current_url:
         print(f"  {LOG_ERROR} Not on {URL_APPLY_EMAIL_INPUT}")
         return False
-    
+
     try:
         await asyncio.sleep(SLEEP_SHORT)
-        inputs = await tab.find(tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False)
-        
+        inputs = await tab.find(
+            tag_name=TAG_INPUT, find_all=True, timeout=EXTENDED_TIMEOUT, raise_exc=False
+        )
+
         email_filled = False
         if inputs:
             for input_elem in inputs:
                 try:
                     name_result = await input_elem.execute_script("return this.name")
                     input_name = extract_script_value(name_result) or ""
-                    
+
                     if input_name == INPUT_NAME_EMAIL:
                         await input_elem.scroll_into_view()
                         await asyncio.sleep(SLEEP_SHORT)
@@ -478,30 +524,30 @@ async def fill_email_and_submit(tab):
                         break
                 except:
                     pass
-        
+
         if not email_filled:
             print(f"  {LOG_ERROR} Email not filled")
             return False
-        
+
         from pydoll.protocol.page.events import PageEvent
-        
+
         async def handle_dialog(event):
             await tab.handle_dialog(accept=True)
-        
+
         await tab.enable_page_events()
         await tab.on(PageEvent.JAVASCRIPT_DIALOG_OPENING, handle_dialog)
         await asyncio.sleep(SLEEP_SHORT)
         await tab.execute_script(FORM_SUBMIT_SCRIPT)
-        
+
         await asyncio.sleep(SLEEP_SHORT)
-        
+
         final_url_response = await tab.execute_script(WINDOW_LOCATION_SCRIPT)
         final_url = extract_script_value(final_url_response)
-        
+
         if URL_SEND_COMPLETE in final_url:
             print(f"{LOG_SUCCESS} {URL_SEND_COMPLETE}")
         return True
-        
+
     except Exception as e:
         print(f"{LOG_ERROR} Email submit: {e}")
         return False
@@ -509,99 +555,99 @@ async def fill_email_and_submit(tab):
 
 async def try_book_hotel_for_date(tab, date, hotel):
     """Attempt to book hotel for date.
-    
+
     Args:
         tab: Browser tab instance
         date: Date string
         hotel: Hotel name
-        
+
     Returns:
         bool: True if successful
     """
     print(f"\n{LOG_SEPARATOR * SEPARATOR_WIDTH}")
     print(f"BOOKING: {date} - {hotel[:TEXT_TRUNCATE_LENGTH]}")
     print(f"{LOG_SEPARATOR * SEPARATOR_WIDTH}")
-    
+
     if not await click_hotel_by_name(tab, hotel):
         print(f"{LOG_ERROR} Hotel click failed")
         return False
-    
+
     if not await select_service_on_apply_page(tab):
         print(f"{LOG_ERROR} Service select failed")
         return False
-    
+
     if not await fill_booking_form_and_search(tab, date):
         print(f"{LOG_ERROR} Form fill failed")
         return False
-    
+
     if not await select_room_and_proceed(tab):
         print(f"{LOG_ERROR} No rooms available")
         return False
-    
+
     if not await agree_to_rules(tab):
         print(f"{LOG_ERROR} Rules agreement failed")
         return False
-    
+
     if not await fill_email_and_submit(tab):
         print(f"{LOG_ERROR} Email submit failed")
         return False
-    
+
     print(f"\n{LOG_EQUALS * SEPARATOR_WIDTH}")
     print(f"{LOG_SUCCESS} BOOKING COMPLETE: {hotel[:TEXT_TRUNCATE_LENGTH]}")
     print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
-    
+
     save_booking(date, hotel)
     return True
 
 
 async def process_available_day(tab, date_info, calendar_url):
     """Process available day and attempt booking.
-    
+
     Args:
         tab: Browser tab instance
         date_info: Date information dict
         calendar_url: Calendar URL for navigation
-        
+
     Returns:
         bool: True if booking made
     """
-    date = date_info['full_date']
+    date = date_info["full_date"]
     print(f"\n{LOG_ARROW} Processing: {date} ({date_info['day_name']})")
-    
+
     if not await click_date_by_attribute(tab, date):
         print(f"{LOG_ERROR} Could not click date")
         return False
-    
+
     if not await verify_on_service_group_page(tab):
         print(f"{LOG_ERROR} Not on service group page")
         return False
-    
+
     hotels = await get_hotel_names_on_service_group_page(tab)
-    
+
     if not hotels:
         print(f"{LOG_ERROR} No hotels available")
         return False
-    
+
     booked_hotels = get_booked_hotels_for_date(date)
     available_hotels = [h for h in hotels if h not in booked_hotels]
-    
+
     if not available_hotels:
         print(f"{LOG_SKIP} All hotels booked for {date}")
         return False
-    
+
     print(f"  Available: {len(available_hotels)} hotels")
-    
+
     # Try first available hotel
     for hotel in available_hotels:
         if await try_book_hotel_for_date(tab, date, hotel):
             return True
-        
+
         print(f"{LOG_ARROW} Returning to calendar...")
         await tab.go_to(calendar_url)
         await asyncio.sleep(SLEEP_STANDARD)
-        
+
         if not await click_date_by_attribute(tab, date):
             print(f"{LOG_ERROR} Failed to navigate back")
             return False
-    
+
     return False
