@@ -14,7 +14,7 @@ TARGET_EMAIL = "wwaylonhuang@gmail.com"
 NUM_GUESTS = 2
 
 # Scanning configuration
-SCAN_INTERVAL_SECONDS = 2
+SCAN_INTERVAL_SECONDS = 0
 NUM_MONTHS_TO_SKIP = 2  # Number of months to skip from current month before scanning
 NUM_MONTHS_TO_SCAN = 1
 
