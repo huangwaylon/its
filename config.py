@@ -16,7 +16,7 @@ NUM_GUESTS = 2
 # Scanning configuration
 SCAN_INTERVAL_SECONDS = 10
 NUM_MONTHS_TO_SKIP = 1  # Number of months to skip from current month before scanning
-NUM_MONTHS_TO_SCAN = 2
+NUM_MONTHS_TO_SCAN = 1
 
 # Target weekdays (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)
 TARGET_WEEKDAYS = [5]  # Sat
@@ -26,9 +26,6 @@ INCLUDE_HOLIDAYS = True  # Check for national holidays (Fridays and Sundays befo
 
 # Date skip list (YYYY-MM-DD format for specific dates)
 DATE_SKIP_LIST = [
-    "2026-02-07",
-    "2026-02-22",
-    "2026-02-28",
     "2026-03-07",
     "2026-03-14",
     "2026-03-28",
