@@ -28,7 +28,7 @@ from config import (
 )
 from browser import create_browser_options
 from cache import load_cached_url, save_calendar_url
-from navigation import acquire_calendar_url_with_captcha, is_valid_calendar_page
+from navigation import acquire_calendar_url_with_captcha
 from calendar_scanner import scan_month_days, navigate_to_next_month
 from booking import process_available_day
 
@@ -91,10 +91,6 @@ async def scan_and_book_one(
         await tab.go_to(calendar_url)
         await asyncio.sleep(SLEEP_MONTH_NAV)
 
-        if not await is_valid_calendar_page(tab):
-            print(f"{LOG_ERROR} Failed to return to calendar")
-            continue
-
         # Navigate to correct month (skip + scan position)
         total_nav_months = skip_months + month_num
         for i in range(total_nav_months):
@@ -111,33 +107,20 @@ async def scan_and_book_one(
     return False
 
 
-async def scan_calendar_and_book(calendar_url, validate=False):
+async def scan_calendar_and_book(calendar_url):
     """Scan calendar and attempt booking.
 
     Args:
         calendar_url: Calendar URL to scan
-        validate: Whether to validate the URL first (for cached URLs)
 
     Returns:
-        tuple: (success: bool, booking_made: bool)
-               success indicates if URL was valid and scan completed
-               booking_made indicates if a booking was actually made
+        bool: True if booking was made
     """
     options = create_browser_options(headless=True)
     async with Chrome(options=options) as browser:
         tab = await browser.start()
         await tab.go_to(calendar_url)
         await asyncio.sleep(SLEEP_SHORT)
-
-        # Validate page if requested (for cached URLs)
-        if not await is_valid_calendar_page(tab):
-            if validate:
-                print(f"{COLOR_RED}{LOG_ERROR} Cached URL invalid{COLOR_RESET}")
-                return False, False
-            raise Exception("Failed to load calendar page")
-
-        if validate:
-            print(f"{COLOR_GREEN}{LOG_SUCCESS} Cached URL valid{COLOR_RESET}")
 
         booking_made = await scan_and_book_one(
             tab,
@@ -151,7 +134,7 @@ async def scan_calendar_and_book(calendar_url, validate=False):
         )
 
         await asyncio.sleep(SLEEP_SHORT)
-        return True, booking_made
+        return booking_made
 
 
 async def scan_once():
@@ -164,10 +147,12 @@ async def scan_once():
 
     # Try cached URL first
     if cached_url:
-        print(f"{LOG_ARROW} Validating cached URL...")
-        success, booking_made = await scan_calendar_and_book(cached_url, validate=True)
-        if success:
+        print(f"{LOG_ARROW} Using cached URL...")
+        try:
+            await scan_calendar_and_book(cached_url)
             return True
+        except Exception as e:
+            print(f"{LOG_ERROR} Cached URL failed: {str(e)[:50]}")
 
     print(f"\n{LOG_ARROW} Acquiring new calendar URL...")
     new_url = await acquire_calendar_url_with_captcha()
@@ -182,8 +167,12 @@ async def scan_once():
     print(f"{LOG_EQUALS * SEPARATOR_WIDTH}")
     await asyncio.sleep(SLEEP_SHORT)
 
-    success, booking_made = await scan_calendar_and_book(new_url, validate=False)
-    return success
+    try:
+        await scan_calendar_and_book(new_url)
+        return True
+    except Exception as e:
+        print(f"{LOG_ERROR} Scan failed: {str(e)[:50]}")
+        return False
 
 
 async def main():

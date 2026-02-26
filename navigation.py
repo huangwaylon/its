@@ -7,10 +7,7 @@ from browser import create_browser_options, extract_script_value
 from config import (
     MAIN_URL,
     TAG_ANCHOR,
-    TAG_TD,
     TAG_INPUT,
-    CLASS_MONTH,
-    ATTR_DATA_JOIN_TIME,
     RECAPTCHA_IFRAME_SELECTOR,
     FORM_SUBMIT_SCRIPT,
     WINDOW_LOCATION_SCRIPT,
@@ -19,7 +16,6 @@ from config import (
     TEXT_CALENDAR_SEARCH,
     TEXT_NEXT_BUTTON,
     SLEEP_SHORT,
-    DEFAULT_TIMEOUT,
     EXTENDED_TIMEOUT,
     SCROLL_DOWN_DISTANCE,
     SCROLL_UP_DISTANCE,
@@ -30,41 +26,6 @@ from config import (
     LOG_WARNING,
     LOG_EQUALS,
 )
-
-
-async def is_valid_calendar_page(tab):
-    """Check if current page is a valid calendar page.
-
-    Args:
-        tab: Browser tab instance
-
-    Returns:
-        bool: True if valid calendar page
-    """
-    try:
-        month_element = await tab.find(
-            class_name=CLASS_MONTH, timeout=DEFAULT_TIMEOUT, raise_exc=False
-        )
-        if month_element is None:
-            return False
-
-        all_cells = await tab.find(
-            tag_name=TAG_TD, find_all=True, timeout=DEFAULT_TIMEOUT, raise_exc=False
-        )
-        if all_cells:
-            for cell in all_cells[:10]:
-                try:
-                    attr_result = await cell.execute_script(
-                        f"return this.getAttribute('{ATTR_DATA_JOIN_TIME}')"
-                    )
-                    date_attr = extract_script_value(attr_result)
-                    if date_attr and date_attr not in ["None", None]:
-                        return True
-                except:
-                    pass
-        return False
-    except:
-        return False
 
 
 async def navigate_to_calendar_link(tab):
