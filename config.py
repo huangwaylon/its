@@ -15,7 +15,7 @@ NUM_GUESTS = 2
 
 # Scanning configuration
 SCAN_INTERVAL_SECONDS = 0
-NUM_MONTHS_TO_SKIP = 2  # Number of months to skip from current month before scanning
+NUM_MONTHS_TO_SKIP = 1  # Number of months to skip from current month before scanning
 NUM_MONTHS_TO_SCAN = 1
 
 # Target dates to check for availability (YYYY-MM-DD format)
