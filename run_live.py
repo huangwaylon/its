@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 BASE = 'https://as.its-kenpo.or.jp'
 CALENDAR_URL = open('calendar_url_cache.txt').read().strip()
 TARGET_DATES = [
-    "2026-04-13",
     "2026-05-01",
     "2026-05-02",
     "2026-05-03",
@@ -20,7 +19,7 @@ TARGET_DATES = [
 EMAIL = 'wwaylonhuang@gmail.com'
 NUM_GUESTS = '2'
 BOOKINGS_FILE = 'bookings.json'
-MAX_RETRIES = 3
+MAX_RETRIES = 300
 RETRY_DELAY = 1  # seconds
 SKIP_HOTELS = [
     "ブルーベリーヒル勝浦",
@@ -30,12 +29,19 @@ SKIP_HOTELS = [
     "ホテルハーヴェスト伊東",
     "ホテルハーヴェスト　スキージャム勝山",
     "ホテル琵琶レイクオーツカ",
+    "ホテルハーヴェスト南紀田辺",
     "ホテルハーヴェスト有馬六彩",
     "リソルの森",
     "ホテルハーヴェスト浜名湖",
     "ゆふいん山水館",
     "ホテル日航アリビラ",
     "ラビスタ函館ベイANNEX",
+    "ホテルハーヴェスト斑尾",
+    "ホテルハーヴェスト京都鷹峯",
+    "和倉温泉 あえの風",
+    "鳴子温泉　湯元　吉祥",
+    "ホテルオークラ東京ベイ",
+    "NASPAニューオータニ",
 ]
 
 # Thread-safe bookings access
