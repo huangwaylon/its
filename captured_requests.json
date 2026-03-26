@@ -1,0 +1,164 @@
+[
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select",
+    "postData": "join_date=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "XHR"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select",
+    "postData": "join_date=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "XHR"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/service_group_select",
+    "postData": "utf8=%E2%9C%93&authenticity_token=mCK1YsTllO8nMg1E%2F1uAuy7JevcpUujjLYvxNwkQjRmhsdA2Q2jgoqVOdxVKsFB39r05gwZWPXgMxtICmrGIvw%3D%3D&join_time=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "Document"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select",
+    "postData": "join_date=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "XHR"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/service_group_select",
+    "postData": "utf8=%E2%9C%93&authenticity_token=CySK6AE44xdv116DrxN6eE79YoTNNsZWyggi41ahhwwyt%2B%2B8hrWXWu2rJNIa%2BKq0lokh8OIyE83rRQHWxQCCqg%3D%3D&join_time=2026-04-02&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "Document"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select",
+    "postData": "join_date=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "XHR"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/service_group_select",
+    "postData": "utf8=%E2%9C%93&authenticity_token=tebpHLHtVjTxilvA%2FnWCRJQsjloIX%2BzZVqr5mjTvDQmMdYxINmAieXP2IZFLnlKITFjNLidbOUJ359qvp04Irw%3D%3D&join_time=2026-04-05&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "Document"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select",
+    "postData": "join_date=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "XHR"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/service_group_select",
+    "postData": "utf8=%E2%9C%93&authenticity_token=d7WvPgg2HB%2FU%2FNfTdF9wSABi2AdcDJuQW%2F4fSE4ihGZOJspqj7toUlaArYLBtKCE2Babc3MITgt6szx93YOBwA%3D%3D&join_time=2026-04-06&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "Document"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select",
+    "postData": "join_date=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "XHR"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/service_group_select",
+    "postData": "utf8=%E2%9C%93&authenticity_token=fPgB95Ecg8E6tz64Y4a7bcNdksnUf97tHoejoOC3UBJFa2SjFpH3jLjLROnWbWuhGynRvft7C3Y%2FyoCVcxZVtA%3D%3D&join_time=2026-04-07&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "Document"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/calendar_select",
+    "postData": "join_date=2026-04-01&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "XHR"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/service_group_select",
+    "postData": "utf8=%E2%9C%93&authenticity_token=54r2Zv1VNrQcSgFJIol1m7a0RealxrAe7wx8nujHCHXeGZMyethC%2BZ42exiXYqVXbsAGkorCZYXOQV%2Bre2YN0w%3D%3D&join_time=2026-04-07&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/apply_service_select",
+    "postData": "utf8=%E2%9C%93&authenticity_token=b6maqtwPaPL88p02MdXLBmt6SH1AEErlSMfdCGNxCnpWOv%2F%2BW4Icv36O52eEPhvKsw4LCW8Un35piv498NAP3A%3D%3D&empty=&join_time=2026-04-07&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D&service_group_id=7",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/calendar_apply/check_apply_service_coma",
+    "postData": "utf8=%E2%9C%93&authenticity_token=0wOgqJV1Vw0VnKemGHBjJGS7brFO6GB7Ir4XIefs0qbqkMX8EvgjQJfg3fetm7PovM8txWHsteAD8zQUdE3XAA%3D%3D&join_time=2026-04-07&s=PWtETnljek54UXpOM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5OTJabFJYWWo5VlpqbG1keVYyYw%3D%3D&apply_service_id=764",
+    "type": "Document"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/apply/empty_new?s=PT13TncwQ053MGlOeUFqTTlVV2JwUjNYdWwyYnFaQ04yY1RQa2xtSmxWbmMwMVRaeVZIZHdGMllmVkdibjkyYm5aU1oxSkhkOWtIZHcxV1o%3D",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/apply/empty_new?s=PT1BYTB4V1lsaFdQbEJYZTA5VlpqbG1keVYyY21Rak4zMERacFpTWjFKSGQ5a0hkdzFXWg==",
+    "postData": "utf8=%E2%9C%93&authenticity_token=%2FA5RxmIyx5MvQCubFCF%2B3gIsEYv7QLDdosqzH3FH16vFnTSS5b%2Bz3q08Ucqhyq4S2lhS%2F9REZUaDh5Aq4ubSDQ%3D%3D&apply%5Bjoin_time%5D=2026-04-07&apply%5Bnight_count%5D=1&apply%5Bstay_persons%5D=2&apply%5Bhope_rooms%5D=1&apply%5Bhope_room1%5D=&apply%5Bhope_room2%5D=&apply%5Bhope_room3%5D=&apply%5Bhope_room4%5D=&apply%5Bhope_room5%5D=&apply%5Bhope_room6%5D=&apply%5Bhope_room7%5D=&apply%5Bhope_room8%5D=&apply%5Bhope_room9%5D=&apply%5Bhope_room10%5D=",
+    "type": "XHR"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/apply/empty_create?s=PT1BYTB4V1lsaFdQbEJYZTA5VlpqbG1keVYyY21Rak4zMERacFpTWjFKSGQ5a0hkdzFXWg%3D%3D",
+    "postData": "------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"utf8\"\r\n\r\n✓\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"authenticity_token\"\r\n\r\n/A5RxmIyx5MvQCubFCF+3gIsEYv7QLDdosqzH3FH16vFnTSS5b+z3q08Ucqhyq4S2lhS/9REZUaDh5Aq4ubSDQ==\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[join_time]\"\r\n\r\n2026-04-07\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[night_count]\"\r\n\r\n1\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[stay_persons]\"\r\n\r\n2\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_rooms]\"\r\n\r\n1\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room1]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room2]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room3]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room4]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room5]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room6]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room7]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room8]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room9]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[hope_room10]\"\r\n\r\n\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply_session_guid\"\r\n\r\ne0b9325c-83de-4797-8cba-e7ec2a677c8f\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN\r\nContent-Disposition: form-data; name=\"apply[coma[5176560]]\"\r\n\r\n5176560\r\n------WebKitFormBoundarys8jJHpnr4bZZIRpN--\r\n",
+    "type": "Document"
+  },
+  {
+    "method": "GET",
+    "url": "https://as.its-kenpo.or.jp/apply/rule?s=PVFqTjMwRFpwWlNaMUpIZDlrSGR3MVdabU1ETTJjVE0xa0RNOThtYmZsSGJ3QlhZ",
+    "postData": "",
+    "type": "Document"
+  },
+  {
+    "method": "POST",
+    "url": "https://as.its-kenpo.or.jp/apply/email_input",
+    "postData": "utf8=%E2%9C%93&authenticity_token=jEyoiA1iqgWrwiq0Dzm5c4ppe6p%2B55YiUGyP5yPhiPC1383ciu%2FeSCm%2BUOW60mm%2FUh043lHjQ7lxIazSsECNVg%3D%3D&s=PVFqTjMwRFpwWlNaMUpIZDlrSGR3MVdabU1ETTJjVE0xa0RNOThtYmZsSGJ3QlhZ",
+    "type": "Document"
+  }
+]

@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timedelta
 from pydoll.browser.chromium import Chrome
 
-from browser import create_browser_options
+from browser import create_browser_options, setup_network_blocking
 from cache import load_cached_url, save_calendar_url, get_booked_hotels_for_date
 from navigation import acquire_calendar_url_with_captcha
 from blitz_scanner import batch_scan_month, fast_navigate_next_month, scan_all_months
@@ -231,12 +231,15 @@ async def blitz_mode(dry_run=False, wait_until=None):
     calendar_url = cached_url
     print(f"{LOG_ARROW} Calendar URL ready")
 
-    # Launch browser
-    options = create_browser_options(headless=True)
+    # Launch browser with fast options (INTERACTIVE page load + persistent cache)
+    options = create_browser_options(headless=True, fast=True)
     deadline = datetime.now() + timedelta(minutes=BLITZ_TIMEOUT_MINUTES)
 
     async with Chrome(options=options) as browser:
         tab = await browser.start()
+
+        # Block non-essential resources (fonts, analytics) for faster page loads
+        await setup_network_blocking(tab)
 
         for attempt in range(1, BLITZ_SCAN_RETRIES + 1):
             if datetime.now() > deadline:
