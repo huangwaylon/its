@@ -79,13 +79,11 @@ SKIP_HOTELS = [
 
 # Chrome browser arguments
 CHROME_ARGUMENTS = [
-    "-no-first-run",
     "-force-color-profile=srgb",
     "-metrics-recording-only",
     "-password-store=basic",
     "-use-mock-keychain",
     "-export-tagged-pdf",
-    "-no-default-browser-check",
     "-disable-background-mode",
     "-enable-features=NetworkService,NetworkServiceInProcess",
     "-disable-features=FlashDeprecationWarning",
