@@ -1,28 +1,41 @@
 #!/usr/bin/env python3
 """Parallel curl booking for multiple dates -- books all available hotels per date."""
-import subprocess, re, urllib.parse, sys, os, json, tempfile, threading
+import subprocess, re, urllib.parse, sys, os, json, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE = 'https://as.its-kenpo.or.jp'
 CALENDAR_URL = open('calendar_url_cache.txt').read().strip()
-TARGET_DATES = ['2026-04-13', '2026-04-14']
+TARGET_DATES = [
+    "2026-04-13",
+    "2026-05-01",
+    "2026-05-02",
+    "2026-05-03",
+    "2026-05-04",
+    "2026-05-05",
+    "2026-05-06",
+    "2026-05-09",
+    "2026-05-16",
+    "2026-05-23",
+]
 EMAIL = 'wwaylonhuang@gmail.com'
 NUM_GUESTS = '2'
 BOOKINGS_FILE = 'bookings.json'
+MAX_RETRIES = 3
+RETRY_DELAY = 1  # seconds
 SKIP_HOTELS = [
     "ブルーベリーヒル勝浦",
-    # "ホテル日航プリンセス京都",
-    # "ホテルハーヴェスト南紀田辺",
-    # "草津温泉　ホテルヴィレッジ",
-    # "ホテルハーヴェスト伊東",
-    # "ホテルハーヴェスト　スキージャム勝山",
-    # "ホテル琵琶レイクオーツカ",
-    # "ホテルハーヴェスト有馬六彩",
-    # "リソルの森",
-    # "ホテルハーヴェスト浜名湖",
-    # "ゆふいん山水館",
-    # "ホテル日航アリビラ",
-    # "ラビスタ函館ベイANNEX",
+    "ホテル日航プリンセス京都",
+    "ホテルハーヴェスト南紀田辺",
+    "草津温泉　ホテルヴィレッジ",
+    "ホテルハーヴェスト伊東",
+    "ホテルハーヴェスト　スキージャム勝山",
+    "ホテル琵琶レイクオーツカ",
+    "ホテルハーヴェスト有馬六彩",
+    "リソルの森",
+    "ホテルハーヴェスト浜名湖",
+    "ゆふいん山水館",
+    "ホテル日航アリビラ",
+    "ラビスタ函館ベイANNEX",
 ]
 
 # Thread-safe bookings access
@@ -185,6 +198,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
 
 def book_all_hotels_for_date(target_date, label):
     """Loop through all available hotels for a date, booking each one.
+    Retries up to MAX_RETRIES times if no hotels/rooms are found.
     Returns (date, list_of_booked_hotels)."""
     tag = f"[{label}]"
     booked = []
@@ -197,94 +211,103 @@ def book_all_hotels_for_date(target_date, label):
         return curl(cookie_file, method, url, data, headers)
 
     try:
-        # STEP 1: Load calendar
-        print(f"{tag} Step 1: Load calendar")
-        s, body, _ = c('GET', CALENDAR_URL)
-        if s != 200:
-            print(f"{tag} FAILED - token expired ({s})")
-            return target_date, booked
-        csrf = ex(body, r'csrf-token.*?content="(.*?)"')
-        auth = ex(body, r'name="authenticity_token" value="(.*?)"')
-        s_param = ex(body, r'name="s" id="s" value="(.*?)"')
+        for attempt in range(1, MAX_RETRIES + 1):
+            if attempt > 1:
+                time.sleep(RETRY_DELAY)
 
-        # Navigate to target month if needed
-        if f'data-join-time="{target_date}"' not in body:
-            next_date = ex(body, r"toNextMonth\('([^']+)'")
-            target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
-            s2, body_nav, _ = c('POST', BASE + '/calendar_apply/calendar_select',
-                {'join_date': next_date or target_ym, 's': s_param},
-                {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
-                 'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-                 'Referer': CALENDAR_URL})
-            cls = ex(body_nav, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{target_date}\\"') or ''
-            if 'empty' not in cls:
-                print(f"{tag} {target_date}: NOT AVAILABLE")
+            # STEP 1: Load calendar
+            open(cookie_file, 'w').close()
+            s, body, _ = c('GET', CALENDAR_URL)
+            if s != 200:
+                print(f"{tag} FATAL: token expired ({s}), stopping")
                 return target_date, booked
+            csrf = ex(body, r'csrf-token.*?content="(.*?)"')
+            auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+            s_param = ex(body, r'name="s" id="s" value="(.*?)"')
 
-        # STEP 2: Select date -> get hotel list
-        print(f"{tag} Step 2: Select date {target_date}")
-        s, body, _ = c('POST', BASE + '/calendar_apply/service_group_select',
-            {'utf8': '\u2713', 'authenticity_token': auth,
-             'join_time': target_date, 's': s_param})
-        all_hotels = re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)
-        if not all_hotels:
-            print(f"{tag} No hotels for {target_date}")
-            return target_date, booked
-        auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+            # Navigate to target month if needed
+            if f'data-join-time="{target_date}"' not in body:
+                target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
+                s2, body_nav, _ = c('POST', BASE + '/calendar_apply/calendar_select',
+                    {'join_date': target_ym, 's': s_param},
+                    {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
+                     'Accept': 'text/javascript, application/javascript, */*; q=0.01',
+                     'Referer': CALENDAR_URL})
+                cls = ex(body_nav, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{target_date}\\"') or ''
+                if 'empty' not in cls:
+                    if attempt <= 3 or attempt % 10 == 0:
+                        print(f"{tag} [{attempt}/{MAX_RETRIES}] date not available, waiting...")
+                    continue
 
-        # Filter: skip list + already booked
-        already_booked = get_booked_hotels(target_date)
-        hotels = []
-        for gid, name in all_hotels:
-            if name in SKIP_HOTELS:
-                print(f"{tag}   SKIP (config): {name}")
-            elif name in already_booked:
-                print(f"{tag}   SKIP (already booked): {name}")
-            else:
-                hotels.append((gid, name))
+            # STEP 2: Select date -> get hotel list
+            s, body, _ = c('POST', BASE + '/calendar_apply/service_group_select',
+                {'utf8': '\u2713', 'authenticity_token': auth,
+                 'join_time': target_date, 's': s_param})
+            all_hotels = re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)
+            if not all_hotels:
+                if attempt <= 3 or attempt % 10 == 0:
+                    print(f"{tag} [{attempt}/{MAX_RETRIES}] no hotels listed, waiting...")
+                continue
+            auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
-        if not hotels:
-            print(f"{tag} No hotels to book for {target_date}")
-            return target_date, booked
+            # Filter: skip list + already booked
+            already_booked = get_booked_hotels(target_date)
+            hotels = []
+            for gid, name in all_hotels:
+                if name in SKIP_HOTELS:
+                    pass
+                elif name in already_booked:
+                    pass
+                else:
+                    hotels.append((gid, name))
 
-        print(f"{tag} {len(hotels)} hotels to book")
+            if not hotels:
+                if attempt == 1:
+                    skipped = [n for _, n in all_hotels if n in SKIP_HOTELS]
+                    prev_booked = [n for _, n in all_hotels if n in already_booked]
+                    if skipped:
+                        print(f"{tag} Skipped: {', '.join(skipped)}")
+                    if prev_booked:
+                        print(f"{tag} Already booked: {', '.join(prev_booked)}")
+                if attempt <= 3 or attempt % 10 == 0:
+                    print(f"{tag} [{attempt}/{MAX_RETRIES}] nothing new to book, waiting...")
+                continue
 
-        # Loop through each hotel
-        for i, (hotel_id, hotel_name) in enumerate(hotels):
-            # For hotel after the first, we need to navigate back to the
-            # service_group_select page to pick the next hotel.
-            if i > 0:
-                # Fresh session for each hotel: reload calendar -> select date
-                open(cookie_file, 'w').close()
-                s, body, _ = c('GET', CALENDAR_URL)
-                if s != 200:
-                    print(f"{tag} Calendar reload failed, stopping")
-                    break
-                csrf = ex(body, r'csrf-token.*?content="(.*?)"')
-                auth = ex(body, r'name="authenticity_token" value="(.*?)"')
-                s_param = ex(body, r'name="s" id="s" value="(.*?)"')
+            print(f"{tag} [{attempt}/{MAX_RETRIES}] {len(hotels)} to book: {', '.join(n for _, n in hotels)}")
 
-                # Navigate to month again
-                if f'data-join-time="{target_date}"' not in body:
-                    next_date = ex(body, r"toNextMonth\('([^']+)'")
-                    target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
-                    c('POST', BASE + '/calendar_apply/calendar_select',
-                        {'join_date': next_date or target_ym, 's': s_param},
-                        {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
-                         'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-                         'Referer': CALENDAR_URL})
+            # Loop through each hotel
+            for i, (hotel_id, hotel_name) in enumerate(hotels):
+                if i > 0:
+                    # Fresh session for next hotel
+                    open(cookie_file, 'w').close()
+                    s, body, _ = c('GET', CALENDAR_URL)
+                    if s != 200:
+                        print(f"{tag} Calendar reload failed, stopping hotel loop")
+                        break
+                    csrf = ex(body, r'csrf-token.*?content="(.*?)"')
+                    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+                    s_param = ex(body, r'name="s" id="s" value="(.*?)"')
 
-                # Select date again
-                s, body, _ = c('POST', BASE + '/calendar_apply/service_group_select',
-                    {'utf8': '\u2713', 'authenticity_token': auth,
-                     'join_time': target_date, 's': s_param})
-                auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+                    if f'data-join-time="{target_date}"' not in body:
+                        target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
+                        c('POST', BASE + '/calendar_apply/calendar_select',
+                            {'join_date': target_ym, 's': s_param},
+                            {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
+                             'Accept': 'text/javascript, application/javascript, */*; q=0.01',
+                             'Referer': CALENDAR_URL})
 
-            success = book_one_hotel(tag, c, target_date, s_param, auth,
-                                    hotel_id, hotel_name)
-            if success:
-                booked.append(hotel_name)
+                    s, body, _ = c('POST', BASE + '/calendar_apply/service_group_select',
+                        {'utf8': '\u2713', 'authenticity_token': auth,
+                         'join_time': target_date, 's': s_param})
+                    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
+                success = book_one_hotel(tag, c, target_date, s_param, auth,
+                                        hotel_id, hotel_name)
+                if success:
+                    booked.append(hotel_name)
+                    print(f"{tag} === Total booked for {target_date}: {len(booked)} ({', '.join(booked)})")
+
+        print(f"{tag} Finished {MAX_RETRIES} attempts. Booked {len(booked)}: {', '.join(booked) if booked else 'none'}")
         return target_date, booked
 
     finally:
