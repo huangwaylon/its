@@ -1,14 +1,61 @@
 #!/usr/bin/env python3
-"""Live curl booking run."""
-import subprocess, re, urllib.parse, sys
+"""Parallel curl booking for multiple dates -- books all available hotels per date."""
+import subprocess, re, urllib.parse, sys, os, json, tempfile, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE = 'https://as.its-kenpo.or.jp'
-COOKIES = 'cookies_live.txt'
 CALENDAR_URL = open('calendar_url_cache.txt').read().strip()
-TARGET_DATE = '2026-04-13'
+TARGET_DATES = ['2026-04-13', '2026-04-14']
+EMAIL = 'wwaylonhuang@gmail.com'
+NUM_GUESTS = '2'
+BOOKINGS_FILE = 'bookings.json'
+SKIP_HOTELS = [
+    "ブルーベリーヒル勝浦",
+    # "ホテル日航プリンセス京都",
+    # "ホテルハーヴェスト南紀田辺",
+    # "草津温泉　ホテルヴィレッジ",
+    # "ホテルハーヴェスト伊東",
+    # "ホテルハーヴェスト　スキージャム勝山",
+    # "ホテル琵琶レイクオーツカ",
+    # "ホテルハーヴェスト有馬六彩",
+    # "リソルの森",
+    # "ホテルハーヴェスト浜名湖",
+    # "ゆふいん山水館",
+    # "ホテル日航アリビラ",
+    # "ラビスタ函館ベイANNEX",
+]
 
-def curl(method, url, data=None, headers=None):
-    cmd = ['curl', '-s', '-c', COOKIES, '-b', COOKIES, '-D', '/dev/stderr', '--max-redirs', '0']
+# Thread-safe bookings access
+_bookings_lock = threading.Lock()
+
+
+def load_bookings():
+    if not os.path.exists(BOOKINGS_FILE):
+        return {}
+    with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
+        content = f.read().strip()
+        return json.loads(content) if content else {}
+
+
+def save_booking(date, hotel_name):
+    with _bookings_lock:
+        bookings = load_bookings()
+        if date not in bookings:
+            bookings[date] = []
+        if hotel_name not in bookings[date]:
+            bookings[date].append(hotel_name)
+            with open(BOOKINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(bookings, f, ensure_ascii=False, indent=2)
+
+
+def get_booked_hotels(date):
+    with _bookings_lock:
+        return load_bookings().get(date, [])
+
+
+def curl(cookie_file, method, url, data=None, headers=None):
+    cmd = ['curl', '-s', '-c', cookie_file, '-b', cookie_file,
+           '-D', '/dev/stderr', '--max-redirs', '0']
     if method == 'POST':
         cmd.extend(['-X', 'POST'])
     if headers:
@@ -27,189 +74,252 @@ def curl(method, url, data=None, headers=None):
     location = loc.group(1).strip() if loc else None
     return status, body, location
 
+
 def ex(html, pat):
     m = re.search(pat, html)
     return m.group(1) if m else None
 
-open(COOKIES, 'w').close()
 
-# STEP 1
-print("STEP 1: Load calendar")
-s, body, _ = curl('GET', CALENDAR_URL)
-print(f"  [{s}] {len(body)}b")
-if s != 200:
-    print("  FAILED - token expired")
-    sys.exit(1)
-csrf = ex(body, r'csrf-token.*?content="(.*?)"')
-auth = ex(body, r'name="authenticity_token" value="(.*?)"')
-s_param = ex(body, r'name="s" id="s" value="(.*?)"')
-month = ex(body, r'<span class="month">(.*?)</span>')
-print(f"  Month: {month}")
+def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
+    """Book a single hotel for a date. Steps 3-9. Returns True on success."""
+    # STEP 3: Select hotel
+    print(f"{tag} Booking: {hotel_name}")
+    s, body, _ = c('POST', BASE + '/calendar_apply/apply_service_select',
+        {'utf8': '\u2713', 'authenticity_token': auth, 'empty': '',
+         'join_time': target_date, 's': s_param, 'service_group_id': hotel_id})
+    services = re.findall(r'data-apply-service-id="(\d+)".*?>(.*?)</a>', body)
+    if not services:
+        print(f"{tag}   No services for {hotel_name}")
+        return False
+    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
-# Navigate to April if needed
-if f'data-join-time="{TARGET_DATE}"' not in body:
-    print("  Navigating to April...")
-    next_date = ex(body, r"toNextMonth\('([^']+)'")
-    s2, body2, _ = curl('POST', BASE + '/calendar_apply/calendar_select',
-        {'join_date': next_date or '2026-04-01', 's': s_param},
+    # STEP 4: Select service (302)
+    service_id = services[0][0]
+    s, body, loc = c('POST', BASE + '/calendar_apply/check_apply_service_coma',
+        {'utf8': '\u2713', 'authenticity_token': auth,
+         'join_time': target_date, 's': s_param, 'apply_service_id': service_id})
+    if not loc or 'empty_new' not in loc:
+        print(f"{tag}   Step 4 redirect failed")
+        return False
+
+    # STEP 5: Load booking form
+    referer_url = loc
+    s, body, _ = c('GET', loc)
+    csrf = ex(body, r'csrf-token.*?content="(.*?)"')
+    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+    form_action = ex(body, r'action="(/apply/empty_create\?s=[^"]+)"')
+    coma_s = ex(body, r"coma_search\('([^']+)'\)")
+
+    # STEP 6: Search rooms
+    s, body, _ = c('POST',
+        BASE + '/apply/empty_new?s=' + urllib.parse.quote(coma_s, safe=''),
+        {'utf8': '\u2713', 'authenticity_token': auth,
+         'apply[join_time]': target_date, 'apply[night_count]': '1',
+         'apply[stay_persons]': NUM_GUESTS, 'apply[hope_rooms]': '1'},
         {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
          'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-         'Referer': CALENDAR_URL})
-    print(f"  [{s2}] {len(body2)}b")
-    cls = ex(body2, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{TARGET_DATE}\\"') or ''
-    avail = 'empty' in cls
-    print(f"  {TARGET_DATE}: {'AVAILABLE' if avail else 'NOT AVAILABLE'}")
-    if not avail:
-        sys.exit(0)
+         'Referer': referer_url})
+    if 'service_category' in body:
+        print(f"{tag}   Session expired at room search")
+        return False
+    rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
+    guid = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
+    if not rooms:
+        print(f"{tag}   No rooms available")
+        return False
+    print(f"{tag}   {len(rooms)} rooms -> selecting room")
 
-# STEP 2
-print("\nSTEP 2: Select date")
-s, body, _ = curl('POST', BASE + '/calendar_apply/service_group_select',
-    {'utf8': '\u2713', 'authenticity_token': auth, 'join_time': TARGET_DATE, 's': s_param})
-print(f"  [{s}] {len(body)}b")
-hotels = re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)
-for gid, name in hotels:
-    print(f"  Hotel: {name} (id={gid})")
-auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+    # STEP 7: Submit room
+    room_id = rooms[0][0]
+    s, body, loc = c('POST', BASE + form_action,
+        {'utf8': '\u2713', 'authenticity_token': auth,
+         'apply[join_time]': target_date, 'apply[night_count]': '1',
+         'apply[stay_persons]': NUM_GUESTS, 'apply[hope_rooms]': '1',
+         'apply_session_guid': guid, f'apply[coma[{room_id}]]': room_id},
+        {'Referer': referer_url})
+    if s == 302 and loc:
+        s, body, _ = c('GET', loc)
 
-# STEP 3
-hotel_id, hotel_name = hotels[0]
-print(f"\nSTEP 3: Select hotel: {hotel_name}")
-s, body, _ = curl('POST', BASE + '/calendar_apply/apply_service_select',
-    {'utf8': '\u2713', 'authenticity_token': auth, 'empty': '',
-     'join_time': TARGET_DATE, 's': s_param, 'service_group_id': hotel_id})
-print(f"  [{s}] {len(body)}b")
-services = re.findall(r'data-apply-service-id="(\d+)".*?>(.*?)</a>', body)
-for sid, name in services:
-    print(f"  Service: {name} (id={sid})")
-auth = ex(body, r'name="authenticity_token" value="(.*?)"')
-
-# STEP 4
-service_id = services[0][0]
-print(f"\nSTEP 4: Select service (302 redirect)")
-s, body, loc = curl('POST', BASE + '/calendar_apply/check_apply_service_coma',
-    {'utf8': '\u2713', 'authenticity_token': auth,
-     'join_time': TARGET_DATE, 's': s_param, 'apply_service_id': service_id})
-print(f"  [{s}] -> {loc[:80] if loc else 'NONE'}")
-
-# STEP 5
-print(f"\nSTEP 5: Load booking form")
-referer_url = loc
-s, body, _ = curl('GET', loc)
-print(f"  [{s}] {len(body)}b")
-timeout = '\u30bb\u30c3\u30b7\u30e7\u30f3\u304c\u30bf\u30a4\u30e0\u30a2\u30a6\u30c8' in body
-print(f"  Session timeout: {timeout}")
-csrf = ex(body, r'csrf-token.*?content="(.*?)"')
-auth = ex(body, r'name="authenticity_token" value="(.*?)"')
-form_action = ex(body, r'action="(/apply/empty_create\?s=[^"]+)"')
-coma_s = ex(body, r"coma_search\('([^']+)'\)")
-print(f"  Form action: {form_action[:60] if form_action else 'NONE'}")
-
-# STEP 6
-print(f"\nSTEP 6: Search rooms (2 guests)")
-s, body, _ = curl('POST', BASE + '/apply/empty_new?s=' + urllib.parse.quote(coma_s, safe=''),
-    {'utf8': '\u2713', 'authenticity_token': auth,
-     'apply[join_time]': TARGET_DATE, 'apply[night_count]': '1',
-     'apply[stay_persons]': '2', 'apply[hope_rooms]': '1'},
-    {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
-     'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-     'Referer': referer_url})
-print(f"  [{s}] {len(body)}b")
-
-if 'service_category' in body:
-    print("  ERROR: Session expired")
-    sys.exit(1)
-
-rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
-guid = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
-for m2 in re.finditer(
-    r'name=\\"apply\[coma\[(\d+)\]\]\\"[^>]*>.*?<\\/td>\s*<td[^>]*>(\d+)<\\/td>\s*<td[^>]*>([^<]+)<\\/td>\s*<td[^>]*>([^<]+)<\\/td>\s*<td[^>]*>([^<]+)<\\/td>',
-    body, re.DOTALL):
-    print(f"  Room {m2.group(2)}: {m2.group(4)} ({m2.group(5).strip()}) [coma={m2.group(1)}]")
-print(f"  GUID: {guid}")
-print(f"  Total: {len(rooms)} rooms")
-
-if not rooms:
-    print("  No rooms!")
-    sys.exit(0)
-
-# STEP 7
-room_id = rooms[0][0]
-print(f"\nSTEP 7: Submit room {room_id}")
-s, body, loc = curl('POST', BASE + form_action,
-    {'utf8': '\u2713', 'authenticity_token': auth,
-     'apply[join_time]': TARGET_DATE, 'apply[night_count]': '1',
-     'apply[stay_persons]': '2', 'apply[hope_rooms]': '1',
-     'apply_session_guid': guid, f'apply[coma[{room_id}]]': room_id},
-    {'Referer': referer_url})
-print(f"  [{s}] Redirect: {loc}")
-if s == 302 and loc:
-    s, body, _ = curl('GET', loc)
-    print(f"  Followed -> [{s}] {len(body)}b")
-open('step7_live.html', 'w').write(body)
-
-# Check what page we landed on
-page_title = ex(body, r'<h1[^>]*>(.*?)</h1>')
-print(f"  Page: {page_title}")
-
-if '\u540c\u610f' in body:
-    print("  -> RULES PAGE")
+    # STEP 8: Agree to rules
+    if '\u540c\u610f' not in body:
+        print(f"{tag}   Not on rules page")
+        return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
-    # The s param is in a hidden field inside the form
     s_rule_m = re.search(r'name="s"[^>]*value="([^"]*)"', body)
     s_rule = s_rule_m.group(1) if s_rule_m else None
-    print(f"  Form: {form_act}")
-    print(f"  S (rule): {s_rule[:40] if s_rule else 'NONE'}...")
-
-    # STEP 8
-    print(f"\nSTEP 8: Agree to rules")
-    rule_url = BASE + form_act if form_act and not form_act.startswith('http') else form_act
+    rule_url = BASE + form_act if form_act else None
     post_data = {'utf8': '\u2713', 'authenticity_token': auth}
     if s_rule:
         post_data['s'] = s_rule
-    s, body, loc = curl('POST', rule_url, post_data)
-    print(f"  [{s}] Redirect: {loc}")
+    s, body, loc = c('POST', rule_url, post_data)
     if s == 302 and loc:
-        s, body, _ = curl('GET', loc)
-        print(f"  Followed -> [{s}] {len(body)}b")
-    open('step8_live.html', 'w').write(body)
+        s, body, _ = c('GET', loc)
 
-    page_title = ex(body, r'<h1[^>]*>(.*?)</h1>')
-    print(f"  Page: {page_title}")
+    # STEP 9: Submit email
+    if 'email' not in body.lower():
+        print(f"{tag}   Not on email page")
+        return False
+    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+    form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
+    token_field = ex(body, r'name="__token__"[^>]*value="([^"]*)"')
+    email_url = BASE + form_act if form_act else None
+    post_data = {
+        'utf8': '\u2713', 'authenticity_token': auth,
+        'email': EMAIL, 'commit': '\u9001\u4fe1',
+    }
+    if token_field:
+        post_data['__token__'] = token_field
+    s, body, loc = c('POST', email_url, post_data)
+    if s == 302 and loc:
+        s, body, _ = c('GET', loc)
 
-    if 'email' in (loc or '').lower() or '\u30e1\u30fc\u30eb' in body or 'email' in body.lower():
-        print("  -> EMAIL PAGE")
+    if 'send_complete' in body:
+        print(f"{tag}   BOOKED: {hotel_name}")
+        save_booking(target_date, hotel_name)
+        return True
+
+    print(f"{tag}   Final page not send_complete")
+    return False
+
+
+def book_all_hotels_for_date(target_date, label):
+    """Loop through all available hotels for a date, booking each one.
+    Returns (date, list_of_booked_hotels)."""
+    tag = f"[{label}]"
+    booked = []
+
+    cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_{target_date}_')
+    os.close(cookie_fd)
+    open(cookie_file, 'w').close()
+
+    def c(method, url, data=None, headers=None):
+        return curl(cookie_file, method, url, data, headers)
+
+    try:
+        # STEP 1: Load calendar
+        print(f"{tag} Step 1: Load calendar")
+        s, body, _ = c('GET', CALENDAR_URL)
+        if s != 200:
+            print(f"{tag} FAILED - token expired ({s})")
+            return target_date, booked
+        csrf = ex(body, r'csrf-token.*?content="(.*?)"')
         auth = ex(body, r'name="authenticity_token" value="(.*?)"')
-        form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
-        email_field = ex(body, r'name="([^"]*email[^"]*)"')
-        token_field = ex(body, r'name="__token__"[^>]*value="([^"]*)"')
-        print(f"  Form: {form_act}")
-        print(f"  Email field: {email_field}")
-        print(f"  __token__: {token_field}")
+        s_param = ex(body, r'name="s" id="s" value="(.*?)"')
 
-        # STEP 9
-        print(f"\nSTEP 9: Submit email")
-        email_url = BASE + form_act if form_act and not form_act.startswith('http') else form_act
-        post_data = {
-            'utf8': '\u2713',
-            'authenticity_token': auth,
-            email_field or 'email': 'wwaylonhuang@gmail.com',
-            'commit': '\u9001\u4fe1',
-        }
-        if token_field:
-            post_data['__token__'] = token_field
-        s, body, loc = curl('POST', email_url, post_data)
-        print(f"  [{s}] Redirect: {loc}")
-        if s == 302 and loc:
-            s, body, _ = curl('GET', loc)
-            print(f"  Followed -> [{s}] {len(body)}b")
-        open('step9_live.html', 'w').write(body)
+        # Navigate to target month if needed
+        if f'data-join-time="{target_date}"' not in body:
+            next_date = ex(body, r"toNextMonth\('([^']+)'")
+            target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
+            s2, body_nav, _ = c('POST', BASE + '/calendar_apply/calendar_select',
+                {'join_date': next_date or target_ym, 's': s_param},
+                {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
+                 'Accept': 'text/javascript, application/javascript, */*; q=0.01',
+                 'Referer': CALENDAR_URL})
+            cls = ex(body_nav, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{target_date}\\"') or ''
+            if 'empty' not in cls:
+                print(f"{tag} {target_date}: NOT AVAILABLE")
+                return target_date, booked
 
-        if 'send_complete' in (loc or '') or 'send_complete' in body:
-            print("\n" + "=" * 60)
-            print("BOOKING COMPLETE!")
-            print("=" * 60)
+        # STEP 2: Select date -> get hotel list
+        print(f"{tag} Step 2: Select date {target_date}")
+        s, body, _ = c('POST', BASE + '/calendar_apply/service_group_select',
+            {'utf8': '\u2713', 'authenticity_token': auth,
+             'join_time': target_date, 's': s_param})
+        all_hotels = re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)
+        if not all_hotels:
+            print(f"{tag} No hotels for {target_date}")
+            return target_date, booked
+        auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+
+        # Filter: skip list + already booked
+        already_booked = get_booked_hotels(target_date)
+        hotels = []
+        for gid, name in all_hotels:
+            if name in SKIP_HOTELS:
+                print(f"{tag}   SKIP (config): {name}")
+            elif name in already_booked:
+                print(f"{tag}   SKIP (already booked): {name}")
+            else:
+                hotels.append((gid, name))
+
+        if not hotels:
+            print(f"{tag} No hotels to book for {target_date}")
+            return target_date, booked
+
+        print(f"{tag} {len(hotels)} hotels to book")
+
+        # Loop through each hotel
+        for i, (hotel_id, hotel_name) in enumerate(hotels):
+            # For hotel after the first, we need to navigate back to the
+            # service_group_select page to pick the next hotel.
+            if i > 0:
+                # Fresh session for each hotel: reload calendar -> select date
+                open(cookie_file, 'w').close()
+                s, body, _ = c('GET', CALENDAR_URL)
+                if s != 200:
+                    print(f"{tag} Calendar reload failed, stopping")
+                    break
+                csrf = ex(body, r'csrf-token.*?content="(.*?)"')
+                auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+                s_param = ex(body, r'name="s" id="s" value="(.*?)"')
+
+                # Navigate to month again
+                if f'data-join-time="{target_date}"' not in body:
+                    next_date = ex(body, r"toNextMonth\('([^']+)'")
+                    target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
+                    c('POST', BASE + '/calendar_apply/calendar_select',
+                        {'join_date': next_date or target_ym, 's': s_param},
+                        {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
+                         'Accept': 'text/javascript, application/javascript, */*; q=0.01',
+                         'Referer': CALENDAR_URL})
+
+                # Select date again
+                s, body, _ = c('POST', BASE + '/calendar_apply/service_group_select',
+                    {'utf8': '\u2713', 'authenticity_token': auth,
+                     'join_time': target_date, 's': s_param})
+                auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+
+            success = book_one_hotel(tag, c, target_date, s_param, auth,
+                                    hotel_id, hotel_name)
+            if success:
+                booked.append(hotel_name)
+
+        return target_date, booked
+
+    finally:
+        os.unlink(cookie_file)
+
+
+def main():
+    print(f"Booking {len(TARGET_DATES)} dates in parallel: {', '.join(TARGET_DATES)}")
+    print(f"Email: {EMAIL}")
+    print(f"Calendar URL: {CALENDAR_URL[:60]}...")
+    print("=" * 60)
+
+    with ThreadPoolExecutor(max_workers=len(TARGET_DATES)) as pool:
+        futures = {}
+        for i, date in enumerate(TARGET_DATES):
+            label = f"D{i+1} {date}"
+            futures[pool.submit(book_all_hotels_for_date, date, label)] = date
+
+        results = {}
+        for future in as_completed(futures):
+            date, booked_list = future.result()
+            results[date] = booked_list
+
+    print("\n" + "=" * 60)
+    print("RESULTS")
+    print("=" * 60)
+    for date in TARGET_DATES:
+        booked_list = results.get(date, [])
+        if booked_list:
+            print(f"  {date}: {len(booked_list)} booked")
+            for h in booked_list:
+                print(f"    - {h}")
         else:
-            page_title = ex(body, r'<h1[^>]*>(.*?)</h1>')
-            print(f"  Page: {page_title}")
+            print(f"  {date}: none booked")
+
+
+if __name__ == '__main__':
+    main()
