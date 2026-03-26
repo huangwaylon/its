@@ -241,7 +241,7 @@ def book_all_hotels_for_date(target_date, label):
                      'Referer': CALENDAR_URL})
                 cls = ex(body_nav, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{target_date}\\"') or ''
                 if 'empty' not in cls:
-                    if attempt <= 3 or attempt % 10 == 0:
+                    if attempt <= 300 or attempt % 10 == 0:
                         print(f"{tag} [{attempt}/{MAX_RETRIES}] date not available, waiting...")
                     continue
 
