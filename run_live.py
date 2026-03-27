@@ -275,7 +275,7 @@ def book_all_hotels_for_date(target_date, label):
                         print(f"{tag} Skipped: {', '.join(skipped)}")
                     if prev_booked:
                         print(f"{tag} Already booked: {', '.join(prev_booked)}")
-                if attempt <= 3 or attempt % 10 == 0:
+                if attempt <= 300 or attempt % 10 == 0:
                     print(f"{tag} [{attempt}/{MAX_RETRIES}] nothing new to book, waiting...")
                 continue
 
