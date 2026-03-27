@@ -4,42 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ITS Calendar Scanner — an automated booking system for ITS Health Insurance Facility Calendar (as.its-kenpo.or.jp). It continuously monitors available dates at Japanese hospitality facilities and attempts automated bookings using Chromium browser automation.
+ITS Calendar Booker — an automated booking system for ITS Health Insurance Facility Calendar (as.its-kenpo.or.jp). It monitors available dates at Japanese hospitality facilities and books hotels using parallel HTTP requests via curl.
 
 ## Setup & Running
 
 ```bash
-# Install dependencies (only pydoll-python)
-uv pip install -r requirements.txt
-
-# Run the scanner
-uv run main.py
+# No dependencies required (stdlib only + curl)
+python run_live.py
 ```
+
+Requires a valid calendar URL in `calendar_url_cache.txt` (obtained separately via CAPTCHA).
 
 There are no tests, linting, or formatting tools configured.
 
 ## Architecture
 
-The system follows a two-phase approach: scan all target months to collect available days, then process each available day and attempt booking.
+Single self-contained script: `run_live.py`
 
-**Entry point**: `main.py` — continuous loop calling `scan_once()` → `scan_calendar_and_book()` → `scan_and_book_one()`
+**Strategy**: Spawns one thread per target date using `ThreadPoolExecutor`. Each thread retries up to `MAX_RETRIES` (300) times, polling for availability and booking all eligible hotels per date.
 
-**Module responsibilities**:
-- `config.py` — All constants: user config, selectors, timeouts, hotel filters, UI strings
-- `calendar_scanner.py` — Date availability detection, month navigation with polling, target date filtering
-- `navigation.py` — Main page navigation, calendar link discovery, CAPTCHA iframe handling
-- `booking.py` — Full booking workflow: date selection, hotel filtering, form filling, submission
-- `browser.py` — Chrome options setup, script execution result extraction
-- `cache.py` — URL caching (text file), URL history (CSV), booking history (JSON)
+**Booking flow per date** (`book_all_hotels_for_date()`):
+1. GET calendar page, extract CSRF/auth tokens via regex
+2. POST to navigate to target month if date not visible
+3. POST to `service_group_select` to get hotel list
+4. Filter out `SKIP_HOTELS` + already-booked hotels
+5. For each hotel, `book_one_hotel()`: select hotel → select service → load form → search rooms → submit room → agree to rules → submit email
 
 **Key patterns**:
-- Async/await throughout (asyncio)
-- Browser automation via `pydoll` (Chromium wrapper)
-- JavaScript execution for complex DOM interactions
-- Polling strategy for month navigation (10 attempts, 0.3s intervals) instead of fixed waits
-- All configuration centralized in `config.py`
+- Raw HTTP via `curl` subprocess (no browser rendering)
+- HTML parsing with regex for token/form extraction
+- Thread-safe bookings access with `threading.Lock`
+- Cookie files per thread, cleared between hotel bookings
 
 **Data files**:
 - `bookings.json` — Records successful bookings (date → hotel list)
-- `calendar_url_cache.txt` — Cached calendar URL
+- `calendar_url_cache.txt` — Calendar URL (must exist before running)
 - `calendar_url_history.csv` — Historical URLs with timestamps
