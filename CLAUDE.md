@@ -10,7 +10,7 @@ ITS Calendar Booker — an automated booking system for ITS Health Insurance Fac
 
 ```bash
 # No dependencies required (stdlib only + curl)
-python run_live.py
+python3 main.py
 ```
 
 Requires a valid calendar URL in `calendar_url_cache.txt` (obtained separately via CAPTCHA).
@@ -19,7 +19,7 @@ There are no tests, linting, or formatting tools configured.
 
 ## Architecture
 
-Single self-contained script: `run_live.py`
+Single self-contained script: `main.py`
 
 **Strategy**: Spawns one thread per target date using `ThreadPoolExecutor`. Each thread retries up to `MAX_RETRIES` (300) times, polling for availability and booking all eligible hotels per date.
 
