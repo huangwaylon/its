@@ -84,7 +84,7 @@ def _screenshot_to_b64(png_bytes, max_dim=None):
 
 
 # Limit concurrent ollama requests to avoid overwhelming it
-_vision_semaphore = asyncio.Semaphore(3)
+_vision_semaphore = asyncio.Semaphore(2)
 
 
 async def ask_vision(http, image_b64, prompt, no_think=False):
@@ -115,11 +115,15 @@ async def ask_vision(http, image_b64, prompt, no_think=False):
                     f'{OLLAMA_URL}/api/chat',
                     '-H', 'Content-Type: application/json',
                     '-d', f'@{tmp.name}',
-                    '--max-time', '120',
+                    '--max-time', '30',
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=35)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    raise RuntimeError('ollama took >35s, killed')
                 if proc.returncode != 0:
                     raise RuntimeError(f'curl exit {proc.returncode}: {stderr.decode()[:200]}')
                 result = json.loads(stdout)
@@ -254,6 +258,12 @@ async def solve_recaptcha(page: Page, max_attempts=8):
                 log(f'Warning: expected {total_tiles} tiles, found {tile_count}')
                 total_tiles = tile_count
             log(f'Grid: {grid_type} ({total_tiles} tiles)')
+
+            # Skip 4x4 challenges — too many tiles, ollama degrades before finishing
+            if grid_type == '4x4':
+                log('4x4 grid detected, skipping (too slow for ollama). Reloading...')
+                await _reload_challenge(bframe)
+                continue
 
             # Save debug screenshot of challenge
             try:
@@ -475,11 +485,11 @@ async def _handle_dynamic_tiles(bframe, http, prompt_text):
 
     Uses per-tile classification for replacement tiles (reliable, unlike full-grid
     which frequently fails with curl exit 56 on ollama).
-    Limited to 3 rounds to avoid timeout.
+    Limited to 5 rounds to avoid timeout.
     """
     tile_prompt = build_tile_prompt(prompt_text)
 
-    for round_num in range(3):
+    for round_num in range(5):
         log(f'  Dynamic round {round_num+1}: waiting for animation...')
         for _ in range(10):
             if await bframe.locator(DYNAMIC_SELECTED).count() > 0:
@@ -492,14 +502,18 @@ async def _handle_dynamic_tiles(bframe, http, prompt_text):
         tiles = bframe.locator(TILES)
         tile_count = await tiles.count()
         to_check = []
-        for i in range(tile_count):
-            tile = tiles.nth(i)
-            if await tile.locator(NEW_TILE_IMG).count() > 0:
-                tile_bytes = await tile.screenshot()
-                b64 = _screenshot_to_b64(tile_bytes)
-                with open(_debug_path(f'dynamic_r{round_num+1}_tile{i+1}.png'), 'wb') as f:
-                    f.write(tile_bytes)
-                to_check.append((i, b64))
+        try:
+            for i in range(tile_count):
+                tile = tiles.nth(i)
+                if await tile.locator(NEW_TILE_IMG).count() > 0:
+                    tile_bytes = await tile.screenshot(timeout=5000)
+                    b64 = _screenshot_to_b64(tile_bytes)
+                    with open(_debug_path(f'dynamic_r{round_num+1}_tile{i+1}.png'), 'wb') as f:
+                        f.write(tile_bytes)
+                    to_check.append((i, b64))
+        except Exception as e:
+            log(f'  Screenshot failed (session expired?): {e}')
+            break
 
         if not to_check:
             log('  No new replacement tiles, done')
