@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from captcha_solver import get_calendar_url, CALENDAR_URL_CACHE
 import main as booking
+from main import log
 
 MAX_CAPTCHA_FAILURES = 5
 
@@ -35,16 +36,16 @@ def check_cached_url():
         return None
     if not url:
         return None
-    print(f"Testing cached URL: {url[:80]}...")
+    log(f"Testing cached URL: {url[:80]}...")
     r = subprocess.run(
         ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10', url],
         capture_output=True, text=True,
     )
     status = r.stdout.strip()
     if status == '200':
-        print(f"{G}Cached URL is valid (200){X}")
+        log(f"{G}Cached URL is valid (200){X}")
         return url
-    print(f"{Y}Cached URL returned {status}, need fresh CAPTCHA solve{X}")
+    log(f"{Y}Cached URL returned {status}, need fresh CAPTCHA solve{X}")
     return None
 
 
@@ -62,9 +63,9 @@ def run_booking_round(calendar_url):
         any_expired: True if any thread reported URL expiry
     """
     dates = booking.TARGET_DATES
-    print(f"\n{B}Booking {len(dates)} dates in parallel: {', '.join(dates)}{X}")
-    print(f"Calendar URL: {calendar_url[:80]}...")
-    print("=" * 60)
+    log(f"\n{B}Booking {len(dates)} dates in parallel: {', '.join(dates)}{X}")
+    log(f"Calendar URL: {calendar_url[:80]}...")
+    log("=" * 60)
 
     any_expired = False
     results = {}
@@ -87,25 +88,25 @@ def run_booking_round(calendar_url):
 
 
 def print_round_results(results):
-    print("\n" + "=" * 60)
-    print(f"{B}ROUND RESULTS{X}")
-    print("=" * 60)
+    log("\n" + "=" * 60)
+    log(f"{B}ROUND RESULTS{X}")
+    log("=" * 60)
     for date in booking.TARGET_DATES:
         booked_list = results.get(date, [])
         if booked_list:
-            print(f"  {G}{date}: {len(booked_list)} booked{X}")
+            log(f"  {G}{date}: {len(booked_list)} booked{X}")
             for h in booked_list:
-                print(f"    {G}- {h}{X}")
+                log(f"    {G}- {h}{X}")
         else:
-            print(f"  {date}: none booked")
+            log(f"  {date}: none booked")
 
 
 def main():
-    print("=" * 60)
-    print(f"{B}ITS INDEFINITE BOOKING LOOP{X}")
-    print(f"Email: {booking.EMAIL}")
-    print(f"Dates: {', '.join(booking.TARGET_DATES)}")
-    print("=" * 60)
+    log("=" * 60)
+    log(f"{B}ITS INDEFINITE BOOKING LOOP{X}")
+    log(f"Email: {booking.EMAIL}")
+    log(f"Dates: {', '.join(booking.TARGET_DATES)}")
+    log("=" * 60)
 
     consecutive_captcha_failures = 0
     round_num = 0
@@ -116,36 +117,36 @@ def main():
 
         # Solve captcha if we don't have a valid URL
         if not calendar_url:
-            print(f"\n{B}{'#' * 60}")
-            print(f"# ROUND {round_num} -- Solving CAPTCHA...")
-            print(f"{'#' * 60}{X}")
+            log(f"\n{B}{'#' * 60}")
+            log(f"# ROUND {round_num} -- Solving CAPTCHA...")
+            log(f"{'#' * 60}{X}")
 
             calendar_url = solve_captcha_sync()
             if not calendar_url:
                 consecutive_captcha_failures += 1
-                print(f"{R}CAPTCHA solve failed ({consecutive_captcha_failures}/{MAX_CAPTCHA_FAILURES}){X}")
+                log(f"{R}CAPTCHA solve failed ({consecutive_captcha_failures}/{MAX_CAPTCHA_FAILURES}){X}")
                 if consecutive_captcha_failures >= MAX_CAPTCHA_FAILURES:
-                    print(f"{R}Too many consecutive CAPTCHA failures, exiting.{X}")
+                    log(f"{R}Too many consecutive CAPTCHA failures, exiting.{X}")
                     sys.exit(1)
-                print(f"{Y}Retrying in 30 seconds...{X}")
+                log(f"{Y}Retrying in 30 seconds...{X}")
                 time.sleep(30)
                 continue
 
             consecutive_captcha_failures = 0
-            print(f"{G}Got calendar URL: {calendar_url[:80]}...{X}")
+            log(f"{G}Got calendar URL: {calendar_url[:80]}...{X}")
         else:
-            print(f"\n{B}{'#' * 60}")
-            print(f"# ROUND {round_num} -- Using valid URL")
-            print(f"{'#' * 60}{X}")
+            log(f"\n{B}{'#' * 60}")
+            log(f"# ROUND {round_num} -- Using valid URL")
+            log(f"{'#' * 60}{X}")
 
         results, any_expired = run_booking_round(calendar_url)
         print_round_results(results)
 
         if any_expired:
-            print(f"\n{Y}URL expired during booking. Will re-solve CAPTCHA...{X}")
+            log(f"\n{Y}URL expired during booking. Will re-solve CAPTCHA...{X}")
             calendar_url = None
         else:
-            print(f"\n{C}All threads completed. Restarting booking round...{X}")
+            log(f"\n{C}All threads completed. Restarting booking round...{X}")
 
 
 if __name__ == '__main__':

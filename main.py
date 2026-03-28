@@ -2,6 +2,7 @@
 """Parallel curl booking for multiple dates -- books all available hotels per date."""
 import subprocess, re, urllib.parse, sys, os, json, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 BASE = 'https://as.its-kenpo.or.jp'
 try:
@@ -16,6 +17,12 @@ Y = '\033[93m'   # yellow
 C = '\033[96m'   # cyan
 B = '\033[1m'    # bold
 X = '\033[0m'    # reset
+
+
+def log(msg=''):
+    ts = datetime.now().strftime('%H:%M:%S')
+    print(f'{ts} {msg}', flush=True)
+
 TARGET_DATES = [
     "2026-04-18",
     "2026-04-29",
@@ -136,13 +143,13 @@ def ex(html, pat):
 def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     """Book a single hotel for a date. Steps 3-9. Returns True on success."""
     # STEP 3: Select hotel
-    print(f"{tag} {C}Booking: {hotel_name}{X}")
+    log(f"{tag} {C}Booking: {hotel_name}{X}")
     s, body, _ = c('POST', BASE + '/calendar_apply/apply_service_select',
         {'utf8': '\u2713', 'authenticity_token': auth, 'empty': '',
          'join_time': target_date, 's': s_param, 'service_group_id': hotel_id})
     services = re.findall(r'data-apply-service-id="(\d+)".*?>(.*?)</a>', body)
     if not services:
-        print(f"{tag}   {R}No services for {hotel_name}{X}")
+        log(f"{tag}   {R}No services for {hotel_name}{X}")
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
@@ -152,7 +159,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         {'utf8': '\u2713', 'authenticity_token': auth,
          'join_time': target_date, 's': s_param, 'apply_service_id': service_id})
     if not loc or 'empty_new' not in loc:
-        print(f"{tag}   {R}Step 4 redirect failed{X}")
+        log(f"{tag}   {R}Step 4 redirect failed{X}")
         return False
 
     # STEP 5: Load booking form
@@ -173,14 +180,14 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'Accept': 'text/javascript, application/javascript, */*; q=0.01',
          'Referer': referer_url})
     if 'service_category' in body:
-        print(f"{tag}   {R}Session expired at room search{X}")
+        log(f"{tag}   {R}Session expired at room search{X}")
         return False
     rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
     guid = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
     if not rooms:
-        print(f"{tag}   {R}No rooms available{X}")
+        log(f"{tag}   {R}No rooms available{X}")
         return False
-    print(f"{tag}   {C}{len(rooms)} rooms -> selecting room{X}")
+    log(f"{tag}   {C}{len(rooms)} rooms -> selecting room{X}")
 
     # STEP 7: Submit room
     room_id = rooms[0][0]
@@ -195,7 +202,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
 
     # STEP 8: Agree to rules
     if '\u540c\u610f' not in body:
-        print(f"{tag}   {R}Not on rules page{X}")
+        log(f"{tag}   {R}Not on rules page{X}")
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
@@ -211,7 +218,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
 
     # STEP 9: Submit email
     if 'email' not in body.lower():
-        print(f"{tag}   {R}Not on email page{X}")
+        log(f"{tag}   {R}Not on email page{X}")
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
@@ -228,11 +235,11 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         s, body, _ = c('GET', loc)
 
     if 'send_complete' in body:
-        print(f"{tag}   {B}{G}BOOKED: {hotel_name}{X}")
+        log(f"{tag}   {B}{G}BOOKED: {hotel_name}{X}")
         save_booking(target_date, hotel_name)
         return True
 
-    print(f"{tag}   {R}Final page not send_complete{X}")
+    log(f"{tag}   {R}Final page not send_complete{X}")
     return False
 
 
@@ -263,7 +270,7 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
             open(cookie_file, 'w').close()
             s, body, _ = c('GET', url)
             if s != 200:
-                print(f"{tag} {R}FATAL: token expired ({s}), stopping{X}")
+                log(f"{tag} {R}FATAL: token expired ({s}), stopping{X}")
                 expired = True
                 return target_date, booked, expired
             csrf = ex(body, r'csrf-token.*?content="(.*?)"')
@@ -280,7 +287,7 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
                      'Referer': url})
                 cls = ex(body_nav, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{target_date}\\"') or ''
                 if 'empty' not in cls:
-                    print(f"{tag} {Y}[{attempt}] date not available, waiting...{X}")
+                    log(f"{tag} {Y}[{attempt}] date not available, waiting...{X}")
                     continue
 
             # STEP 2: Select date -> get hotel list
@@ -289,7 +296,7 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
                  'join_time': target_date, 's': s_param})
             all_hotels = re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)
             if not all_hotels:
-                print(f"{tag} {Y}[{attempt}] no hotels listed, waiting...{X}")
+                log(f"{tag} {Y}[{attempt}] no hotels listed, waiting...{X}")
                 continue
             auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
@@ -309,13 +316,13 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
                     skipped = [n for _, n in all_hotels if n in SKIP_HOTELS]
                     prev_booked = [n for _, n in all_hotels if n in already_booked]
                     if skipped:
-                        print(f"{tag} {Y}Skipped: {', '.join(skipped)}{X}")
+                        log(f"{tag} {Y}Skipped: {', '.join(skipped)}{X}")
                     if prev_booked:
-                        print(f"{tag} {Y}Already booked: {', '.join(prev_booked)}{X}")
-                print(f"{tag} {Y}[{attempt}] nothing new to book, waiting...{X}")
+                        log(f"{tag} {Y}Already booked: {', '.join(prev_booked)}{X}")
+                log(f"{tag} {Y}[{attempt}] nothing new to book, waiting...{X}")
                 continue
 
-            print(f"{tag} {C}[{attempt}] {len(hotels)} to book: {', '.join(n for _, n in hotels)}{X}")
+            log(f"{tag} {C}[{attempt}] {len(hotels)} to book: {', '.join(n for _, n in hotels)}{X}")
 
             # Loop through each hotel
             for i, (hotel_id, hotel_name) in enumerate(hotels):
@@ -324,7 +331,7 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
                     open(cookie_file, 'w').close()
                     s, body, _ = c('GET', url)
                     if s != 200:
-                        print(f"{tag} {R}Calendar reload failed, stopping hotel loop{X}")
+                        log(f"{tag} {R}Calendar reload failed, stopping hotel loop{X}")
                         expired = True
                         break
                     csrf = ex(body, r'csrf-token.*?content="(.*?)"')
@@ -348,7 +355,7 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
                                         hotel_id, hotel_name)
                 if success:
                     booked.append(hotel_name)
-                    print(f"{tag} {B}{G}=== Total booked for {target_date}: {len(booked)} ({', '.join(booked)}){X}")
+                    log(f"{tag} {B}{G}=== Total booked for {target_date}: {len(booked)} ({', '.join(booked)}){X}")
 
             if expired:
                 return target_date, booked, expired
@@ -359,12 +366,12 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
 
 def main():
     if not CALENDAR_URL:
-        print(f"{R}ERROR: calendar_url_cache.txt not found. Run captcha_solver.py first.{X}")
+        log(f"{R}ERROR: calendar_url_cache.txt not found. Run captcha_solver.py first.{X}")
         sys.exit(1)
-    print(f"{B}Booking {len(TARGET_DATES)} dates in parallel: {', '.join(TARGET_DATES)}{X}")
-    print(f"Email: {EMAIL}")
-    print(f"Calendar URL: {CALENDAR_URL[:60]}...")
-    print("=" * 60)
+    log(f"{B}Booking {len(TARGET_DATES)} dates in parallel: {', '.join(TARGET_DATES)}{X}")
+    log(f"Email: {EMAIL}")
+    log(f"Calendar URL: {CALENDAR_URL[:60]}...")
+    log("=" * 60)
 
     with ThreadPoolExecutor(max_workers=len(TARGET_DATES)) as pool:
         futures = {}
@@ -377,17 +384,17 @@ def main():
             date, booked_list, _ = future.result()
             results[date] = booked_list
 
-    print("\n" + "=" * 60)
-    print(f"{B}RESULTS{X}")
-    print("=" * 60)
+    log("\n" + "=" * 60)
+    log(f"{B}RESULTS{X}")
+    log("=" * 60)
     for date in TARGET_DATES:
         booked_list = results.get(date, [])
         if booked_list:
-            print(f"  {G}{date}: {len(booked_list)} booked{X}")
+            log(f"  {G}{date}: {len(booked_list)} booked{X}")
             for h in booked_list:
-                print(f"    {G}- {h}{X}")
+                log(f"    {G}- {h}{X}")
         else:
-            print(f"  {date}: none booked")
+            log(f"  {date}: none booked")
 
 
 if __name__ == '__main__':
