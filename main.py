@@ -115,7 +115,7 @@ def get_booked_hotels(date):
 
 def curl(cookie_file, method, url, data=None, headers=None):
     cmd = ['curl', '-s', '-c', cookie_file, '-b', cookie_file,
-           '-D', '/dev/stderr', '--max-redirs', '0']
+           '-D', '/dev/stderr', '--max-redirs', '0', '--max-time', '30']
     if method == 'POST':
         cmd.extend(['-X', 'POST'])
     if headers:
