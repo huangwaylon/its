@@ -4,7 +4,18 @@ import subprocess, re, urllib.parse, sys, os, json, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE = 'https://as.its-kenpo.or.jp'
-CALENDAR_URL = open('calendar_url_cache.txt').read().strip()
+try:
+    CALENDAR_URL = open('calendar_url_cache.txt').read().strip()
+except FileNotFoundError:
+    CALENDAR_URL = None
+
+# ANSI colors
+R = '\033[91m'   # red
+G = '\033[92m'   # green
+Y = '\033[93m'   # yellow
+C = '\033[96m'   # cyan
+B = '\033[1m'    # bold
+X = '\033[0m'    # reset
 TARGET_DATES = [
     "2026-05-01",
     "2026-05-02",
@@ -19,7 +30,6 @@ TARGET_DATES = [
 EMAIL = 'wwaylonhuang@gmail.com'
 NUM_GUESTS = '2'
 BOOKINGS_FILE = 'bookings.json'
-MAX_RETRIES = 300
 RETRY_DELAY = 10  # seconds
 SKIP_HOTELS = [
     "ブルーベリーヒル勝浦",
@@ -124,13 +134,13 @@ def ex(html, pat):
 def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     """Book a single hotel for a date. Steps 3-9. Returns True on success."""
     # STEP 3: Select hotel
-    print(f"{tag} Booking: {hotel_name}")
+    print(f"{tag} {C}Booking: {hotel_name}{X}")
     s, body, _ = c('POST', BASE + '/calendar_apply/apply_service_select',
         {'utf8': '\u2713', 'authenticity_token': auth, 'empty': '',
          'join_time': target_date, 's': s_param, 'service_group_id': hotel_id})
     services = re.findall(r'data-apply-service-id="(\d+)".*?>(.*?)</a>', body)
     if not services:
-        print(f"{tag}   No services for {hotel_name}")
+        print(f"{tag}   {R}No services for {hotel_name}{X}")
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
@@ -140,7 +150,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         {'utf8': '\u2713', 'authenticity_token': auth,
          'join_time': target_date, 's': s_param, 'apply_service_id': service_id})
     if not loc or 'empty_new' not in loc:
-        print(f"{tag}   Step 4 redirect failed")
+        print(f"{tag}   {R}Step 4 redirect failed{X}")
         return False
 
     # STEP 5: Load booking form
@@ -161,14 +171,14 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'Accept': 'text/javascript, application/javascript, */*; q=0.01',
          'Referer': referer_url})
     if 'service_category' in body:
-        print(f"{tag}   Session expired at room search")
+        print(f"{tag}   {R}Session expired at room search{X}")
         return False
     rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
     guid = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
     if not rooms:
-        print(f"{tag}   No rooms available")
+        print(f"{tag}   {R}No rooms available{X}")
         return False
-    print(f"{tag}   {len(rooms)} rooms -> selecting room")
+    print(f"{tag}   {C}{len(rooms)} rooms -> selecting room{X}")
 
     # STEP 7: Submit room
     room_id = rooms[0][0]
@@ -183,7 +193,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
 
     # STEP 8: Agree to rules
     if '\u540c\u610f' not in body:
-        print(f"{tag}   Not on rules page")
+        print(f"{tag}   {R}Not on rules page{X}")
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
@@ -199,7 +209,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
 
     # STEP 9: Submit email
     if 'email' not in body.lower():
-        print(f"{tag}   Not on email page")
+        print(f"{tag}   {R}Not on email page{X}")
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
@@ -216,20 +226,22 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         s, body, _ = c('GET', loc)
 
     if 'send_complete' in body:
-        print(f"{tag}   BOOKED: {hotel_name}")
+        print(f"{tag}   {B}{G}BOOKED: {hotel_name}{X}")
         save_booking(target_date, hotel_name)
         return True
 
-    print(f"{tag}   Final page not send_complete")
+    print(f"{tag}   {R}Final page not send_complete{X}")
     return False
 
 
-def book_all_hotels_for_date(target_date, label):
+def book_all_hotels_for_date(target_date, label, calendar_url=None):
     """Loop through all available hotels for a date, booking each one.
-    Retries up to MAX_RETRIES times if no hotels/rooms are found.
-    Returns (date, list_of_booked_hotels)."""
+    Retries indefinitely until URL expires.
+    Returns (date, list_of_booked_hotels, expired)."""
+    url = calendar_url or CALENDAR_URL
     tag = f"[{label}]"
     booked = []
+    expired = False
 
     cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_{target_date}_')
     os.close(cookie_fd)
@@ -239,16 +251,19 @@ def book_all_hotels_for_date(target_date, label):
         return curl(cookie_file, method, url, data, headers)
 
     try:
-        for attempt in range(1, MAX_RETRIES + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             if attempt > 1:
                 time.sleep(RETRY_DELAY)
 
             # STEP 1: Load calendar
             open(cookie_file, 'w').close()
-            s, body, _ = c('GET', CALENDAR_URL)
+            s, body, _ = c('GET', url)
             if s != 200:
-                print(f"{tag} FATAL: token expired ({s}), stopping")
-                return target_date, booked
+                print(f"{tag} {R}FATAL: token expired ({s}), stopping{X}")
+                expired = True
+                return target_date, booked, expired
             csrf = ex(body, r'csrf-token.*?content="(.*?)"')
             auth = ex(body, r'name="authenticity_token" value="(.*?)"')
             s_param = ex(body, r'name="s" id="s" value="(.*?)"')
@@ -260,11 +275,10 @@ def book_all_hotels_for_date(target_date, label):
                     {'join_date': target_ym, 's': s_param},
                     {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
                      'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-                     'Referer': CALENDAR_URL})
+                     'Referer': url})
                 cls = ex(body_nav, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{target_date}\\"') or ''
                 if 'empty' not in cls:
-                    if attempt <= 300 or attempt % 10 == 0:
-                        print(f"{tag} [{attempt}/{MAX_RETRIES}] date not available, waiting...")
+                    print(f"{tag} {Y}[{attempt}] date not available, waiting...{X}")
                     continue
 
             # STEP 2: Select date -> get hotel list
@@ -273,8 +287,7 @@ def book_all_hotels_for_date(target_date, label):
                  'join_time': target_date, 's': s_param})
             all_hotels = re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)
             if not all_hotels:
-                if attempt <= 3 or attempt % 10 == 0:
-                    print(f"{tag} [{attempt}/{MAX_RETRIES}] no hotels listed, waiting...")
+                print(f"{tag} {Y}[{attempt}] no hotels listed, waiting...{X}")
                 continue
             auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
@@ -294,23 +307,23 @@ def book_all_hotels_for_date(target_date, label):
                     skipped = [n for _, n in all_hotels if n in SKIP_HOTELS]
                     prev_booked = [n for _, n in all_hotels if n in already_booked]
                     if skipped:
-                        print(f"{tag} Skipped: {', '.join(skipped)}")
+                        print(f"{tag} {Y}Skipped: {', '.join(skipped)}{X}")
                     if prev_booked:
-                        print(f"{tag} Already booked: {', '.join(prev_booked)}")
-                if attempt <= 300 or attempt % 10 == 0:
-                    print(f"{tag} [{attempt}/{MAX_RETRIES}] nothing new to book, waiting...")
+                        print(f"{tag} {Y}Already booked: {', '.join(prev_booked)}{X}")
+                print(f"{tag} {Y}[{attempt}] nothing new to book, waiting...{X}")
                 continue
 
-            print(f"{tag} [{attempt}/{MAX_RETRIES}] {len(hotels)} to book: {', '.join(n for _, n in hotels)}")
+            print(f"{tag} {C}[{attempt}] {len(hotels)} to book: {', '.join(n for _, n in hotels)}{X}")
 
             # Loop through each hotel
             for i, (hotel_id, hotel_name) in enumerate(hotels):
                 if i > 0:
                     # Fresh session for next hotel
                     open(cookie_file, 'w').close()
-                    s, body, _ = c('GET', CALENDAR_URL)
+                    s, body, _ = c('GET', url)
                     if s != 200:
-                        print(f"{tag} Calendar reload failed, stopping hotel loop")
+                        print(f"{tag} {R}Calendar reload failed, stopping hotel loop{X}")
+                        expired = True
                         break
                     csrf = ex(body, r'csrf-token.*?content="(.*?)"')
                     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
@@ -322,7 +335,7 @@ def book_all_hotels_for_date(target_date, label):
                             {'join_date': target_ym, 's': s_param},
                             {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
                              'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-                             'Referer': CALENDAR_URL})
+                             'Referer': url})
 
                     s, body, _ = c('POST', BASE + '/calendar_apply/service_group_select',
                         {'utf8': '\u2713', 'authenticity_token': auth,
@@ -333,17 +346,20 @@ def book_all_hotels_for_date(target_date, label):
                                         hotel_id, hotel_name)
                 if success:
                     booked.append(hotel_name)
-                    print(f"{tag} === Total booked for {target_date}: {len(booked)} ({', '.join(booked)})")
+                    print(f"{tag} {B}{G}=== Total booked for {target_date}: {len(booked)} ({', '.join(booked)}){X}")
 
-        print(f"{tag} Finished {MAX_RETRIES} attempts. Booked {len(booked)}: {', '.join(booked) if booked else 'none'}")
-        return target_date, booked
+            if expired:
+                return target_date, booked, expired
 
     finally:
         os.unlink(cookie_file)
 
 
 def main():
-    print(f"Booking {len(TARGET_DATES)} dates in parallel: {', '.join(TARGET_DATES)}")
+    if not CALENDAR_URL:
+        print(f"{R}ERROR: calendar_url_cache.txt not found. Run captcha_solver.py first.{X}")
+        sys.exit(1)
+    print(f"{B}Booking {len(TARGET_DATES)} dates in parallel: {', '.join(TARGET_DATES)}{X}")
     print(f"Email: {EMAIL}")
     print(f"Calendar URL: {CALENDAR_URL[:60]}...")
     print("=" * 60)
@@ -356,18 +372,18 @@ def main():
 
         results = {}
         for future in as_completed(futures):
-            date, booked_list = future.result()
+            date, booked_list, _ = future.result()
             results[date] = booked_list
 
     print("\n" + "=" * 60)
-    print("RESULTS")
+    print(f"{B}RESULTS{X}")
     print("=" * 60)
     for date in TARGET_DATES:
         booked_list = results.get(date, [])
         if booked_list:
-            print(f"  {date}: {len(booked_list)} booked")
+            print(f"  {G}{date}: {len(booked_list)} booked{X}")
             for h in booked_list:
-                print(f"    - {h}")
+                print(f"    {G}- {h}{X}")
         else:
             print(f"  {date}: none booked")
 
