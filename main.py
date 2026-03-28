@@ -48,7 +48,6 @@ SKIP_HOTELS = [
     "ホテルハーヴェスト伊東",
     "ホテルハーヴェスト　スキージャム勝山",
     "ホテル琵琶レイクオーツカ",
-    "ホテルハーヴェスト南紀田辺",
     "ホテルハーヴェスト有馬六彩",
     "リソルの森",
     "ホテルハーヴェスト浜名湖",
@@ -243,9 +242,9 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     return False
 
 
-def book_all_hotels_for_date(target_date, label, calendar_url=None):
+def book_all_hotels_for_date(target_date, label, calendar_url=None, max_attempts=0):
     """Loop through all available hotels for a date, booking each one.
-    Retries indefinitely until URL expires.
+    Retries indefinitely (or up to max_attempts if nonzero) until URL expires.
     Returns (date, list_of_booked_hotels, expired)."""
     url = calendar_url or CALENDAR_URL
     tag = f"[{label}]"
@@ -263,6 +262,8 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
         attempt = 0
         while True:
             attempt += 1
+            if max_attempts and attempt > max_attempts:
+                break
             if attempt > 1:
                 time.sleep(RETRY_DELAY)
 
@@ -280,7 +281,7 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
             # Navigate to target month if needed
             if f'data-join-time="{target_date}"' not in body:
                 target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
-                s2, body_nav, _ = c('POST', BASE + '/calendar_apply/calendar_select',
+                _, body_nav, _ = c('POST', BASE + '/calendar_apply/calendar_select',
                     {'join_date': target_ym, 's': s_param},
                     {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
                      'Accept': 'text/javascript, application/javascript, */*; q=0.01',
@@ -359,6 +360,96 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None):
 
             if expired:
                 return target_date, booked, expired
+
+        return target_date, booked, expired
+
+    finally:
+        os.unlink(cookie_file)
+
+
+def scan_and_book_month(month_str, target_dates, label, calendar_url=None):
+    """Scan a month's calendar for availability, spawn booking threads per date.
+
+    One GET + one POST per scan cycle checks ALL target dates in the month.
+    When availability is found, spawns parallel booking threads (one per date).
+
+    Args:
+        month_str: 'YYYY-MM' format
+        target_dates: list of 'YYYY-MM-DD' strings to monitor in this month
+        label: display label (e.g., 'APR', 'MAY')
+        calendar_url: session URL (falls back to global CALENDAR_URL)
+
+    Returns: (booked_dict, expired)
+        booked_dict: {date: [hotel_names]}
+        expired: True if URL token expired
+    """
+    url = calendar_url or CALENDAR_URL
+    tag = f"[{label}]"
+    booked = {d: [] for d in target_dates}
+    expired = False
+    month_ym = f"{month_str}-01"
+
+    cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_scan_{month_str}_')
+    os.close(cookie_fd)
+    open(cookie_file, 'w').close()
+
+    def c(method, url, data=None, headers=None):
+        return curl(cookie_file, method, url, data, headers)
+
+    try:
+        attempt = 0
+        while True:
+            attempt += 1
+            if attempt > 1:
+                time.sleep(RETRY_DELAY)
+
+            # SCAN: Load calendar (1 GET)
+            open(cookie_file, 'w').close()
+            s, body, _ = c('GET', url)
+            if s != 200:
+                log(f"{tag} {R}FATAL: token expired ({s}), stopping{X}")
+                expired = True
+                return booked, expired
+            csrf = ex(body, r'csrf-token.*?content="(.*?)"')
+            s_param = ex(body, r'name="s" id="s" value="(.*?)"')
+
+            # SCAN: Navigate to target month (1 POST)
+            _, body_nav, _ = c('POST', BASE + '/calendar_apply/calendar_select',
+                {'join_date': month_ym, 's': s_param},
+                {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
+                 'Accept': 'text/javascript, application/javascript, */*; q=0.01',
+                 'Referer': url})
+
+            # Check all target dates for availability
+            available = []
+            for td in target_dates:
+                cls = ex(body_nav, rf'class=\\"([^"\\]*)\\"[^>]*data-join-time=\\"{td}\\"') or ''
+                if 'empty' in cls:
+                    available.append(td)
+
+            if not available:
+                log(f"{tag} {Y}[{attempt}] no dates available ({len(target_dates)} checked), waiting...{X}")
+                continue
+
+            log(f"{tag} {C}[{attempt}] {len(available)}/{len(target_dates)} dates available: {', '.join(d[5:] for d in available)}{X}")
+
+            # BOOK: Spawn parallel threads, one per available date
+            with ThreadPoolExecutor(max_workers=len(available)) as pool:
+                futures = {}
+                for td in available:
+                    dlabel = f"{label} {td[5:]}"
+                    futures[pool.submit(
+                        book_all_hotels_for_date, td, dlabel, url, 1
+                    )] = td
+
+                for future in as_completed(futures):
+                    td, booked_list, td_expired = future.result()
+                    booked[td].extend(booked_list)
+                    if td_expired:
+                        expired = True
+
+            if expired:
+                return booked, expired
 
     finally:
         os.unlink(cookie_file)

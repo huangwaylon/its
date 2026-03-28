@@ -5,26 +5,29 @@ Usage:
     .venv/bin/python run.py
 """
 import asyncio
-import os
 import subprocess
-import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from captcha_solver import get_calendar_url, CALENDAR_URL_CACHE
 import main as booking
-from main import log
+from main import log, R, G, Y, C, B, X
 
 MAX_CAPTCHA_FAILURES = 5
 
-# ANSI colors (reuse from booking module)
-R = booking.R
-G = booking.G
-Y = booking.Y
-C = booking.C
-B = booking.B
-X = booking.X
+
+MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+              'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+
+
+def group_dates_by_month(dates):
+    """Group date strings by YYYY-MM. Returns {month_str: [dates]}."""
+    months = {}
+    for d in dates:
+        m = d[:7]
+        months.setdefault(m, []).append(d)
+    return months
 
 
 def check_cached_url():
@@ -55,34 +58,39 @@ def solve_captcha_sync():
 
 
 def run_booking_round(calendar_url):
-    """Spawn one thread per target date, wait for all to finish.
+    """Spawn one scanner thread per month, wait for all to finish.
+
+    Each scanner polls its month's calendar with 2 requests/cycle (1 GET + 1 POST)
+    and spawns parallel booking threads when availability is found.
 
     Returns:
         (results_dict, any_expired)
         results_dict: {date: [hotels_booked]}
         any_expired: True if any thread reported URL expiry
     """
-    dates = booking.TARGET_DATES
-    log(f"\n{B}Booking {len(dates)} dates in parallel: {', '.join(dates)}{X}")
+    months = group_dates_by_month(booking.TARGET_DATES)
+    month_labels = [f"{MONTH_ABBR[int(m[5:7])]}" for m in months]
+    log(f"\n{B}Scanning {len(months)} months ({', '.join(month_labels)}) "
+        f"for {len(booking.TARGET_DATES)} dates{X}")
     log(f"Calendar URL: {calendar_url[:80]}...")
     log("=" * 60)
 
     any_expired = False
     results = {}
 
-    with ThreadPoolExecutor(max_workers=len(dates)) as pool:
+    with ThreadPoolExecutor(max_workers=len(months)) as pool:
         futures = {}
-        for i, date in enumerate(dates):
-            label = f"D{i+1} {date}"
+        for month_str, dates in months.items():
+            label = MONTH_ABBR[int(month_str[5:7])]
             futures[pool.submit(
-                booking.book_all_hotels_for_date, date, label, calendar_url
-            )] = date
+                booking.scan_and_book_month, month_str, dates, label, calendar_url
+            )] = month_str
 
         for future in as_completed(futures):
-            date, booked_list, expired = future.result()
+            booked_dict, expired = future.result()
             if expired:
                 any_expired = True
-            results[date] = booked_list
+            results.update(booked_dict)
 
     return results, any_expired
 

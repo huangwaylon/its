@@ -38,16 +38,23 @@ Three scripts, each usable independently:
 Outer loop that runs forever:
 1. Check if `calendar_url_cache.txt` has a valid URL (quick curl GET, check for 200)
 2. If not valid, call `captcha_solver.get_calendar_url()` to solve CAPTCHA and get a fresh URL
-3. Spawn one thread per target date via `ThreadPoolExecutor`, passing the URL
-4. Wait for all threads to finish
-5. If any thread reported URL expiry → back to step 2
-6. If no expiry (all threads still polling) → back to step 3 with same URL
+3. Group `TARGET_DATES` by month, spawn one scanner thread per month
+4. Each scanner polls its month's calendar (1 GET + 1 POST per cycle = 2 requests regardless of how many dates)
+5. When a scanner finds availability, it spawns parallel booking threads (one per available date)
+6. Wait for all scanner threads to finish
+7. If any thread reported URL expiry → back to step 2
+8. If no expiry → back to step 3 with same URL
 
 Bridges async captcha solver into sync context via `asyncio.run()`. Gives up after 5 consecutive CAPTCHA failures (30s backoff between retries).
 
 ### `main.py` — Booking engine (also works standalone)
 
-Spawns one thread per target date. Each thread runs an infinite `while True` loop with `RETRY_DELAY` (10s) between attempts, polling for availability and booking all eligible hotels.
+**Month scanner** (`scan_and_book_month()`): One thread per month. Each cycle:
+1. GET calendar page, extract CSRF tokens (1 request)
+2. POST to navigate to target month (1 request) — response contains availability for ALL dates
+3. Check each target date's availability via regex on the response
+4. For each available date, spawn a booking thread (`book_all_hotels_for_date` with `max_attempts=1`)
+5. Wait for booking threads, then loop back to step 1
 
 **Booking flow per date** (`book_all_hotels_for_date()`):
 1. GET calendar page, extract CSRF/auth tokens via regex
@@ -56,15 +63,23 @@ Spawns one thread per target date. Each thread runs an infinite `while True` loo
 4. Filter out `SKIP_HOTELS` + already-booked hotels
 5. For each hotel, `book_one_hotel()`: select hotel → select service → load form → search rooms → submit room → agree to rules → submit email
 
-**URL expiry handling**: When GET returns non-200, the thread sets `expired = True` and returns `(date, booked_list, expired)`. The caller (`run.py` or standalone `main()`) decides what to do.
+When used standalone (`python3 main.py`), spawns one thread per date with infinite retries (original burst mode).
+
+**URL expiry handling**: When GET returns non-200, the thread sets `expired = True` and returns. The caller decides what to do.
 
 **Key functions**:
-- `book_all_hotels_for_date(target_date, label, calendar_url=None)` — main loop per date, accepts optional URL (falls back to cached global)
+- `scan_and_book_month(month_str, target_dates, label, calendar_url)` — month scanner loop, spawns booking threads on availability
+- `book_all_hotels_for_date(target_date, label, calendar_url, max_attempts)` — booking loop per date (`max_attempts=0` for infinite, `1` for single-pass)
 - `book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name)` — books one hotel (steps 3-9), returns True/False
 - `curl(cookie_file, method, url, data, headers)` — raw HTTP via curl subprocess
 - `ex(html, pat)` — regex extraction helper
 
-**Threading model**: All threads are fully independent — no synchronization, no barriers. Each has its own cookie file, own attempt counter, own `time.sleep`. The only shared state is `bookings.json` (protected by `threading.Lock`). When URL expires, threads discover it independently on their next GET request (worst case ~10s lag).
+**Threading model** (via `run.py`):
+- 1 scanner thread per month (e.g., APR, MAY) — polls with 2 requests/cycle
+- On availability: spawns N booking threads (one per available date) — each fully independent with own cookie file
+- Booking threads run single-pass (`max_attempts=1`), scanner resumes after they complete
+- Only shared state is `bookings.json` (protected by `threading.Lock`)
+- Standalone mode (`python3 main.py`): 1 thread per date, infinite retries, no scanner
 
 ### `captcha_solver.py` — reCAPTCHA v2 solver
 
