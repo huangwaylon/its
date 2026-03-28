@@ -5,11 +5,14 @@ Usage:
     .venv/bin/python run.py
 """
 import asyncio
+import os
+import subprocess
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from captcha_solver import get_calendar_url
+from captcha_solver import get_calendar_url, CALENDAR_URL_CACHE
 import main as booking
 
 MAX_CAPTCHA_FAILURES = 5
@@ -21,6 +24,28 @@ Y = booking.Y
 C = booking.C
 B = booking.B
 X = booking.X
+
+
+def check_cached_url():
+    """Read calendar_url_cache.txt and test if the URL is still valid (HTTP 200).
+    Returns the URL string if valid, None otherwise."""
+    try:
+        url = open(CALENDAR_URL_CACHE).read().strip()
+    except FileNotFoundError:
+        return None
+    if not url:
+        return None
+    print(f"Testing cached URL: {url[:80]}...")
+    r = subprocess.run(
+        ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10', url],
+        capture_output=True, text=True,
+    )
+    status = r.stdout.strip()
+    if status == '200':
+        print(f"{G}Cached URL is valid (200){X}")
+        return url
+    print(f"{Y}Cached URL returned {status}, need fresh CAPTCHA solve{X}")
+    return None
 
 
 def solve_captcha_sync():
@@ -84,7 +109,7 @@ def main():
 
     consecutive_captcha_failures = 0
     round_num = 0
-    calendar_url = None
+    calendar_url = check_cached_url()
 
     while True:
         round_num += 1
@@ -110,7 +135,7 @@ def main():
             print(f"{G}Got calendar URL: {calendar_url[:80]}...{X}")
         else:
             print(f"\n{B}{'#' * 60}")
-            print(f"# ROUND {round_num} -- Reusing valid URL")
+            print(f"# ROUND {round_num} -- Using valid URL")
             print(f"{'#' * 60}{X}")
 
         results, any_expired = run_booking_round(calendar_url)
