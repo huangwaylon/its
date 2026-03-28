@@ -17,11 +17,10 @@ import io
 import json
 import os
 import re
-import sys
 import tempfile
 import time
 from PIL import Image
-from playwright.async_api import async_playwright, Page, FrameLocator
+from playwright.async_api import async_playwright, Page
 
 # ── Config ──────────────────────────────────────────────────────────
 OLLAMA_URL = 'http://localhost:11434'
@@ -36,7 +35,6 @@ CHECKBOX_CHECKED = '.recaptcha-checkbox-checked'
 PROMPT_DESC = '.rc-imageselect-desc, .rc-imageselect-desc-no-canonical'
 GRID_44 = 'table.rc-imageselect-table-44'
 TILES = 'td.rc-imageselect-tile'
-TILE_SELECTED = 'td.rc-imageselect-tileselected'
 VERIFY_BTN = '#recaptcha-verify-button'
 RELOAD_BTN = '#recaptcha-reload-button'
 ERR_SELECT_MORE = '.rc-imageselect-error-select-more'
@@ -45,7 +43,6 @@ ERR_DYNAMIC_MORE = '.rc-imageselect-error-dynamic-more'
 DYNAMIC_SELECTED = '.rc-imageselect-dynamic-selected'
 NEW_TILE_IMG = 'img.rc-image-tile-11'
 CHALLENGE_AREA = '.rc-imageselect-challenge'
-FULL_WIDGET = '.rc-imageselect'  # Full widget including prompt header + grid
 
 # ── Logging ─────────────────────────────────────────────────────────
 _t0 = time.time()
@@ -58,7 +55,6 @@ def log(msg):
 def _debug_path(name):
     os.makedirs(DEBUG_DIR, exist_ok=True)
     return os.path.join(DEBUG_DIR, name)
-
 
 
 # ── Vision model ────────────────────────────────────────────────────
@@ -85,11 +81,8 @@ def _screenshot_to_b64(png_bytes, max_dim=None):
 _vision_semaphore = asyncio.Semaphore(2)
 
 
-async def ask_vision(http, image_b64, prompt, no_think=False):
-    """Send image + text prompt to ollama vision model via curl subprocess.
-
-    Uses curl with temp file to avoid pipe issues and httpcore header errors.
-    """
+async def ask_vision(image_b64, prompt, no_think=False):
+    """Send image + text prompt to ollama vision model via curl subprocess."""
     if no_think:
         prompt = prompt + '\n/no_think'
     num_predict = 500 if no_think else 2000
@@ -211,183 +204,177 @@ async def solve_recaptcha(page: Page, max_attempts=8):
     Returns:
         The g-recaptcha-response token string, or None on failure.
     """
-    http = None  # HTTP calls use curl subprocess, not httpx
+    # ── Step 1: Click the checkbox ──
+    log('Looking for reCAPTCHA checkbox...')
+    anchor = page.frame_locator(ANCHOR_IFRAME)
+    checkbox = anchor.locator(CHECKBOX)
+    await checkbox.wait_for(state='visible', timeout=15000)
+    log('Checkbox found, clicking...')
+    await checkbox.click()
+    await asyncio.sleep(2)
 
+    # Check if solved without challenge
     try:
-        # ── Step 1: Click the checkbox ──
-        log('Looking for reCAPTCHA checkbox...')
-        anchor = page.frame_locator(ANCHOR_IFRAME)
-        checkbox = anchor.locator(CHECKBOX)
-        await checkbox.wait_for(state='visible', timeout=15000)
-        log('Checkbox found, clicking...')
-        await checkbox.click()
-        await asyncio.sleep(2)
+        await anchor.locator(CHECKBOX_CHECKED).wait_for(state='attached', timeout=4000)
+        log('Solved by checkbox click alone!')
+        return await _get_token(page)
+    except Exception:
+        log('Challenge required, proceeding to image solver...')
 
-        # Check if solved without challenge
+    # ── Step 2: Solve image challenges ──
+    for attempt in range(1, max_attempts + 1):
+        log(f'═══ Challenge attempt {attempt}/{max_attempts} ═══')
+
+        bframe = page.frame_locator(BFRAME_IFRAME)
+
+        # Extract prompt text
+        prompt_text = ''
         try:
-            await anchor.locator(CHECKBOX_CHECKED).wait_for(state='attached', timeout=4000)
-            log('Solved by checkbox click alone!')
-            return await _get_token(page)
-        except Exception:
-            log('Challenge required, proceeding to image solver...')
+            prompt_loc = bframe.locator(PROMPT_DESC).first
+            await prompt_loc.wait_for(state='visible', timeout=10000)
+            prompt_text = (await prompt_loc.inner_text()).strip()
+        except Exception as e:
+            log(f'Warning: could not get prompt text: {e}')
+        log(f'Prompt: "{prompt_text}"')
 
-        # ── Step 2: Solve image challenges ──
-        for attempt in range(1, max_attempts + 1):
-            log(f'═══ Challenge attempt {attempt}/{max_attempts} ═══')
+        # Detect grid type
+        grid_type = '4x4' if await bframe.locator(GRID_44).count() > 0 else '3x3'
+        total_tiles = 16 if grid_type == '4x4' else 9
+        tiles = bframe.locator(TILES)
+        tile_count = await tiles.count()
+        if tile_count != total_tiles:
+            log(f'Warning: expected {total_tiles} tiles, found {tile_count}')
+            total_tiles = tile_count
+        log(f'Grid: {grid_type} ({total_tiles} tiles)')
 
-            bframe = page.frame_locator(BFRAME_IFRAME)
-
-            # Extract prompt text
-            prompt_text = ''
-            try:
-                prompt_loc = bframe.locator(PROMPT_DESC).first
-                await prompt_loc.wait_for(state='visible', timeout=10000)
-                prompt_text = (await prompt_loc.inner_text()).strip()
-            except Exception as e:
-                log(f'Warning: could not get prompt text: {e}')
-            log(f'Prompt: "{prompt_text}"')
-
-            # Detect grid type
-            grid_type = '4x4' if await bframe.locator(GRID_44).count() > 0 else '3x3'
-            total_tiles = 16 if grid_type == '4x4' else 9
-            tiles = bframe.locator(TILES)
-            tile_count = await tiles.count()
-            if tile_count != total_tiles:
-                log(f'Warning: expected {total_tiles} tiles, found {tile_count}')
-                total_tiles = tile_count
-            log(f'Grid: {grid_type} ({total_tiles} tiles)')
-
-            # Skip 4x4 challenges — too many tiles, ollama degrades before finishing
-            if grid_type == '4x4':
-                log('4x4 grid detected, skipping (too slow for ollama). Reloading...')
-                await _reload_challenge(bframe)
-                continue
-
-            # Save debug screenshot of challenge
-            try:
-                challenge = bframe.locator(CHALLENGE_AREA)
-                await challenge.wait_for(state='visible', timeout=5000)
-                await challenge.screenshot(path=_debug_path(f'challenge_{attempt}.png'))
-                log(f'Debug screenshot: {_debug_path(f"challenge_{attempt}.png")}')
-            except Exception:
-                pass
-
-            # ── Classify tiles ──
-            log('Classifying tiles...')
-            t_classify = time.time()
-            matching = await _classify_tiles(http, bframe, prompt_text, grid_type, total_tiles, tiles)
-            log(f'Classification done in {time.time()-t_classify:.1f}s → matches: {matching}')
-
-            if not matching:
-                log('No matches found, reloading challenge...')
-                await _reload_challenge(bframe)
-                continue
-
-            # ── Click matching tiles ──
-            # Scroll the captcha iframe into view to prevent "outside viewport" errors
-            try:
-                iframe_el = page.locator(BFRAME_IFRAME)
-                await iframe_el.scroll_into_view_if_needed()
-                await asyncio.sleep(0.3)
-            except Exception:
-                pass
-            log(f'Clicking {len(matching)} tiles: {matching}')
-            for idx in matching:
-                if 1 <= idx <= tile_count:
-                    tile = tiles.nth(idx - 1)
-                    box = await tile.bounding_box()
-                    log(f'  Tile {idx}: bbox={box}')
-                    await tile.click(force=True)
-                    log(f'  Tile {idx}: clicked')
-                    await asyncio.sleep(0.3)
-            # Screenshot after clicking to verify state
-            try:
-                await page.screenshot(path=_debug_path(f'after_click_{attempt}.png'))
-                log(f'Post-click screenshot: {_debug_path(f"after_click_{attempt}.png")}')
-            except Exception:
-                pass
-
-            # ── Handle dynamic tiles ──
-            await asyncio.sleep(1.5)
-            has_replacements = await bframe.locator(NEW_TILE_IMG).count() > 0
-            has_animating = await bframe.locator(DYNAMIC_SELECTED).count() > 0
-            if has_replacements or has_animating:
-                log(f'Dynamic replacements detected (new={has_replacements}, animating={has_animating})')
-                await _handle_dynamic_tiles(bframe, http, prompt_text)
-
-            # ── Click verify ──
-            log('Clicking verify...')
-            await asyncio.sleep(0.5)
-            try:
-                await bframe.locator(VERIFY_BTN).click(timeout=5000)
-            except Exception as e:
-                log(f'Verify click failed (session expired?): {e}')
-                return None
-            await asyncio.sleep(3)
-
-            # ── Check if solved ──
-            try:
-                await anchor.locator(CHECKBOX_CHECKED).wait_for(state='attached', timeout=5000)
-                log('SOLVED!')
-                token = await _get_token(page)
-                log(f'Token: {token[:60] if token else "None"}...')
-                return token
-            except Exception:
-                log('Not solved yet...')
-
-            # ── Handle "select more" error ──
-            select_more = await _is_error_visible(bframe, ERR_SELECT_MORE)
-            if select_more:
-                log('"Select more" error — re-analyzing unselected tiles...')
-                extra = await _classify_unselected_tiles(http, bframe, prompt_text, total_tiles, tiles)
-                if extra:
-                    log(f'Found additional matches: {extra}')
-                    for idx in extra:
-                        await tiles.nth(idx - 1).click()
-                        await asyncio.sleep(0.3)
-                    await asyncio.sleep(1.5)
-                    if await bframe.locator(NEW_TILE_IMG).count() > 0:
-                        await _handle_dynamic_tiles(bframe, http, prompt_text)
-                    log('Clicking verify again...')
-                    await asyncio.sleep(0.5)
-                    await bframe.locator(VERIFY_BTN).click()
-                    await asyncio.sleep(3)
-                    try:
-                        await anchor.locator(CHECKBOX_CHECKED).wait_for(state='attached', timeout=5000)
-                        log('SOLVED!')
-                        return await _get_token(page)
-                    except Exception:
-                        log('Still not solved after selecting more')
-                else:
-                    log('No additional matches found')
-
-            # ── Check other errors ──
-            error = await _check_error(bframe)
-            if error:
-                log(f'Error message: "{error}"')
-
-            # Check if a new challenge auto-appeared
-            try:
-                new_text = (await bframe.locator(PROMPT_DESC).first.inner_text(timeout=2000)).strip()
-                if new_text and new_text != prompt_text:
-                    log(f'New challenge appeared: "{new_text[:50]}", retrying...')
-                    continue
-            except Exception:
-                pass
-
-            log('Reloading challenge...')
+        # Skip 4x4 challenges — too many tiles, ollama degrades before finishing
+        if grid_type == '4x4':
+            log('4x4 grid detected, skipping (too slow for ollama). Reloading...')
             await _reload_challenge(bframe)
+            continue
 
-        log('Failed after all attempts')
-        return None
+        # Save debug screenshot of challenge
+        try:
+            challenge = bframe.locator(CHALLENGE_AREA)
+            await challenge.wait_for(state='visible', timeout=5000)
+            await challenge.screenshot(path=_debug_path(f'challenge_{attempt}.png'))
+            log(f'Debug screenshot: {_debug_path(f"challenge_{attempt}.png")}')
+        except Exception:
+            pass
 
-    finally:
-        pass  # No cleanup needed; curl subprocesses are self-contained
+        # ── Classify tiles ──
+        log('Classifying tiles...')
+        t_classify = time.time()
+        matching = await _classify_tiles(bframe, prompt_text, grid_type, total_tiles, tiles)
+        log(f'Classification done in {time.time()-t_classify:.1f}s → matches: {matching}')
+
+        if not matching:
+            log('No matches found, reloading challenge...')
+            await _reload_challenge(bframe)
+            continue
+
+        # ── Click matching tiles ──
+        # Scroll the captcha iframe into view to prevent "outside viewport" errors
+        try:
+            iframe_el = page.locator(BFRAME_IFRAME)
+            await iframe_el.scroll_into_view_if_needed()
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
+        log(f'Clicking {len(matching)} tiles: {matching}')
+        for idx in matching:
+            if 1 <= idx <= tile_count:
+                tile = tiles.nth(idx - 1)
+                box = await tile.bounding_box()
+                log(f'  Tile {idx}: bbox={box}')
+                await tile.click(force=True)
+                log(f'  Tile {idx}: clicked')
+                await asyncio.sleep(0.3)
+        # Screenshot after clicking to verify state
+        try:
+            await page.screenshot(path=_debug_path(f'after_click_{attempt}.png'))
+            log(f'Post-click screenshot: {_debug_path(f"after_click_{attempt}.png")}')
+        except Exception:
+            pass
+
+        # ── Handle dynamic tiles ──
+        await asyncio.sleep(1.5)
+        has_replacements = await bframe.locator(NEW_TILE_IMG).count() > 0
+        has_animating = await bframe.locator(DYNAMIC_SELECTED).count() > 0
+        if has_replacements or has_animating:
+            log(f'Dynamic replacements detected (new={has_replacements}, animating={has_animating})')
+            await _handle_dynamic_tiles(bframe, prompt_text)
+
+        # ── Click verify ──
+        log('Clicking verify...')
+        await asyncio.sleep(0.5)
+        try:
+            await bframe.locator(VERIFY_BTN).click(timeout=5000)
+        except Exception as e:
+            log(f'Verify click failed (session expired?): {e}')
+            return None
+        await asyncio.sleep(3)
+
+        # ── Check if solved ──
+        try:
+            await anchor.locator(CHECKBOX_CHECKED).wait_for(state='attached', timeout=5000)
+            log('SOLVED!')
+            token = await _get_token(page)
+            log(f'Token: {token[:60] if token else "None"}...')
+            return token
+        except Exception:
+            log('Not solved yet...')
+
+        # ── Handle "select more" error ──
+        select_more = await _is_error_visible(bframe, ERR_SELECT_MORE)
+        if select_more:
+            log('"Select more" error — re-analyzing unselected tiles...')
+            extra = await _classify_unselected_tiles(bframe, prompt_text, total_tiles, tiles)
+            if extra:
+                log(f'Found additional matches: {extra}')
+                for idx in extra:
+                    await tiles.nth(idx - 1).click()
+                    await asyncio.sleep(0.3)
+                await asyncio.sleep(1.5)
+                if await bframe.locator(NEW_TILE_IMG).count() > 0:
+                    await _handle_dynamic_tiles(bframe, prompt_text)
+                log('Clicking verify again...')
+                await asyncio.sleep(0.5)
+                await bframe.locator(VERIFY_BTN).click()
+                await asyncio.sleep(3)
+                try:
+                    await anchor.locator(CHECKBOX_CHECKED).wait_for(state='attached', timeout=5000)
+                    log('SOLVED!')
+                    return await _get_token(page)
+                except Exception:
+                    log('Still not solved after selecting more')
+            else:
+                log('No additional matches found')
+
+        # ── Check other errors ──
+        error = await _check_error(bframe)
+        if error:
+            log(f'Error message: "{error}"')
+
+        # Check if a new challenge auto-appeared
+        try:
+            new_text = (await bframe.locator(PROMPT_DESC).first.inner_text(timeout=2000)).strip()
+            if new_text and new_text != prompt_text:
+                log(f'New challenge appeared: "{new_text[:50]}", retrying...')
+                continue
+        except Exception:
+            pass
+
+        log('Reloading challenge...')
+        await _reload_challenge(bframe)
+
+    log('Failed after all attempts')
+    return None
 
 
 # ── Internal helpers ────────────────────────────────────────────────
 
-async def _classify_tiles(http, bframe, prompt_text, grid_type, total_tiles, tiles):
+async def _classify_tiles(bframe, prompt_text, grid_type, total_tiles, tiles):
     """Classify tiles using vision model. Returns list of 1-indexed matching tile numbers."""
     # Strategy 1: Full grid screenshot with no_think (fast, one API call)
     # Only try once — retries waste too much time and ollama degrades over time
@@ -400,7 +387,7 @@ async def _classify_tiles(http, bframe, prompt_text, grid_type, total_tiles, til
         challenge_b64 = _screenshot_to_b64(screenshot_bytes, max_dim=300)
         prompt = build_grid_prompt(prompt_text, grid_type, total_tiles)
         log('Strategy 1: full grid 300px (single attempt)...')
-        answer = await ask_vision(http, challenge_b64, prompt, no_think=True)
+        answer = await ask_vision(challenge_b64, prompt, no_think=True)
         if answer:
             log(f'Strategy 1 raw: "{answer[:200]}"')
             matching = parse_tile_numbers(answer, total_tiles)
@@ -415,10 +402,10 @@ async def _classify_tiles(http, bframe, prompt_text, grid_type, total_tiles, til
 
     # Strategy 2: Individual tile screenshots in parallel (reliable)
     log(f'Strategy 2: per-tile analysis ({total_tiles} tiles)...')
-    return await _classify_each_tile(http, tiles, total_tiles, prompt_text)
+    return await _classify_each_tile(tiles, total_tiles, prompt_text)
 
 
-async def _classify_each_tile(http, tiles, total_tiles, prompt_text):
+async def _classify_each_tile(tiles, total_tiles, prompt_text):
     """Screenshot all tiles, then classify in parallel via asyncio.gather."""
     tile_prompt = build_tile_prompt(prompt_text)
 
@@ -437,7 +424,7 @@ async def _classify_each_tile(http, tiles, total_tiles, prompt_text):
     t = time.time()
 
     async def _check(idx, b64):
-        answer = await ask_vision(http, b64, tile_prompt)
+        answer = await ask_vision(b64, tile_prompt)
         result = parse_yes_no(answer)
         log(f'  Tile {idx+1}: {"YES" if result else "no"} (raw: "{answer[:60]}")')
         return (idx + 1, result)
@@ -448,7 +435,7 @@ async def _classify_each_tile(http, tiles, total_tiles, prompt_text):
     return matching
 
 
-async def _classify_unselected_tiles(http, bframe, prompt_text, total_tiles, tiles):
+async def _classify_unselected_tiles(bframe, prompt_text, total_tiles, tiles):
     """Re-analyze only unselected tiles, in parallel."""
     tile_prompt = build_tile_prompt(prompt_text)
 
@@ -469,7 +456,7 @@ async def _classify_unselected_tiles(http, bframe, prompt_text, total_tiles, til
     t = time.time()
 
     async def _check(idx, b64):
-        answer = await ask_vision(http, b64, tile_prompt)
+        answer = await ask_vision(b64, tile_prompt)
         return (idx + 1, parse_yes_no(answer))
 
     results = await asyncio.gather(*[_check(i, b64) for i, b64 in to_check])
@@ -478,7 +465,7 @@ async def _classify_unselected_tiles(http, bframe, prompt_text, total_tiles, til
     return matching
 
 
-async def _handle_dynamic_tiles(bframe, http, prompt_text):
+async def _handle_dynamic_tiles(bframe, prompt_text):
     """Handle dynamic challenges where selected tiles get replaced with new images.
 
     Uses per-tile classification for replacement tiles (reliable, unlike full-grid
@@ -521,7 +508,7 @@ async def _handle_dynamic_tiles(bframe, http, prompt_text):
         t = time.time()
 
         async def _check(idx, b64):
-            answer = await ask_vision(http, b64, tile_prompt)
+            answer = await ask_vision(b64, tile_prompt)
             result = parse_yes_no(answer)
             log(f'    Dynamic tile {idx+1}: {"YES" if result else "no"}')
             return (idx, result)
