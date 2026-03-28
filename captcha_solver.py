@@ -78,7 +78,18 @@ def _screenshot_to_b64(png_bytes, max_dim=None):
 
 
 # Limit concurrent ollama requests to avoid overwhelming it
-_vision_semaphore = asyncio.Semaphore(2)
+_vision_semaphore = None
+_vision_semaphore_loop = None
+
+
+def _get_vision_semaphore():
+    """Get or recreate the semaphore for the current event loop."""
+    global _vision_semaphore, _vision_semaphore_loop
+    loop = asyncio.get_running_loop()
+    if _vision_semaphore_loop is not loop:
+        _vision_semaphore = asyncio.Semaphore(2)
+        _vision_semaphore_loop = loop
+    return _vision_semaphore
 
 
 async def ask_vision(image_b64, prompt, no_think=False):
@@ -92,7 +103,7 @@ async def ask_vision(image_b64, prompt, no_think=False):
         'stream': False,
         'options': {'temperature': 0.1, 'num_predict': num_predict},
     })
-    async with _vision_semaphore:
+    async with _get_vision_semaphore():
         for attempt in range(2):  # Max 2 attempts (fail fast)
             t = time.time()
             tmp = None

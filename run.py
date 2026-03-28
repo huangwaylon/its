@@ -1,25 +1,66 @@
 #!/usr/bin/env python3
 """Indefinite booking loop with automatic CAPTCHA re-solving.
 
+Scanner threads run continuously, reading the calendar URL from cache each cycle.
+When a thread detects an expired URL, a background CAPTCHA solve is triggered.
+Only one CAPTCHA solve runs at a time.
+
 Usage:
-    .venv/bin/python run.py
+    uv run run.py
 """
 import asyncio
 import subprocess
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from captcha_solver import get_calendar_url, CALENDAR_URL_CACHE
 import main as booking
 from main import log, R, G, Y, C, B, X
 
 MAX_CAPTCHA_FAILURES = 5
-
-
 MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
 
+# ── CAPTCHA solve coordination ────────────────────────────────────
+_solve_lock = threading.Lock()
+_solving = False
+_consecutive_failures = 0
+
+
+def request_url_refresh():
+    """Trigger a background CAPTCHA solve. Only one runs at a time."""
+    global _solving
+    with _solve_lock:
+        if _solving:
+            return
+        _solving = True
+
+    def _solve():
+        global _solving, _consecutive_failures
+        try:
+            log(f"\n{B}Background CAPTCHA solve starting...{X}")
+            url = asyncio.run(get_calendar_url())
+            if url:
+                _consecutive_failures = 0
+                log(f"{G}New URL saved: {url[:80]}...{X}")
+            else:
+                _consecutive_failures += 1
+                log(f"{R}CAPTCHA solve failed ({_consecutive_failures}/{MAX_CAPTCHA_FAILURES}){X}")
+                if _consecutive_failures >= MAX_CAPTCHA_FAILURES:
+                    log(f"{R}Too many consecutive CAPTCHA failures, exiting.{X}")
+                    sys.exit(1)
+        except Exception as e:
+            _consecutive_failures += 1
+            log(f"{R}CAPTCHA solve error: {e}{X}")
+        finally:
+            with _solve_lock:
+                _solving = False
+
+    threading.Thread(target=_solve, daemon=True).start()
+
+
+# ── Helpers ───────────────────────────────────────────────────────
 
 def group_dates_by_month(dates):
     """Group date strings by YYYY-MM. Returns {month_str: [dates]}."""
@@ -52,62 +93,7 @@ def check_cached_url():
     return None
 
 
-def solve_captcha_sync():
-    """Run the async captcha solver synchronously. Returns URL string or None."""
-    return asyncio.run(get_calendar_url())
-
-
-def run_booking_round(calendar_url):
-    """Spawn one scanner thread per month, wait for all to finish.
-
-    Each scanner polls its month's calendar with 2 requests/cycle (1 GET + 1 POST)
-    and spawns parallel booking threads when availability is found.
-
-    Returns:
-        (results_dict, any_expired)
-        results_dict: {date: [hotels_booked]}
-        any_expired: True if any thread reported URL expiry
-    """
-    months = group_dates_by_month(booking.TARGET_DATES)
-    month_labels = [f"{MONTH_ABBR[int(m[5:7])]}" for m in months]
-    log(f"\n{B}Scanning {len(months)} months ({', '.join(month_labels)}) "
-        f"for {len(booking.TARGET_DATES)} dates{X}")
-    log(f"Calendar URL: {calendar_url[:80]}...")
-    log("=" * 60)
-
-    any_expired = False
-    results = {}
-
-    with ThreadPoolExecutor(max_workers=len(months)) as pool:
-        futures = {}
-        for month_str, dates in months.items():
-            label = MONTH_ABBR[int(month_str[5:7])]
-            futures[pool.submit(
-                booking.scan_and_book_month, month_str, dates, label, calendar_url
-            )] = month_str
-
-        for future in as_completed(futures):
-            booked_dict, expired = future.result()
-            if expired:
-                any_expired = True
-            results.update(booked_dict)
-
-    return results, any_expired
-
-
-def print_round_results(results):
-    log("\n" + "=" * 60)
-    log(f"{B}ROUND RESULTS{X}")
-    log("=" * 60)
-    for date in booking.TARGET_DATES:
-        booked_list = results.get(date, [])
-        if booked_list:
-            log(f"  {G}{date}: {len(booked_list)} booked{X}")
-            for h in booked_list:
-                log(f"    {G}- {h}{X}")
-        else:
-            log(f"  {date}: none booked")
-
+# ── Main ──────────────────────────────────────────────────────────
 
 def main():
     log("=" * 60)
@@ -116,45 +102,40 @@ def main():
     log(f"Dates: {', '.join(booking.TARGET_DATES)}")
     log("=" * 60)
 
-    consecutive_captcha_failures = 0
-    round_num = 0
-    calendar_url = check_cached_url()
+    # Ensure we have a valid URL to start
+    if not check_cached_url():
+        log(f"\n{B}Solving initial CAPTCHA...{X}")
+        url = asyncio.run(get_calendar_url())
+        if not url:
+            log(f"{R}Initial CAPTCHA solve failed, exiting.{X}")
+            sys.exit(1)
+        log(f"{G}Got calendar URL: {url[:80]}...{X}")
 
-    while True:
-        round_num += 1
+    # Start scanner threads (they run forever, reading URL from cache each cycle)
+    months = group_dates_by_month(booking.TARGET_DATES)
+    month_labels = [MONTH_ABBR[int(m[5:7])] for m in months]
+    log(f"\n{B}Starting {len(months)} scanner threads ({', '.join(month_labels)}) "
+        f"for {len(booking.TARGET_DATES)} dates{X}")
+    log("=" * 60)
 
-        # Solve captcha if we don't have a valid URL
-        if not calendar_url:
-            log(f"\n{B}{'#' * 60}")
-            log(f"# ROUND {round_num} -- Solving CAPTCHA...")
-            log(f"{'#' * 60}{X}")
+    threads = []
+    for month_str, dates in months.items():
+        label = MONTH_ABBR[int(month_str[5:7])]
+        t = threading.Thread(
+            target=booking.scan_and_book_month,
+            args=(month_str, dates, label),
+            kwargs={'on_url_expired': request_url_refresh},
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
 
-            calendar_url = solve_captcha_sync()
-            if not calendar_url:
-                consecutive_captcha_failures += 1
-                log(f"{R}CAPTCHA solve failed ({consecutive_captcha_failures}/{MAX_CAPTCHA_FAILURES}){X}")
-                if consecutive_captcha_failures >= MAX_CAPTCHA_FAILURES:
-                    log(f"{R}Too many consecutive CAPTCHA failures, exiting.{X}")
-                    sys.exit(1)
-                log(f"{Y}Retrying in 30 seconds...{X}")
-                time.sleep(30)
-                continue
-
-            consecutive_captcha_failures = 0
-            log(f"{G}Got calendar URL: {calendar_url[:80]}...{X}")
-        else:
-            log(f"\n{B}{'#' * 60}")
-            log(f"# ROUND {round_num} -- Using valid URL")
-            log(f"{'#' * 60}{X}")
-
-        results, any_expired = run_booking_round(calendar_url)
-        print_round_results(results)
-
-        if any_expired:
-            log(f"\n{Y}URL expired during booking. Will re-solve CAPTCHA...{X}")
-            calendar_url = None
-        else:
-            log(f"\n{C}All threads completed. Restarting booking round...{X}")
+    # Wait forever (Ctrl+C to stop)
+    try:
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        log(f"\n{Y}Interrupted, exiting.{X}")
 
 
 if __name__ == '__main__':

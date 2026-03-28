@@ -10,6 +10,15 @@ try:
 except FileNotFoundError:
     CALENDAR_URL = None
 
+
+def _read_cached_url():
+    """Read the current calendar URL from cache file."""
+    try:
+        url = open('calendar_url_cache.txt').read().strip()
+        return url or None
+    except FileNotFoundError:
+        return None
+
 # ANSI colors
 R = '\033[91m'   # red
 G = '\033[92m'   # green
@@ -368,7 +377,7 @@ def book_all_hotels_for_date(target_date, label, calendar_url=None, max_attempts
         os.unlink(cookie_file)
 
 
-def scan_and_book_month(month_str, target_dates, label, calendar_url=None):
+def scan_and_book_month(month_str, target_dates, label, calendar_url=None, on_url_expired=None):
     """Scan a month's calendar for availability, spawn booking threads per date.
 
     One GET + one POST per scan cycle checks ALL target dates in the month.
@@ -378,16 +387,11 @@ def scan_and_book_month(month_str, target_dates, label, calendar_url=None):
         month_str: 'YYYY-MM' format
         target_dates: list of 'YYYY-MM-DD' strings to monitor in this month
         label: display label (e.g., 'APR', 'MAY')
-        calendar_url: session URL (falls back to global CALENDAR_URL)
-
-    Returns: (booked_dict, expired)
-        booked_dict: {date: [hotel_names]}
-        expired: True if URL token expired
+        calendar_url: fixed session URL (if None, reads from cache file each cycle)
+        on_url_expired: callback when URL returns non-200 (triggers CAPTCHA re-solve)
     """
-    url = calendar_url or CALENDAR_URL
     tag = f"[{label}]"
     booked = {d: [] for d in target_dates}
-    expired = False
     month_ym = f"{month_str}-01"
 
     cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_scan_{month_str}_')
@@ -404,13 +408,22 @@ def scan_and_book_month(month_str, target_dates, label, calendar_url=None):
             if attempt > 1:
                 time.sleep(RETRY_DELAY)
 
+            # Get current URL (from cache file or fixed)
+            url = calendar_url or _read_cached_url()
+            if not url:
+                log(f"{tag} {Y}[{attempt}] no URL available, waiting...{X}")
+                if on_url_expired:
+                    on_url_expired()
+                continue
+
             # SCAN: Load calendar (1 GET)
             open(cookie_file, 'w').close()
             s, body, _ = c('GET', url)
             if s != 200:
-                log(f"{tag} {R}FATAL: token expired ({s}), stopping{X}")
-                expired = True
-                return booked, expired
+                log(f"{tag} {Y}[{attempt}] URL returned {s}, requesting refresh...{X}")
+                if on_url_expired:
+                    on_url_expired()
+                continue
             csrf = ex(body, r'csrf-token.*?content="(.*?)"')
             s_param = ex(body, r'name="s" id="s" value="(.*?)"')
 
@@ -446,11 +459,8 @@ def scan_and_book_month(month_str, target_dates, label, calendar_url=None):
                 for future in as_completed(futures):
                     td, booked_list, td_expired = future.result()
                     booked[td].extend(booked_list)
-                    if td_expired:
-                        expired = True
-
-            if expired:
-                return booked, expired
+                    if td_expired and on_url_expired:
+                        on_url_expired()
 
     finally:
         os.unlink(cookie_file)
