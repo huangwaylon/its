@@ -2,11 +2,8 @@
 """reCAPTCHA v2 solver using Playwright browser automation + ollama vision AI.
 
 Usage:
-    # Solve ITS captcha and save calendar URL (default)
+    # Solve ITS captcha and save calendar URL
     .venv/bin/python captcha_solver.py
-
-    # Test against 2captcha demo
-    .venv/bin/python captcha_solver.py --demo
 
     # As module
     from captcha_solver import solve_recaptcha, get_calendar_url
@@ -61,6 +58,7 @@ def log(msg):
 def _debug_path(name):
     os.makedirs(DEBUG_DIR, exist_ok=True)
     return os.path.join(DEBUG_DIR, name)
+
 
 
 # ── Vision model ────────────────────────────────────────────────────
@@ -597,6 +595,7 @@ async def get_calendar_url():
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
+                '--headless=new',
             ],
         )
         context = await browser.new_context(
@@ -659,52 +658,5 @@ async def get_calendar_url():
             log('Browser closed')
 
 
-# ── Test harness ────────────────────────────────────────────────────
-
-async def test_with_demo():
-    """Test the solver against the 2captcha reCAPTCHA v2 enterprise demo."""
-    log('Starting Playwright browser...')
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=False,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-            ],
-        )
-        context = await browser.new_context(
-            viewport={'width': 1280, 'height': 900},
-            locale='ja-JP',
-        )
-        page = await context.new_page()
-
-        try:
-            log('Navigating to 2captcha demo...')
-            await page.goto(
-                'https://2captcha.com/ja/demo/recaptcha-v2-enterprise',
-                timeout=30000,
-            )
-            log('Page loaded, waiting for reCAPTCHA widget...')
-            await asyncio.sleep(5)
-
-            await page.screenshot(path=_debug_path('page.png'))
-            log(f'Page screenshot: {_debug_path("page.png")}')
-
-            token = await solve_recaptcha(page)
-            if token:
-                log(f'SUCCESS! Token: {token[:60]}...')
-            else:
-                log('FAILED to solve captcha')
-
-            await asyncio.sleep(5)
-
-        finally:
-            await browser.close()
-            log('Browser closed')
-
-
 if __name__ == '__main__':
-    if '--demo' in sys.argv:
-        asyncio.run(test_with_demo())
-    else:
-        asyncio.run(get_calendar_url())
+    asyncio.run(get_calendar_url())
