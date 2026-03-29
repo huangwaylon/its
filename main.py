@@ -80,7 +80,7 @@ def url_monitor():
     Because the CAPTCHA solve is synchronous, it naturally blocks
     re-triggering while a solve is in progress.
     """
-    last_solve = 0.0
+    last_solve = time.time()
     while True:
         url, confirmed = check_cached_url()
         due_for_refresh = time.time() - last_solve >= URL_REFRESH_INTERVAL

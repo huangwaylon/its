@@ -293,13 +293,7 @@ async def solve_recaptcha(page: Page, max_attempts=8):
             continue
 
         # ── Click matching tiles ──
-        # Scroll the captcha iframe into view to prevent "outside viewport" errors
-        try:
-            iframe_el = page.locator(BFRAME_IFRAME)
-            await iframe_el.scroll_into_view_if_needed()
-            await asyncio.sleep(0.3)
-        except Exception:
-            pass
+        await _scroll_bframe_into_view(page)
         log(f'Clicking {len(matching)} tiles: {matching}')
         for idx in matching:
             if 1 <= idx <= tile_count:
@@ -322,11 +316,12 @@ async def solve_recaptcha(page: Page, max_attempts=8):
         has_animating = await bframe.locator(DYNAMIC_SELECTED).count() > 0
         if has_replacements or has_animating:
             log(f'Dynamic replacements detected (new={has_replacements}, animating={has_animating})')
-            await _handle_dynamic_tiles(bframe, prompt_text)
+            await _handle_dynamic_tiles(page, bframe, prompt_text)
 
         # ── Click verify ──
         log('Clicking verify...')
         await asyncio.sleep(0.5)
+        await _scroll_bframe_into_view(page)
         try:
             await bframe.locator(VERIFY_BTN).click(timeout=5000)
         except Exception as e:
@@ -351,14 +346,16 @@ async def solve_recaptcha(page: Page, max_attempts=8):
             extra = await _classify_unselected_tiles(bframe, prompt_text, total_tiles, tiles)
             if extra:
                 log(f'Found additional matches: {extra}')
+                await _scroll_bframe_into_view(page)
                 for idx in extra:
                     await tiles.nth(idx - 1).click()
                     await asyncio.sleep(0.3)
                 await asyncio.sleep(1.5)
                 if await bframe.locator(NEW_TILE_IMG).count() > 0:
-                    await _handle_dynamic_tiles(bframe, prompt_text)
+                    await _handle_dynamic_tiles(page, bframe, prompt_text)
                 log('Clicking verify again...')
                 await asyncio.sleep(0.5)
+                await _scroll_bframe_into_view(page)
                 await bframe.locator(VERIFY_BTN).click()
                 await asyncio.sleep(3)
                 try:
@@ -392,6 +389,15 @@ async def solve_recaptcha(page: Page, max_attempts=8):
 
 
 # ── Internal helpers ────────────────────────────────────────────────
+
+async def _scroll_bframe_into_view(page):
+    """Scroll the bframe iframe into the viewport on the outer page."""
+    try:
+        await page.locator(BFRAME_IFRAME).scroll_into_view_if_needed()
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+
 
 async def _classify_tiles(bframe, prompt_text, grid_type, total_tiles, tiles):
     """Classify tiles using vision model. Returns list of 1-indexed matching tile numbers."""
@@ -484,7 +490,7 @@ async def _classify_unselected_tiles(bframe, prompt_text, total_tiles, tiles):
     return matching
 
 
-async def _handle_dynamic_tiles(bframe, prompt_text):
+async def _handle_dynamic_tiles(page, bframe, prompt_text):
     """Handle dynamic challenges where selected tiles get replaced with new images.
 
     Uses per-tile classification for replacement tiles (reliable, unlike full-grid
@@ -540,6 +546,7 @@ async def _handle_dynamic_tiles(bframe, prompt_text):
             log('  No more dynamic matches, ready to verify')
             break
 
+        await _scroll_bframe_into_view(page)
         for idx in matches:
             await tiles.nth(idx).click(force=True)
             await asyncio.sleep(0.3)
