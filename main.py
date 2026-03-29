@@ -24,6 +24,7 @@ from display import SplitDisplay
 MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
 URL_CHECK_INTERVAL = 10  # seconds between URL validity checks
+URL_REFRESH_INTERVAL = 600  # seconds between proactive URL refreshes
 
 display = SplitDisplay()
 
@@ -67,23 +68,38 @@ def check_cached_url():
 def url_monitor():
     """Monitor the calendar URL cache and solve CAPTCHA when needed.
 
-    Runs forever in its own thread. Because the CAPTCHA solve is synchronous,
-    it naturally blocks re-triggering while a solve is in progress.
+    Runs forever in its own thread. Proactively refreshes the URL every
+    URL_REFRESH_INTERVAL seconds, even if the current URL is still valid.
+    Because the CAPTCHA solve is synchronous, it naturally blocks
+    re-triggering while a solve is in progress.
     """
+    last_solve = 0.0
     while True:
-        if check_cached_url():
+        url = check_cached_url()
+        due_for_refresh = time.time() - last_solve >= URL_REFRESH_INTERVAL
+
+        if url and not due_for_refresh:
             time.sleep(URL_CHECK_INTERVAL)
             continue
 
-        url_log(f"{B}URL invalid or missing, solving CAPTCHA...{X}")
+        if url:
+            url_log(f"{Y}Proactive refresh ({int(time.time() - last_solve)}s since last solve)...{X}")
+        else:
+            url_log(f"{B}URL invalid or missing, solving CAPTCHA...{X}")
+
         try:
-            url = asyncio.run(get_calendar_url())
-            if url:
-                url_log(f"{G}New URL saved: {url[:80]}...{X}")
+            new_url = asyncio.run(get_calendar_url())
+            if new_url:
+                last_solve = time.time()
+                url_log(f"{G}New URL saved: {new_url[:80]}...{X}")
             else:
                 url_log(f"{R}CAPTCHA solve failed, will retry next cycle{X}")
+                if url:  # Had valid URL; reset timer to avoid spamming retries
+                    last_solve = time.time()
         except Exception as e:
             url_log(f"{R}CAPTCHA solve error: {e}{X}")
+            if url:  # Had valid URL; reset timer to avoid spamming retries
+                last_solve = time.time()
 
         time.sleep(URL_CHECK_INTERVAL)
 
