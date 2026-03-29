@@ -13,14 +13,25 @@ import asyncio
 import subprocess
 import threading
 import time
+from datetime import datetime
 
+import captcha_solver
 from captcha_solver import get_calendar_url, CALENDAR_URL_CACHE
 import book_hotels
-from book_hotels import log, R, G, Y, C, B, X
+from book_hotels import R, G, Y, C, B, X
+from display import SplitDisplay
 
 MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
 URL_CHECK_INTERVAL = 10  # seconds between URL validity checks
+
+display = SplitDisplay()
+
+
+def url_log(msg=''):
+    """Log to the left (URL monitor) panel."""
+    ts = datetime.now().strftime('%H:%M:%S')
+    display.add_left(f'{ts} {msg}')
 
 
 def group_dates_by_month(dates):
@@ -48,7 +59,7 @@ def check_cached_url():
     status = r.stdout.strip()
     if status == '200':
         return url
-    log(f"{Y}URL check: cached URL returned {status}{X}")
+    url_log(f"{Y}URL check: cached URL returned {status}{X}")
     return None
 
 
@@ -63,37 +74,41 @@ def url_monitor():
             time.sleep(URL_CHECK_INTERVAL)
             continue
 
-        log(f"{B}URL invalid or missing, solving CAPTCHA...{X}")
+        url_log(f"{B}URL invalid or missing, solving CAPTCHA...{X}")
         try:
             url = asyncio.run(get_calendar_url())
             if url:
-                log(f"{G}New URL saved: {url[:80]}...{X}")
+                url_log(f"{G}New URL saved: {url[:80]}...{X}")
             else:
-                log(f"{R}CAPTCHA solve failed, will retry next cycle{X}")
+                url_log(f"{R}CAPTCHA solve failed, will retry next cycle{X}")
         except Exception as e:
-            log(f"{R}CAPTCHA solve error: {e}{X}")
+            url_log(f"{R}CAPTCHA solve error: {e}{X}")
 
         time.sleep(URL_CHECK_INTERVAL)
 
 
 def main():
-    log("=" * 60)
-    log(f"{B}ITS BOOKING SYSTEM{X}")
-    log(f"Email: {book_hotels.EMAIL}")
-    log(f"Dates: {', '.join(book_hotels.TARGET_DATES)}")
-    log("=" * 60)
+    # Wire up log handlers for split display
+    book_hotels._log_handler = display.add_right
+    captcha_solver._log_handler = display.add_left
+
+    url_log("=" * 60)
+    url_log(f"{B}ITS BOOKING SYSTEM{X}")
+    url_log(f"Email: {book_hotels.EMAIL}")
+    url_log(f"Dates: {', '.join(book_hotels.TARGET_DATES)}")
+    url_log("=" * 60)
 
     # Start URL monitor thread
     monitor = threading.Thread(target=url_monitor, daemon=True)
     monitor.start()
-    log(f"{C}URL monitor thread started{X}")
+    url_log(f"{C}URL monitor thread started{X}")
 
     # Start booking scanner threads (1 per month)
     months = group_dates_by_month(book_hotels.TARGET_DATES)
     month_labels = [MONTH_ABBR[int(m[5:7])] for m in months]
-    log(f"{B}Starting {len(months)} scanner threads ({', '.join(month_labels)}) "
-        f"for {len(book_hotels.TARGET_DATES)} dates{X}")
-    log("=" * 60)
+    url_log(f"{B}Starting {len(months)} scanner threads ({', '.join(month_labels)}) "
+            f"for {len(book_hotels.TARGET_DATES)} dates{X}")
+    url_log("=" * 60)
 
     threads = []
     for month_str, dates in months.items():
@@ -106,12 +121,12 @@ def main():
         t.start()
         threads.append(t)
 
-    # Wait forever (Ctrl+C to stop)
+    # Run split display (blocks until Ctrl+C)
     try:
-        for t in threads:
-            t.join()
+        display.run()
     except KeyboardInterrupt:
-        log(f"\n{Y}Interrupted, exiting.{X}")
+        pass
+    print(f"{Y}Interrupted, exiting.{X}")
 
 
 if __name__ == '__main__':

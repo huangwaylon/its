@@ -47,9 +47,15 @@ CHALLENGE_AREA = '.rc-imageselect-challenge'
 # ── Logging ─────────────────────────────────────────────────────────
 _t0 = time.time()
 
+_log_handler = None  # Set externally for display routing
+
 def log(msg):
     elapsed = time.time() - _t0
-    print(f'[{elapsed:6.1f}s] {msg}', flush=True)
+    formatted = f'[{elapsed:6.1f}s] {msg}'
+    if _log_handler:
+        _log_handler(formatted)
+    else:
+        print(formatted, flush=True)
 
 
 def _debug_path(name):

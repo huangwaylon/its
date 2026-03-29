@@ -22,9 +22,15 @@ B = '\033[1m'    # bold
 X = '\033[0m'    # reset
 
 
+_log_handler = None  # Set externally for display routing
+
 def log(msg=''):
     ts = datetime.now().strftime('%H:%M:%S')
-    print(f'{ts} {msg}', flush=True)
+    formatted = f'{ts} {msg}'
+    if _log_handler:
+        _log_handler(formatted)
+    else:
+        print(formatted, flush=True)
 
 
 TARGET_DATES = [
