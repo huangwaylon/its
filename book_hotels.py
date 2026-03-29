@@ -43,7 +43,8 @@ _bookings_lock = threading.Lock()
 def _read_cached_url():
     """Read the current calendar URL from cache file."""
     try:
-        url = open(CALENDAR_URL_CACHE).read().strip()
+        with open(CALENDAR_URL_CACHE) as f:
+            url = f.read().strip()
         return url or None
     except FileNotFoundError:
         return None
@@ -52,9 +53,13 @@ def _read_cached_url():
 def _load_bookings():
     if not os.path.exists(BOOKINGS_FILE):
         return {}
-    with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
-        content = f.read().strip()
-        return json.loads(content) if content else {}
+    try:
+        with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            return json.loads(content) if content else {}
+    except (json.JSONDecodeError, OSError) as e:
+        log(f"{R}Warning: failed to load {BOOKINGS_FILE}: {e}{X}")
+        return {}
 
 
 def save_booking(date, hotel_name):
@@ -104,6 +109,11 @@ def ex(html, pat):
     return m.group(1) if m else None
 
 
+def _date_css_class(body, date):
+    """Extract the CSS class for a date cell from escaped JS response."""
+    return ex(body, rf'class=\\"([^"\\]*)\\\"[^>]*data-join-time=\\"{date}\\"') or ''
+
+
 def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     """Book a single hotel for a date. Steps 3-9. Returns True on success."""
     # STEP 3: Select hotel
@@ -133,6 +143,9 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
     form_action = ex(body, r'action="(/apply/empty_create\?s=[^"]+)"')
     coma_s = ex(body, r"coma_search\('([^']+)'\)")
+    if not form_action or not coma_s:
+        log(f"{tag}   {R}Missing form params on booking page{X}")
+        return False
 
     # STEP 6: Search rooms
     s, body, _ = c('POST',
@@ -173,6 +186,9 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     s_rule_m = re.search(r'name="s"[^>]*value="([^"]*)"', body)
     s_rule = s_rule_m.group(1) if s_rule_m else None
     rule_url = BASE + form_act if form_act else None
+    if not rule_url:
+        log(f"{tag}   {R}Missing rules form action{X}")
+        return False
     post_data = {'utf8': '\u2713', 'authenticity_token': auth}
     if s_rule:
         post_data['s'] = s_rule
@@ -188,6 +204,9 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
     token_field = ex(body, r'name="__token__"[^>]*value="([^"]*)"')
     email_url = BASE + form_act if form_act else None
+    if not email_url:
+        log(f"{tag}   {R}Missing email form action{X}")
+        return False
     post_data = {
         'utf8': '\u2713', 'authenticity_token': auth,
         'email': EMAIL, 'commit': '\u9001\u4fe1',
@@ -222,7 +241,7 @@ def book_all_hotels_for_date(target_date, label):
 
     cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_{target_date}_')
     os.close(cookie_fd)
-    open(cookie_file, 'w').close()
+    open(cookie_file, 'w').close()  # truncate
 
     def c(method, url, data=None, headers=None):
         return curl(cookie_file, method, url, data, headers)
@@ -245,7 +264,7 @@ def book_all_hotels_for_date(target_date, label):
                 {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
                  'Accept': 'text/javascript, application/javascript, */*; q=0.01',
                  'Referer': url})
-            cls = ex(body_nav, rf'class=\\"([^"\\]*)\\\"[^>]*data-join-time=\\"{target_date}\\"') or ''
+            cls = _date_css_class(body_nav, target_date)
             if 'empty' not in cls:
                 log(f"{tag} {Y}date not available{X}")
                 return target_date, booked
@@ -274,7 +293,7 @@ def book_all_hotels_for_date(target_date, label):
         for i, (hotel_id, hotel_name) in enumerate(hotels):
             if i > 0:
                 # Fresh session for next hotel
-                open(cookie_file, 'w').close()
+                open(cookie_file, 'w').close()  # truncate
                 s, body, _ = c('GET', url)
                 if s != 200:
                     log(f"{tag} {Y}URL expired during hotel loop, stopping{X}")
@@ -320,7 +339,7 @@ def scan_and_book_month(month_str, target_dates, label):
 
     cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_scan_{month_str}_')
     os.close(cookie_fd)
-    open(cookie_file, 'w').close()
+    open(cookie_file, 'w').close()  # truncate
 
     def c(method, url, data=None, headers=None):
         return curl(cookie_file, method, url, data, headers)
@@ -339,7 +358,7 @@ def scan_and_book_month(month_str, target_dates, label):
                 continue
 
             # SCAN: Load calendar (1 GET)
-            open(cookie_file, 'w').close()
+            open(cookie_file, 'w').close()  # truncate
             s, body, _ = c('GET', url)
             if s != 200:
                 log(f"{tag} {Y}[{attempt}] URL returned {s}, waiting...{X}")
@@ -357,7 +376,7 @@ def scan_and_book_month(month_str, target_dates, label):
             # Check all target dates for availability
             available = []
             for td in target_dates:
-                cls = ex(body_nav, rf'class=\\"([^"\\]*)\\\"[^>]*data-join-time=\\"{td}\\"') or ''
+                cls = _date_css_class(body_nav, td)
                 if 'empty' in cls:
                     available.append(td)
 
@@ -375,7 +394,11 @@ def scan_and_book_month(month_str, target_dates, label):
                     futures[pool.submit(book_all_hotels_for_date, td, dlabel)] = td
 
                 for future in as_completed(futures):
-                    td, booked_list = future.result()
+                    try:
+                        td, booked_list = future.result()
+                    except Exception as e:
+                        log(f"{tag} {R}Booking thread failed: {e}{X}")
+                        continue
                     if booked_list:
                         log(f"{tag} {G}Booked for {td}: {', '.join(booked_list)}{X}")
 

@@ -52,7 +52,8 @@ def check_cached_url():
       - (None, False) — no cached URL, or session expired (302, 4xx, etc.)
     """
     try:
-        url = open(CALENDAR_URL_CACHE).read().strip()
+        with open(CALENDAR_URL_CACHE) as f:
+            url = f.read().strip()
     except FileNotFoundError:
         return None, False
     if not url:

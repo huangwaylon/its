@@ -133,6 +133,7 @@ async def ask_vision(image_b64, prompt, no_think=False):
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=35)
                 except asyncio.TimeoutError:
                     proc.kill()
+                    await proc.wait()
                     raise RuntimeError('ollama took >35s, killed')
                 if proc.returncode != 0:
                     raise RuntimeError(f'curl exit {proc.returncode}: {stderr.decode()[:200]}')
@@ -208,7 +209,7 @@ def build_tile_prompt(prompt_text):
 
 def parse_yes_no(text):
     """Parse a yes/no response from the model."""
-    return 'yes' in text.lower().strip()
+    return bool(re.search(r'\byes\b', text.lower()))
 
 
 # ── Solver ──────────────────────────────────────────────────────────
@@ -269,6 +270,11 @@ async def solve_recaptcha(page: Page, max_attempts=8):
         # Skip 4x4 challenges — too many tiles, ollama degrades before finishing
         if grid_type == '4x4':
             log('4x4 grid detected, skipping (too slow for ollama). Reloading...')
+            await _reload_challenge(bframe)
+            continue
+
+        if total_tiles == 0:
+            log('No tiles found (page not loaded?), reloading...')
             await _reload_challenge(bframe)
             continue
 
@@ -356,7 +362,11 @@ async def solve_recaptcha(page: Page, max_attempts=8):
                 log('Clicking verify again...')
                 await asyncio.sleep(0.5)
                 await _scroll_bframe_into_view(page)
-                await bframe.locator(VERIFY_BTN).click()
+                try:
+                    await bframe.locator(VERIFY_BTN).click(timeout=5000)
+                except Exception as e:
+                    log(f'Verify click failed (session expired?): {e}')
+                    return None
                 await asyncio.sleep(3)
                 try:
                     await anchor.locator(CHECKBOX_CHECKED).wait_for(state='attached', timeout=5000)
@@ -619,7 +629,7 @@ async def get_calendar_url():
             # Step 1: Go to ITS homepage
             log('Navigating to ITS homepage...')
             response = await page.goto('https://as.its-kenpo.or.jp/', timeout=30000)
-            if not response or response.status >= 500:
+            if not response or response.status >= 400:
                 log(f'Homepage returned HTTP {response.status if response else "no response"}')
                 return None
             await asyncio.sleep(3)
@@ -664,8 +674,10 @@ async def get_calendar_url():
             if 'calendar_select' not in calendar_url:
                 log(f'WARNING: URL does not look like a calendar page: {calendar_url}')
 
-            with open(CALENDAR_URL_CACHE, 'w') as f:
+            tmp_path = CALENDAR_URL_CACHE + '.tmp'
+            with open(tmp_path, 'w') as f:
                 f.write(calendar_url + '\n')
+            os.replace(tmp_path, CALENDAR_URL_CACHE)
             log(f'Saved to {CALENDAR_URL_CACHE}')
 
             return calendar_url
