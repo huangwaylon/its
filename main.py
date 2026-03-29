@@ -58,6 +58,7 @@ def check_cached_url():
     )
     status = r.stdout.strip()
     if status == '200':
+        url_log(f"{C}URL check: valid (200){X}")
         return url
     url_log(f"{Y}URL check: cached URL returned {status}{X}")
     return None
