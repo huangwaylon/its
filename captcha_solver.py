@@ -22,6 +22,8 @@ import time
 from PIL import Image
 from playwright.async_api import async_playwright, Page
 
+from config import CALENDAR_URL_CACHE
+
 # ── Config ──────────────────────────────────────────────────────────
 OLLAMA_URL = 'http://localhost:11434'
 OLLAMA_MODEL = 'qwen3-vl:8b'
@@ -587,8 +589,6 @@ async def _get_token(page: Page):
 
 # ── ITS Calendar URL getter ────────────────────────────────────────
 
-CALENDAR_URL_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calendar_url_cache.txt')
-
 
 async def get_calendar_url():
     """Navigate ITS site, solve CAPTCHA, click 次へ, and save the calendar URL."""
@@ -611,13 +611,20 @@ async def get_calendar_url():
         try:
             # Step 1: Go to ITS homepage
             log('Navigating to ITS homepage...')
-            await page.goto('https://as.its-kenpo.or.jp/', timeout=30000)
+            response = await page.goto('https://as.its-kenpo.or.jp/', timeout=30000)
+            if not response or response.status >= 500:
+                log(f'Homepage returned HTTP {response.status if response else "no response"}')
+                return None
             await asyncio.sleep(3)
 
             # Step 2: Click "カレンダーから探す"
             log('Looking for カレンダーから探す link...')
             calendar_link = page.locator('a:has-text("カレンダーから探す")')
-            await calendar_link.wait_for(state='visible', timeout=15000)
+            try:
+                await calendar_link.wait_for(state='visible', timeout=15000)
+            except Exception:
+                await page.screenshot(path=_debug_path('homepage_link_not_found.png'))
+                raise
             log('Found link, clicking...')
             await calendar_link.click()
             await page.wait_for_load_state('networkidle', timeout=30000)

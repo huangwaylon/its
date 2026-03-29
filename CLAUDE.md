@@ -27,6 +27,16 @@ There are no tests, linting, or formatting tools configured.
 
 Three scripts with clear separation of concerns:
 
+### `config.py` — User-configurable settings
+
+Central configuration file for all tunable constants. Stdlib only (`import os`). Contains:
+- Paths: `CALENDAR_URL_CACHE`, `BOOKINGS_FILE`
+- Booking settings: `TARGET_DATES`, `EMAIL`, `NUM_GUESTS`
+- Network tuning: `RETRY_DELAY`, `CURL_MAX_ATTEMPTS`, `URL_CHECK_INTERVAL`, `URL_REFRESH_INTERVAL`
+- Hotel skip list: `SKIP_HOTELS` (with commented-out "keep" list for reference)
+
+Imported by `book_hotels.py`, `captcha_solver.py`, and `main.py`.
+
 ### `main.py` — Entry point and orchestrator
 
 Starts two kinds of threads and waits forever (Ctrl+C to stop):
@@ -53,7 +63,7 @@ Starts two kinds of threads and waits forever (Ctrl+C to stop):
 
 ### `book_hotels.py` — Booking engine
 
-Pure booking logic. Never triggers CAPTCHA solving. All calendar URL access goes through `_read_cached_url()` which reads the `CALENDAR_URL_CACHE` file (absolute path derived from `__file__`).
+Pure booking logic. Never triggers CAPTCHA solving. All calendar URL access goes through `_read_cached_url()` which reads `CALENDAR_URL_CACHE` (imported from `config`).
 
 **Month scanner** (`scan_and_book_month(month_str, target_dates, label)`): One thread per month, runs forever. Each cycle:
 1. Read URL from cache via `_read_cached_url()`. If missing → log, sleep `RETRY_DELAY`, retry
@@ -126,18 +136,20 @@ Uses Playwright (Chromium with `--headless=new`) + ollama vision model to solve 
 
 ## Data Files
 
-- `calendar_url_cache.txt` — Current calendar session URL. Written by `captcha_solver.get_calendar_url()`, read by `book_hotels._read_cached_url()` and `main.check_cached_url()`. Contains a URL with an `s=` session token that expires periodically. Both modules use absolute paths derived from `__file__`.
+- `calendar_url_cache.txt` — Current calendar session URL. Written by `captcha_solver.get_calendar_url()`, read by `book_hotels._read_cached_url()` and `main.check_cached_url()`. Contains a URL with an `s=` session token that expires periodically. Path defined once in `config.CALENDAR_URL_CACHE`.
 - `bookings.json` — Records successful bookings as `{date: [hotel_names]}`. Thread-safe via `_bookings_lock`.
 
-## Configuration (in `book_hotels.py`)
+## Configuration (in `config.py`)
 
 - `TARGET_DATES` — List of `YYYY-MM-DD` date strings to book
 - `EMAIL` — Email for booking confirmation
 - `NUM_GUESTS` — Number of guests per booking (string)
 - `BOOKINGS_FILE` — Path to bookings JSON file (default `'bookings.json'`)
 - `RETRY_DELAY` — Seconds between scan retry attempts (default 10)
+- `CURL_MAX_ATTEMPTS` — Max attempts per curl request (default 2, 1 = no retry)
 - `SKIP_HOTELS` — Hotels to never book (commented-out section = "keep" list for reference)
-- `URL_CHECK_INTERVAL` — In `main.py`, seconds between URL validity checks (default 10)
+- `URL_CHECK_INTERVAL` — Seconds between URL validity checks (default 10)
+- `URL_REFRESH_INTERVAL` — Seconds between proactive URL refreshes (default 600)
 
 ## Logging
 

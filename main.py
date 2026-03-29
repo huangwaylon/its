@@ -16,15 +16,14 @@ import time
 from datetime import datetime
 
 import captcha_solver
-from captcha_solver import get_calendar_url, CALENDAR_URL_CACHE
+from captcha_solver import get_calendar_url
+from config import CALENDAR_URL_CACHE, URL_CHECK_INTERVAL, URL_REFRESH_INTERVAL
 import book_hotels
 from book_hotels import R, G, Y, C, B, X
 from display import SplitDisplay
 
 MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
-URL_CHECK_INTERVAL = 10  # seconds between URL validity checks
-URL_REFRESH_INTERVAL = 600  # seconds between proactive URL refreshes
 
 display = SplitDisplay()
 
@@ -46,13 +45,18 @@ def group_dates_by_month(dates):
 
 def check_cached_url():
     """Read calendar_url_cache.txt and test if the URL is still valid (HTTP 200).
-    Returns the URL string if valid, None otherwise."""
+
+    Returns (url, confirmed_valid):
+      - (url, True)  — server returned 200, session confirmed active
+      - (url, False) — server error (5xx) or connection failure; session assumed valid
+      - (None, False) — no cached URL, or session expired (302, 4xx, etc.)
+    """
     try:
         url = open(CALENDAR_URL_CACHE).read().strip()
     except FileNotFoundError:
-        return None
+        return None, False
     if not url:
-        return None
+        return None, False
     r = subprocess.run(
         ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10', url],
         capture_output=True, text=True,
@@ -60,9 +64,12 @@ def check_cached_url():
     status = r.stdout.strip()
     if status == '200':
         url_log(f"{C}URL check: valid (200){X}")
-        return url
-    url_log(f"{Y}URL check: cached URL returned {status}{X}")
-    return None
+        return url, True
+    if not status or status == '000' or status.startswith('5'):
+        url_log(f"{Y}URL check: server error ({status}), will retry{X}")
+        return url, False
+    url_log(f"{Y}URL check: session invalid ({status}){X}")
+    return None, False
 
 
 def url_monitor():
@@ -75,10 +82,10 @@ def url_monitor():
     """
     last_solve = 0.0
     while True:
-        url = check_cached_url()
+        url, confirmed = check_cached_url()
         due_for_refresh = time.time() - last_solve >= URL_REFRESH_INTERVAL
 
-        if url and not due_for_refresh:
+        if url and (not due_for_refresh or not confirmed):
             time.sleep(URL_CHECK_INTERVAL)
             continue
 

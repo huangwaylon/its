@@ -9,9 +9,12 @@ import subprocess, re, urllib.parse, os, json, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+from config import (
+    CALENDAR_URL_CACHE, TARGET_DATES, EMAIL, NUM_GUESTS,
+    BOOKINGS_FILE, RETRY_DELAY, CURL_MAX_ATTEMPTS, SKIP_HOTELS,
+)
+
 BASE = 'https://as.its-kenpo.or.jp'
-_DIR = os.path.dirname(os.path.abspath(__file__))
-CALENDAR_URL_CACHE = os.path.join(_DIR, 'calendar_url_cache.txt')
 
 # ANSI colors
 R = '\033[91m'   # red
@@ -32,68 +35,6 @@ def log(msg=''):
     else:
         print(formatted, flush=True)
 
-
-TARGET_DATES = [
-    "2026-04-18",
-    "2026-04-29",
-    "2026-04-30",
-    "2026-05-01",
-    "2026-05-02",
-    "2026-05-03",
-    "2026-05-04",
-    "2026-05-05",
-    "2026-05-06",
-    "2026-05-09",
-    "2026-05-16",
-    "2026-05-23",
-]
-EMAIL = 'wwaylonhuang@gmail.com'
-NUM_GUESTS = '2'
-BOOKINGS_FILE = 'bookings.json'
-RETRY_DELAY = 10  # seconds
-SKIP_HOTELS = [
-    "ブルーベリーヒル勝浦",
-    "ホテル日航プリンセス京都",
-    "ホテルハーヴェスト南紀田辺",
-    "草津温泉　ホテルヴィレッジ",
-    "ホテルハーヴェスト伊東",
-    "ホテルハーヴェスト　スキージャム勝山",
-    "ホテル琵琶レイクオーツカ",
-    "ホテルハーヴェスト有馬六彩",
-    "リソルの森",
-    "ホテルハーヴェスト浜名湖",
-    "ゆふいん山水館",
-    "ホテル日航アリビラ",
-    "ラビスタ函館ベイANNEX",
-    "ホテルハーヴェスト斑尾",
-    "ホテルハーヴェスト京都鷹峯",
-    "和倉温泉 あえの風",
-    "鳴子温泉　湯元　吉祥",
-    "ホテルオークラ東京ベイ",
-    "NASPAニューオータニ",
-
-    # ------------------------- Keep -------------------------
-    # "トスラブ箱根ビオーレ",
-    # "トスラブ箱根和奏林",
-    # "トスラブ館山ルアーナ",
-    # "ホテルハーヴェスト那須",
-    # "ホテルハーヴェスト斑尾",
-    # "ホテルハーヴェスト旧軽井沢",
-    # "ホテルハーヴェスト京都鷹峯",
-    # "日光千姫物語",
-    # "伊香保温泉 ホテル天坊",
-    # "和倉温泉 あえの風",
-    # "ラビスタ富士河口湖",
-    # "鳴子温泉　湯元　吉祥",
-    # "ホテルオークラ東京ベイ",
-    # "熱海後楽園ホテル",
-    # "ラビスタ横須賀観音崎テラス",
-    # "ラビスタ熱海テラス",
-    # "ホテルハーヴェスト鬼怒川",
-    # "蓼科東急ホテル",
-    # "NASPAニューオータニ",
-    # "NAGU 勝浦",
-]
 
 # Thread-safe bookings access
 _bookings_lock = threading.Lock()
@@ -144,11 +85,15 @@ def curl(cookie_file, method, url, data=None, headers=None):
         for k, v in data.items():
             cmd.extend(['--data-urlencode', f'{k}={v}'])
     cmd.append(url)
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    body = r.stdout
-    hdrs = r.stderr
-    st = re.findall(r'HTTP/\S+ (\d+)', hdrs)
-    status = int(st[-1]) if st else 0
+    for attempt in range(CURL_MAX_ATTEMPTS):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        body = r.stdout
+        hdrs = r.stderr
+        st = re.findall(r'HTTP/\S+ (\d+)', hdrs)
+        status = int(st[-1]) if st else 0
+        if (status != 0 and status < 500) or attempt + 1 == CURL_MAX_ATTEMPTS:
+            break
+        log(f"  {Y}curl {method} failed ({status}), retrying...{X}")
     loc = re.search(r'location: (.+)', hdrs, re.IGNORECASE)
     location = loc.group(1).strip() if loc else None
     return status, body, location
