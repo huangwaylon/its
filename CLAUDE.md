@@ -9,110 +9,138 @@ ITS Calendar Booker — an automated booking system for ITS Health Insurance Fac
 ## Setup & Running
 
 ```bash
-# Indefinite mode (recommended): auto-solves CAPTCHA, books forever
-.venv/bin/python run.py
-
-# Manual burst mode: one-shot booking with existing cached URL
-python3 main.py
+# Start the system (recommended): auto-solves CAPTCHA, books forever
+uv run main.py
 
 # Solve CAPTCHA only (saves URL to calendar_url_cache.txt)
 .venv/bin/python captcha_solver.py
-
-# Test CAPTCHA solver against 2captcha demo
-.venv/bin/python captcha_solver.py --demo
 ```
 
 **Dependencies**:
-- `main.py`: stdlib only + curl (no pip packages)
+- `book_hotels.py`: stdlib only + curl (no pip packages)
 - `captcha_solver.py`: `playwright`, `Pillow`, ollama running locally with `qwen3-vl:8b` model
-- `run.py`: combines both, needs all of the above
+- `main.py`: combines both, needs all of the above
 
 There are no tests, linting, or formatting tools configured.
 
 ## Architecture
 
-Three scripts, each usable independently:
+Three scripts with clear separation of concerns:
 
-### `run.py` — Indefinite booking orchestrator (primary entry point)
+### `main.py` — Entry point and orchestrator
 
-Outer loop that runs forever:
-1. Check if `calendar_url_cache.txt` has a valid URL (quick curl GET, check for 200)
-2. If not valid, call `captcha_solver.get_calendar_url()` to solve CAPTCHA and get a fresh URL
-3. Group `TARGET_DATES` by month, spawn one scanner thread per month
-4. Each scanner polls its month's calendar (1 GET + 1 POST per cycle = 2 requests regardless of how many dates)
-5. When a scanner finds availability, it spawns parallel booking threads (one per available date)
-6. Wait for all scanner threads to finish
-7. If any thread reported URL expiry → back to step 2
-8. If no expiry → back to step 3 with same URL
+Starts two kinds of threads and waits forever (Ctrl+C to stop):
 
-Bridges async captcha solver into sync context via `asyncio.run()`. Gives up after 5 consecutive CAPTCHA failures (30s backoff between retries).
+**Booking scanner threads** (1 per month, daemon):
+- Groups `TARGET_DATES` by month, spawns one `threading.Thread` per month
+- Each calls `book_hotels.scan_and_book_month()` which loops indefinitely
+- Reads URL from `calendar_url_cache.txt` each cycle
+- If URL is missing or expired, logs and waits for next cycle (never triggers CAPTCHA)
 
-### `main.py` — Booking engine (also works standalone)
-
-**Month scanner** (`scan_and_book_month()`): One thread per month. Each cycle:
-1. GET calendar page, extract CSRF tokens (1 request)
-2. POST to navigate to target month (1 request) — response contains availability for ALL dates
-3. Check each target date's availability via regex on the response
-4. For each available date, spawn a booking thread (`book_all_hotels_for_date` with `max_attempts=1`)
-5. Wait for booking threads, then loop back to step 1
-
-**Booking flow per date** (`book_all_hotels_for_date()`):
-1. GET calendar page, extract CSRF/auth tokens via regex
-2. POST to navigate to target month if date not visible
-3. POST to `service_group_select` to get hotel list
-4. Filter out `SKIP_HOTELS` + already-booked hotels
-5. For each hotel, `book_one_hotel()`: select hotel → select service → load form → search rooms → submit room → agree to rules → submit email
-
-When used standalone (`python3 main.py`), spawns one thread per date with infinite retries (original burst mode).
-
-**URL expiry handling**: When GET returns non-200, the thread sets `expired = True` and returns. The caller decides what to do.
+**URL monitor thread** (1 total, daemon):
+- `url_monitor()` loops forever
+- Each cycle: `check_cached_url()` reads the cache file and makes a curl GET to verify HTTP 200
+- If valid → sleep `URL_CHECK_INTERVAL` (10s)
+- If invalid/missing → call `asyncio.run(get_calendar_url())` synchronously in this thread
+- Synchronous design naturally prevents re-triggering while a solve is in progress (no locks needed)
+- On failure, sleeps and retries indefinitely
 
 **Key functions**:
-- `scan_and_book_month(month_str, target_dates, label, calendar_url)` — month scanner loop, spawns booking threads on availability
-- `book_all_hotels_for_date(target_date, label, calendar_url, max_attempts)` — booking loop per date (`max_attempts=0` for infinite, `1` for single-pass)
-- `book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name)` — books one hotel (steps 3-9), returns True/False
-- `curl(cookie_file, method, url, data, headers)` — raw HTTP via curl subprocess
-- `ex(html, pat)` — regex extraction helper
+- `main()` — starts monitor thread, starts scanner threads, joins scanners
+- `url_monitor()` — cache validity loop, triggers CAPTCHA solve when needed
+- `check_cached_url()` — reads cache file, curl GET to test validity, returns URL or None
+- `group_dates_by_month(dates)` — groups `YYYY-MM-DD` strings by `YYYY-MM`
 
-**Threading model** (via `run.py`):
-- 1 scanner thread per month (e.g., APR, MAY) — polls with 2 requests/cycle
-- On availability: spawns N booking threads (one per available date) — each fully independent with own cookie file
-- Booking threads run single-pass (`max_attempts=1`), scanner resumes after they complete
-- Only shared state is `bookings.json` (protected by `threading.Lock`)
-- Standalone mode (`python3 main.py`): 1 thread per date, infinite retries, no scanner
+### `book_hotels.py` — Booking engine
+
+Pure booking logic. Never triggers CAPTCHA solving. All calendar URL access goes through `_read_cached_url()` which reads the `CALENDAR_URL_CACHE` file (absolute path derived from `__file__`).
+
+**Month scanner** (`scan_and_book_month(month_str, target_dates, label)`): One thread per month, runs forever. Each cycle:
+1. Read URL from cache via `_read_cached_url()`. If missing → log, sleep `RETRY_DELAY`, retry
+2. GET calendar page, extract CSRF tokens (1 request). If non-200 → log, sleep, retry
+3. POST to navigate to target month (1 request) — response contains availability for ALL dates in that month
+4. Check each target date's CSS class for `empty` (available) via regex
+5. For each available date, spawn a booking thread via `ThreadPoolExecutor`
+6. Wait for all booking threads to complete, then loop back to step 1
+
+**Booking flow per date** (`book_all_hotels_for_date(target_date, label)`): Single-pass, returns `(date, list_of_booked_hotels)`.
+1. Read URL from cache. If missing → return `(date, [])`
+2. GET calendar page, extract CSRF/auth tokens via regex. If non-200 → return
+3. POST to navigate to target month if date not visible in current view
+4. POST to `service_group_select` to get hotel list
+5. Filter out `SKIP_HOTELS` + already-booked hotels (from `bookings.json`)
+6. For each hotel sequentially, call `book_one_hotel()` (fresh session per hotel)
+
+**Single hotel booking** (`book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name)`): Steps 3-9 of the booking flow. Returns True/False.
+1. POST to select hotel → extract services list
+2. POST to select service → follow 302 redirect
+3. GET booking form → extract CSRF, auth, form action, coma search param
+4. POST to search rooms (AJAX) → extract room IDs and session GUID
+5. POST to submit room selection → follow 302
+6. POST to agree to rules page → follow 302
+7. POST to submit email confirmation → check for `send_complete` in response
+
+**Key functions**:
+- `scan_and_book_month(month_str, target_dates, label)` — month scanner loop
+- `book_all_hotels_for_date(target_date, label)` — single-pass booking for one date
+- `book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name)` — books one hotel
+- `curl(cookie_file, method, url, data, headers)` — raw HTTP via curl subprocess, returns `(status, body, location)`
+- `ex(html, pat)` — regex group(1) extraction helper
+- `save_booking(date, hotel_name)` — thread-safe append to `bookings.json`
+- `get_booked_hotels(date)` — thread-safe read from `bookings.json`
+- `_read_cached_url()` — reads `CALENDAR_URL_CACHE`, returns URL string or None
+- `_load_bookings()` — private, reads `bookings.json`, must only be called under `_bookings_lock`
 
 ### `captcha_solver.py` — reCAPTCHA v2 solver
 
-Uses Playwright (non-headless Chromium) + ollama vision model to solve reCAPTCHA v2 image challenges.
+Uses Playwright (Chromium with `--headless=new`) + ollama vision model to solve reCAPTCHA v2 image challenges. Has its own `log()` function (elapsed-seconds format) separate from `book_hotels.log()` (wall-clock format).
 
 **Key functions**:
-- `get_calendar_url()` — async. Navigates ITS site → clicks "カレンダーから探す" → solves CAPTCHA → clicks "次へ" → saves URL to `calendar_url_cache.txt`. Returns URL string or None.
-- `solve_recaptcha(page, max_attempts=8)` — async. Solves reCAPTCHA on any page. Returns g-recaptcha-response token or None.
-- `ask_vision(http, image_b64, prompt)` — sends image to ollama via curl subprocess.
+- `get_calendar_url()` — async. Full flow: launch browser → navigate to ITS homepage → click "カレンダーから探す" → solve CAPTCHA → click "次へ" → save resulting URL to `CALENDAR_URL_CACHE`. Returns URL string or None.
+- `solve_recaptcha(page, max_attempts=8)` — async. Generic reCAPTCHA v2 solver for any page. Returns g-recaptcha-response token or None.
+- `ask_vision(image_b64, prompt, no_think=False)` — async. Sends image+prompt to ollama via curl subprocess. Uses temp file for payload. Semaphore limits to 2 concurrent requests. Retries once on failure.
 
-**CAPTCHA solving strategy**:
-1. Click reCAPTCHA checkbox
-2. If challenge appears, detect grid type (3x3 or 4x4; skips 4x4)
-3. Strategy 1: screenshot full grid, ask vision model to identify matching tiles
-4. Strategy 2 (fallback): screenshot each tile individually, classify in parallel
-5. Click matching tiles, handle dynamic replacements, click verify
-6. Retry up to 8 challenges
+**CAPTCHA solving strategy** (in `solve_recaptcha`):
+1. Click reCAPTCHA checkbox. If solved immediately, return token.
+2. For each challenge attempt (up to `max_attempts`):
+   - Detect grid type (3x3 or 4x4). Skip 4x4 (too slow for ollama).
+   - **Strategy 1**: Screenshot full challenge area (300px), ask vision model for matching tile numbers in one call (`no_think=True` for speed).
+   - **Strategy 2** (fallback): Screenshot each tile individually, classify all in parallel via `asyncio.gather`.
+   - Click matching tiles. Handle dynamic replacement tiles (up to 5 rounds).
+   - Click verify. Check if solved. Handle "select more" errors with re-analysis.
+   - If not solved, reload challenge and retry.
 
-**Config**: `OLLAMA_URL = 'http://localhost:11434'`, `OLLAMA_MODEL = 'qwen3-vl:8b'`
+**Config**: `OLLAMA_URL = 'http://localhost:11434'`, `OLLAMA_MODEL = 'qwen3-vl:8b'`, `DEBUG_DIR = '/tmp/captcha_debug'`
+
+## Concurrency Model
+
+**Threads at runtime** (when started via `main.py`):
+- 1 URL monitor thread (daemon)
+- N scanner threads (daemon, 1 per month — currently 2: APR, MAY)
+- Temporary booking threads (spawned by scanners via `ThreadPoolExecutor`, 1 per available date)
+
+**Shared state**:
+- `calendar_url_cache.txt` — Written by captcha solver (in URL monitor thread), read by all scanner/booking threads. Safe via POSIX file atomicity for small files. Readers handle stale/empty data gracefully (return None, retry next cycle).
+- `bookings.json` — All access goes through `save_booking()` and `get_booked_hotels()`, both protected by `_bookings_lock` (`threading.Lock`). `_load_bookings()` is private and must only be called under this lock (non-reentrant lock would deadlock if added directly).
+- Cookie files — Each thread creates its own temp file (`cookies_scan_*` for scanners, `cookies_*` for booking threads). No sharing.
 
 ## Data Files
 
-- `calendar_url_cache.txt` — Current calendar session URL. Written by captcha_solver, read by main.py and run.py. Contains a URL with an `s=` session token that expires periodically.
-- `bookings.json` — Records successful bookings as `{date: [hotel_names]}`. Thread-safe writes via `_bookings_lock`.
+- `calendar_url_cache.txt` — Current calendar session URL. Written by `captcha_solver.get_calendar_url()`, read by `book_hotels._read_cached_url()` and `main.check_cached_url()`. Contains a URL with an `s=` session token that expires periodically. Both modules use absolute paths derived from `__file__`.
+- `bookings.json` — Records successful bookings as `{date: [hotel_names]}`. Thread-safe via `_bookings_lock`.
 
-## Configuration (in `main.py`)
+## Configuration (in `book_hotels.py`)
 
-- `TARGET_DATES` — List of date strings to book
+- `TARGET_DATES` — List of `YYYY-MM-DD` date strings to book
 - `EMAIL` — Email for booking confirmation
-- `NUM_GUESTS` — Number of guests per booking
-- `RETRY_DELAY` — Seconds between retry attempts (default 10)
-- `SKIP_HOTELS` — Hotels to never book (commented-out section = "keep" list)
+- `NUM_GUESTS` — Number of guests per booking (string)
+- `BOOKINGS_FILE` — Path to bookings JSON file (default `'bookings.json'`)
+- `RETRY_DELAY` — Seconds between scan retry attempts (default 10)
+- `SKIP_HOTELS` — Hotels to never book (commented-out section = "keep" list for reference)
+- `URL_CHECK_INTERVAL` — In `main.py`, seconds between URL validity checks (default 10)
 
 ## Logging
 
-All output uses ANSI color codes: red (errors/failures), green (success/booked), yellow (waiting/warnings), cyan (info), bold (headers/totals).
+- `book_hotels.log()`: `HH:MM:SS message` format with ANSI colors. Used by `main.py` too (imported).
+- `captcha_solver.log()`: `[elapsed_seconds] message` format (elapsed since module import). Independent.
+- ANSI color codes: red `R` (errors/failures), green `G` (success/booked), yellow `Y` (waiting/warnings), cyan `C` (info), bold `B` (headers/totals), reset `X`.

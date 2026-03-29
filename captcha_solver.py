@@ -617,8 +617,7 @@ async def get_calendar_url():
             await page.wait_for_load_state('networkidle', timeout=30000)
             await asyncio.sleep(3)
 
-            captcha_url = page.url
-            log(f'On captcha page: {captcha_url}')
+            log(f'On captcha page: {page.url}')
             await page.screenshot(path=_debug_path('its_captcha_page.png'))
 
             # Step 3: Solve reCAPTCHA
