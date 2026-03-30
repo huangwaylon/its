@@ -306,7 +306,7 @@ async def solve_recaptcha(page: Page, max_attempts=8):
                 tile = tiles.nth(idx - 1)
                 box = await tile.bounding_box()
                 log(f'  Tile {idx}: bbox={box}')
-                await tile.click(force=True)
+                await _click_tile(tile, f'Tile {idx}')
                 log(f'  Tile {idx}: clicked')
                 await asyncio.sleep(0.3)
         # Screenshot after clicking to verify state
@@ -354,7 +354,7 @@ async def solve_recaptcha(page: Page, max_attempts=8):
                 log(f'Found additional matches: {extra}')
                 await _scroll_bframe_into_view(page)
                 for idx in extra:
-                    await tiles.nth(idx - 1).click()
+                    await _click_tile(tiles.nth(idx - 1), f'Tile {idx}')
                     await asyncio.sleep(0.3)
                 await asyncio.sleep(1.5)
                 if await bframe.locator(NEW_TILE_IMG).count() > 0:
@@ -407,6 +407,18 @@ async def _scroll_bframe_into_view(page):
         await asyncio.sleep(0.3)
     except Exception:
         pass
+
+
+async def _click_tile(tile, label="tile"):
+    """Click a tile, falling back to dispatch_event on viewport errors."""
+    try:
+        await tile.click(force=True)
+    except Exception as e:
+        if 'outside of the viewport' in str(e):
+            log(f'  {label}: viewport error, using dispatch_event fallback')
+            await tile.dispatch_event('click')
+        else:
+            raise
 
 
 async def _classify_tiles(bframe, prompt_text, grid_type, total_tiles, tiles):
@@ -558,7 +570,7 @@ async def _handle_dynamic_tiles(page, bframe, prompt_text):
 
         await _scroll_bframe_into_view(page)
         for idx in matches:
-            await tiles.nth(idx).click(force=True)
+            await _click_tile(tiles.nth(idx), f'Dynamic tile {idx+1}')
             await asyncio.sleep(0.3)
 
         await asyncio.sleep(1.5)
@@ -620,7 +632,7 @@ async def get_calendar_url():
             ],
         )
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 900},
+            viewport={'width': 1280, 'height': 1400},
             locale='ja-JP',
         )
         page = await context.new_page()
