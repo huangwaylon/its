@@ -2,6 +2,7 @@
 import threading
 from collections import deque
 
+from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
@@ -9,6 +10,16 @@ from rich.panel import Panel
 from rich.text import Text
 
 _URL_BAR_HEIGHT = 3  # top border + 1 content line + bottom border
+
+
+def _visual_lines(plain, width):
+    """Count visual lines a message occupies at the given panel width."""
+    if width <= 0:
+        return 1
+    total = 0
+    for line in plain.split('\n'):
+        total += max(1, -(-cell_len(line) // width))  # ceiling division
+    return total
 
 
 class SplitDisplay:
@@ -30,10 +41,22 @@ class SplitDisplay:
         self._url = url or ""
 
     def _render_panel(self, buffer, title, border_style):
-        height = self._console.height - 4 - _URL_BAR_HEIGHT
-        recent = list(buffer)[-height:] if len(buffer) > height else list(buffer)
-        lines = [Text.from_ansi(msg) for msg in recent]
-        content = Group(*lines) if lines else Text("(waiting...)", style="dim")
+        height = self._console.height - 2 - _URL_BAR_HEIGHT  # 2 = panel top/bottom borders
+        width = self._console.width // 2 - 4  # inner width (panel borders + padding)
+
+        items = list(buffer)
+        selected = []
+        used = 0
+        for msg in reversed(items):
+            text = Text.from_ansi(msg)
+            vis = _visual_lines(text.plain, width)
+            if used + vis > height and selected:
+                break
+            selected.append(text)
+            used += vis
+
+        selected.reverse()
+        content = Group(*selected) if selected else Text("(waiting...)", style="dim")
         return Panel(content, title=title, border_style=border_style, expand=True)
 
     def _make_layout(self):
