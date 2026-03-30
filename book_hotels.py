@@ -279,12 +279,22 @@ def book_all_hotels_for_date(target_date, label):
             return target_date, booked
         auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
+        log(f"{tag} {C}Found {len(all_hotels)} hotels: {', '.join(n for _, n in all_hotels)}{X}")
+
         # Filter: skip list + already booked
         already_booked = get_booked_hotels(target_date)
+        skipped = [n for _, n in all_hotels if n in SKIP_HOTELS]
+        already = [n for _, n in all_hotels if n in already_booked]
         hotels = [(gid, name) for gid, name in all_hotels
                   if name not in SKIP_HOTELS and name not in already_booked]
 
         if not hotels:
+            reasons = []
+            if skipped:
+                reasons.append(f"skip list: {', '.join(skipped)}")
+            if already:
+                reasons.append(f"already booked: {', '.join(already)}")
+            log(f"{tag} {Y}All hotels filtered out ({'; '.join(reasons)}){X}")
             return target_date, booked
 
         log(f"{tag} {C}{len(hotels)} to book: {', '.join(n for _, n in hotels)}{X}")
