@@ -10,6 +10,7 @@ Usage:
     uv run main.py
 """
 import asyncio
+import re
 import subprocess
 import threading
 import time
@@ -17,21 +18,28 @@ from datetime import datetime
 
 import captcha_solver
 from captcha_solver import get_calendar_url
-from config import CALENDAR_URL_CACHE, URL_CHECK_INTERVAL, URL_REFRESH_INTERVAL
+from config import CALENDAR_URL_CACHE, URL_CHECK_INTERVAL, URL_REFRESH_INTERVAL, LOG_FILE
 import book_hotels
 from book_hotels import R, G, Y, C, B, X
 from display import SplitDisplay
+
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
 
 MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
 
 display = SplitDisplay()
 
+_log_write = None  # set in main()
+
 
 def url_log(msg=''):
     """Log to the left (URL monitor) panel."""
     ts = datetime.now().strftime('%H:%M:%S')
-    display.add_left(f'{ts} {msg}')
+    formatted = f'{ts} {msg}'
+    display.add_left(formatted)
+    if _log_write:
+        _log_write(formatted)
 
 
 def group_dates_by_month(dates):
@@ -113,9 +121,30 @@ def url_monitor():
 
 
 def main():
-    # Wire up log handlers for split display
-    book_hotels._log_handler = display.add_right
-    captcha_solver._log_handler = display.add_left
+    global _log_write
+
+    # Open persistent log file
+    log_file = open(LOG_FILE, 'a', encoding='utf-8')
+    log_file.write(f'\n=== Session started {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ===\n')
+    log_file.flush()
+
+    def _write_log(msg):
+        log_file.write(_ANSI_RE.sub('', msg) + '\n')
+        log_file.flush()
+
+    _log_write = _write_log
+
+    # Wire up log handlers for split display + file logging
+    def right_handler(msg):
+        display.add_right(msg)
+        _write_log(msg)
+
+    def left_handler(msg):
+        display.add_left(msg)
+        _write_log(msg)
+
+    book_hotels._log_handler = right_handler
+    captcha_solver._log_handler = left_handler
 
     url_log("=" * 60)
     url_log(f"{B}ITS BOOKING SYSTEM{X}")
