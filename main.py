@@ -63,8 +63,10 @@ def check_cached_url():
         with open(CALENDAR_URL_CACHE) as f:
             url = f.read().strip()
     except FileNotFoundError:
+        display.set_url(None)
         return None, False
     if not url:
+        display.set_url(None)
         return None, False
     r = subprocess.run(
         ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10', url],
@@ -73,11 +75,14 @@ def check_cached_url():
     status = r.stdout.strip()
     if status == '200':
         url_log(f"{C}URL check: valid (200){X}")
+        display.set_url(url)
         return url, True
     if not status or status == '000' or status.startswith('5'):
         url_log(f"{Y}URL check: server error ({status}), will retry{X}")
+        display.set_url(url)
         return url, False
     url_log(f"{Y}URL check: session invalid ({status}){X}")
+    display.set_url(None)
     return None, False
 
 
@@ -108,6 +113,7 @@ def url_monitor():
             if new_url:
                 last_solve = time.time()
                 url_log(f"{G}New URL saved: {new_url[:80]}...{X}")
+                display.set_url(new_url)
             else:
                 url_log(f"{R}CAPTCHA solve failed, will retry next cycle{X}")
                 if url:  # Had valid URL; reset timer to avoid spamming retries
