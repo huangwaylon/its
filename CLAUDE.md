@@ -18,7 +18,7 @@ uv run main.py
 
 **Dependencies**:
 - `book_hotels.py`: stdlib only + curl (no pip packages)
-- `captcha_solver.py`: `playwright`, `Pillow`, ollama running locally with `qwen3-vl:8b` model
+- `captcha_solver.py`: `pydoll-python` (CDP browser automation with real Chrome)
 - `main.py`: combines both, needs all of the above
 
 There are no tests, linting, or formatting tools configured.
@@ -101,26 +101,23 @@ Pure booking logic. Never triggers CAPTCHA solving. All calendar URL access goes
 - `_read_cached_url()` — reads `CALENDAR_URL_CACHE`, returns URL string or None
 - `_load_bookings()` — private, reads `bookings.json`, must only be called under `_bookings_lock`
 
-### `captcha_solver.py` — reCAPTCHA v2 solver
+### `captcha_solver.py` — Cloudflare Turnstile solver
 
-Uses Playwright (Chromium with `--headless=new`) + ollama vision model to solve reCAPTCHA v2 image challenges. Has its own `log()` function (elapsed-seconds format) separate from `book_hotels.log()` (wall-clock format).
+Uses pydoll (CDP-based Chrome automation) to solve Cloudflare Turnstile CAPTCHA. Pydoll drives real Chrome via DevTools Protocol, avoiding bot detection that Playwright triggers. Requires non-headless mode (visible Chrome window) since headless Chrome gets rejected by Turnstile. Has its own `log()` function (elapsed-seconds format) separate from `book_hotels.log()` (wall-clock format).
 
 **Key functions**:
-- `get_calendar_url()` — async. Full flow: launch browser → navigate to ITS homepage → click "カレンダーから探す" → solve CAPTCHA → click "次へ" → save resulting URL to `CALENDAR_URL_CACHE`. Returns URL string or None.
-- `solve_recaptcha(page, max_attempts=8)` — async. Generic reCAPTCHA v2 solver for any page. Returns g-recaptcha-response token or None.
-- `ask_vision(image_b64, prompt, no_think=False)` — async. Sends image+prompt to ollama via curl subprocess. Uses temp file for payload. Semaphore limits to 2 concurrent requests. Retries once on failure.
+- `get_calendar_url()` — async. Full flow: launch Chrome via pydoll → navigate to ITS homepage → click "カレンダーから探す" → solve Turnstile → submit form → save resulting URL to `CALENDAR_URL_CACHE`. Returns URL string or None.
+- `solve_turnstile(tab, max_attempts=3)` — async. Solves Cloudflare Turnstile on the given pydoll tab. Returns cf-turnstile-response token or None.
+- `_click_turnstile_checkbox(tab)` — async. Finds the `.cf-turnstile` widget, calculates checkbox coordinates, dispatches CDP mouse events to click it, then polls for the response token.
 
-**CAPTCHA solving strategy** (in `solve_recaptcha`):
-1. Click reCAPTCHA checkbox. If solved immediately, return token.
-2. For each challenge attempt (up to `max_attempts`):
-   - Detect grid type (3x3 or 4x4). Skip 4x4 (too slow for ollama).
-   - **Strategy 1**: Screenshot full challenge area (300px), ask vision model for matching tile numbers in one call (`no_think=True` for speed).
-   - **Strategy 2** (fallback): Screenshot each tile individually, classify all in parallel via `asyncio.gather`.
-   - Click matching tiles. Handle dynamic replacement tiles (up to 5 rounds).
-   - Click verify. Check if solved. Handle "select more" errors with re-analysis.
-   - If not solved, reload challenge and retry.
+**Turnstile solving strategy**:
+1. Find the `.cf-turnstile` container div and get its bounding box.
+2. Calculate checkbox position (~28px from left edge, vertically centered).
+3. Dispatch CDP `Input.dispatchMouseEvent` (press+release) at those coordinates — CDP mouse events cross iframe boundaries, reaching the Cloudflare iframe.
+4. Poll `input[name="cf-turnstile-response"]` value every 2s until token appears (timeout 30s).
+5. If token not generated, reload page and retry (up to 3 attempts).
 
-**Config**: `OLLAMA_URL = 'http://localhost:11434'`, `OLLAMA_MODEL = 'qwen3-vl:8b'`, `DEBUG_DIR = '/tmp/captcha_debug'`
+**Config**: `DEBUG_DIR = '/tmp/captcha_debug'`, `MAX_ATTEMPTS = 3`, `TOKEN_TIMEOUT = 30`
 
 ## Concurrency Model
 
