@@ -25,10 +25,10 @@ EMAIL = 'wwaylonhuang@gmail.com'
 NUM_GUESTS = '2'
 
 # ── Network tuning ───────────────────────────────────────────────────
-RETRY_DELAY = 15          # seconds between scan retry attempts
+RETRY_DELAY = 20          # seconds between scan retry attempts
 CURL_MAX_ATTEMPTS = 2     # max attempts per curl request (1 = no retry)
 URL_CHECK_INTERVAL = 60   # seconds between URL validity checks
-URL_REFRESH_INTERVAL = 900  # seconds between proactive URL refreshes
+URL_REFRESH_INTERVAL = 1200  # seconds between proactive URL refreshes
 
 # ── Hotel skip list ──────────────────────────────────────────────────
 SKIP_HOTELS = [
