@@ -142,6 +142,24 @@ async def get_calendar_url():
         tab = await browser.start()
 
         try:
+            # Minimize window via CDP - hidden but still renders normally
+            try:
+                win = await tab._connection_handler.execute_command(
+                    {'method': 'Browser.getWindowForTarget', 'params': {}}
+                )
+                window_id = win.get('result', win).get('windowId')
+                if window_id:
+                    await tab._connection_handler.execute_command({
+                        'method': 'Browser.setWindowBounds',
+                        'params': {
+                            'windowId': window_id,
+                            'bounds': {'windowState': 'minimized'},
+                        },
+                    })
+                    log('Browser window minimized via CDP')
+            except Exception as e:
+                log(f'Could not minimize window: {e}')
+
             log('Navigating to ITS homepage...')
             await tab.go_to('https://as.its-kenpo.or.jp/', timeout=30)
             await asyncio.sleep(3)
