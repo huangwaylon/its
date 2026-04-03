@@ -6,6 +6,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 CALENDAR_URL_CACHE = os.path.join(_DIR, 'calendar_url_cache.txt')
 BOOKINGS_FILE = os.path.join(_DIR, 'bookings.json')
 LOG_FILE = os.path.join(_DIR, 'its_booking.log')
+DEBUG_DIR = os.path.join(_DIR, 'debug_responses')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [

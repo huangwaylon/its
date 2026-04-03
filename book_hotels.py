@@ -12,6 +12,7 @@ from datetime import datetime
 from config import (
     CALENDAR_URL_CACHE, TARGET_DATES, EMAIL, NUM_GUESTS,
     BOOKINGS_FILE, RETRY_DELAY, CURL_MAX_ATTEMPTS, SKIP_HOTELS,
+    DEBUG_DIR,
 )
 
 BASE = 'https://as.its-kenpo.or.jp'
@@ -107,6 +108,20 @@ def curl(cookie_file, method, url, data=None, headers=None):
 def ex(html, pat):
     m = re.search(pat, html)
     return m.group(1) if m else None
+
+
+def _dump_debug(label, step, status, body):
+    """Save an unexpected HTTP response for later debugging."""
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        safe_label = label.replace(' ', '_').replace('/', '-')
+        path = os.path.join(DEBUG_DIR, f'{ts}_{safe_label}_{step}_status{status}.html')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(body)
+        log(f"  {Y}Debug response saved: {os.path.basename(path)}{X}")
+    except Exception as e:
+        log(f"  {R}Failed to save debug response: {e}{X}")
 
 
 def _date_css_class(body, date):
@@ -251,6 +266,7 @@ def book_all_hotels_for_date(target_date, label):
         s, body, _ = c('GET', url)
         if s != 200:
             log(f"{tag} {Y}URL expired ({s}), skipping{X}")
+            _dump_debug(label, 'calendar_get', s, body)
             return target_date, booked
         csrf = ex(body, r'csrf-token.*?content="(.*?)"')
         auth = ex(body, r'name="authenticity_token" value="(.*?)"')
@@ -276,6 +292,7 @@ def book_all_hotels_for_date(target_date, label):
         all_hotels = re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)
         if not all_hotels:
             log(f"{tag} {Y}no hotels listed{X}")
+            _dump_debug(label, 'service_group_select', s, body)
             return target_date, booked
         auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
