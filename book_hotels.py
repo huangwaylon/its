@@ -139,6 +139,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     services = re.findall(r'data-apply-service-id="(\d+)".*?>(.*?)</a>', body)
     if not services:
         log(f"{tag}   {R}No services for {hotel_name}{X}")
+        _dump_debug(f"{target_date}_{hotel_name}", 'step3_service_select', s, body)
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
 
@@ -149,6 +150,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'join_time': target_date, 's': s_param, 'apply_service_id': service_id})
     if not loc or 'empty_new' not in loc:
         log(f"{tag}   {R}Step 4 redirect failed{X}")
+        _dump_debug(f"{target_date}_{hotel_name}", 'step4_check_coma', s, body)
         return False
 
     # STEP 5: Load booking form
@@ -159,7 +161,15 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     form_action = ex(body, r'action="(/apply/empty_create\?s=[^"]+)"')
     coma_s = ex(body, r"coma_search\('([^']+)'\)")
     if not form_action or not coma_s:
-        log(f"{tag}   {R}Missing form params on booking page{X}")
+        missing = [p for p, v in [('form_action', form_action), ('coma_s', coma_s),
+                   ('csrf', csrf), ('auth', auth)] if not v]
+        title = ex(body, r'<title>(.*?)</title>') or '(no title)'
+        snippet = re.sub(r'<[^>]+>', '', body)[:200].strip()
+        log(f"{tag}   {R}Missing form params on booking page (status {s}, missing: {', '.join(missing)}){X}")
+        log(f"{tag}   {R}  url: {loc}{X}")
+        log(f"{tag}   {R}  title: {title}{X}")
+        log(f"{tag}   {R}  snippet: {snippet}{X}")
+        _dump_debug(f"{target_date}_{hotel_name}", 'step5_booking_form', s, body)
         return False
 
     # STEP 6: Search rooms
@@ -173,6 +183,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'Referer': referer_url})
     if 'service_category' in body:
         log(f"{tag}   {R}Session expired at room search{X}")
+        _dump_debug(f"{target_date}_{hotel_name}", 'step6_room_search', s, body)
         return False
     rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
     guid = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
@@ -195,6 +206,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     # STEP 8: Agree to rules
     if '\u540c\u610f' not in body:
         log(f"{tag}   {R}Not on rules page{X}")
+        _dump_debug(f"{target_date}_{hotel_name}", 'step8_rules', s, body)
         return False
     auth = ex(body, r'name="authenticity_token" value="(.*?)"')
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
@@ -238,6 +250,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         return True
 
     log(f"{tag}   {R}Final page not send_complete{X}")
+    _dump_debug(f"{target_date}_{hotel_name}", 'step9_final', s, body)
     return False
 
 
