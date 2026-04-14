@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"/>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store"/>
+  <meta http-equiv="Expires" content="0">
+  <title>施設予約システム</title>
+  <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1, maximum-scale=1" >
+  <link rel="stylesheet" media="all" href="/assets/application-95671e0fa36f733a7e76f7ede97af30f9f517884b5afac39bfd3c24b7dd04087.css" />
+  <script src="/assets/application-98fde187cadbd31f4359c8a43dc8b87c3bc3242503884f782f084d23ac80ba72.js" media="all"></script>
+  <script src="/javascripts/ajaxzip3/ajaxzip3.js"></script>
+  <script src="/javascripts/My97DatePicker/WdatePicker.js"></script>
+  <script src="/assets/html5shiv-4e02ba12d524f0df958982946bcbb9e1de2c2eb95bcfb71601b74b3c6d5f47e3.js"></script>
+  <script src="/javascripts/davidjbradshaw-iframe-resizer-e3fb068/js/iframeResizer.min.js"></script>
+  <script>
+      function beginRequest() {
+          document.getElementById('Div_SearchNotice').style.display = '';
+      }
+      function offlineLoading() {
+          beginRequest();
+          document.getElementById("Div_SearchNotice").style.visibility = 'visible';
+      }
+      $(function() {
+          $('.ajax-indicator-user').hide();
+          $(document).ajaxStart(function() {
+              $('.ajax-indicator-user').show();
+          });
+          $(document).ajaxStop(function() {
+              $('.ajax-indicator-user').hide();
+          });
+      });
+//      $(function(){
+//          setInterval(function(){
+//              update_auto_selecting();
+//          }, 500000)
+//
+//      });
+//      function update_auto_selecting(){
+//          $.ajax({
+//              method: 'post',
+//              dataType: 'json',
+//              url: "",
+//              beforeSend: function(){
+//                  $('.ajax-indicator-user').hide();
+//              },
+//              success: function(data){
+//                  if(data["auto_selecting_flag"]){
+//                      $("#is_auto_selecting").show();
+//                  }else{
+//                      $("#is_auto_selecting").hide();
+//                  }
+//              }
+//          })
+//      }
+  </script>
+  
+  <meta name="csrf-param" content="authenticity_token" />
+<meta name="csrf-token" content="VdVpfI8qnSu23YRkPPI8mVdvmgXq8P39nCqF2xyKP4DdUUe1AMrnpgcYHhVpTRhkTVHgBCoA0A7Zq9ooF8GbYQ==" />
+</head>
+<body>
+<noscript>
+  <div class="no_script">あなたのブラウザはJavaScriptが利用できません。</br >JavaScriptを有効にしてからご利用ください。</div>
+</noscript>
+<div id="its_container" style="display:none;">
+  <header id="header">
+    <div id="page-top">
+      <h2 class="logo">
+        <a href="/"><img src="/assets/users/logo_its-bc37093703ff0ae9b7e9891375ea24c5a0ea0bfc3ded539d5ebb7fa270a266cf.png" /></a>
+        <a href="/">
+          <span>関東ITソフトウェア</span>
+          <span class="ad">健康保険組合</span>
+        </a>
+      </h2>
+    </div>
+  </header>
+  <div id="container" style="">
+    <div class="innerCont">
+      <div id="flash_error_messages">
+</div>
+      <div class="tips" style="display:none" id="is_auto_selecting">現在、保養施設の抽選処理を実施しております。<br />ご不便をおかけしますが、直営・通年・夏季保養施設の空き照会につきましては、抽選処理が終了するまでしばらくお待ちください。</div>
+    </div>
+    <div id="flash_error_messages">
+</div>
+      <section class="request-box">
+  <h1 style="word-break:break-all;">直営・通年・夏季・冬季保養施設(空き照会)&nbsp;&nbsp;利用申込</h1>
+  <br/><br/>
+  <p class="complete">
+    大変申し訳ございませんが、<br/>ご指定の施設において空き部屋がございません。
+  </p>
+  <div class="submit mt20" style="text-align:center;">
+    <input value="戻る" type="button" onclick="location.href='/apply_service/index?s=PUV6TjAwRFpwWlNaMUpIZDlrSGR3MVda'" class="button-select button-primary">
+  </div>
+</section>
+
+    <div class="page_top innerCont"><a href="javascript:scroll(0,0)">↑ページ先頭へ</a></div>
+  </div>
+
+  <footer id="footer">
+    <small>&copy;2026 関東ITソフトウェア 健康保険組合</small>
+  </footer>
+  <div id="Div_SearchNotice" class="ajax-indicator-user">
+    <div></div>
+    <table class="loading">
+      <tr>
+        <td>
+          <div>
+            <img src="/assets/users/loading-15e2090fa296d47216afec6ada0cddd81e3a411172323c1d31934565d8589196.gif" alt="ajax-loader.gif" width="200"  />
+          </div>
+        </td>
+      </tr>
+    </table>
+  </div>
+</div>
+<script type="text/javascript">
+    document.getElementById("its_container").style.display = "block";
+    $(function () {
+       if ($('.show_screen').size()!=0) $('.page_top').removeClass('innerCont');
+    });
+</script>
+</body>
+</html>
