@@ -10,7 +10,13 @@ DEBUG_DIR = os.path.join(_DIR, 'debug_responses')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
-    "2026-06-06",
+    "2026-08-08",
+    "2026-08-15",
+    "2026-08-22",
+    "2026-08-29",
+    "2026-09-05",
+    "2026-09-12",
+    "2026-09-19",
 ]
 EMAIL = 'wwaylonhuang@gmail.com'
 NUM_GUESTS = '2'
