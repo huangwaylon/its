@@ -10,6 +10,7 @@ DEBUG_DIR = os.path.join(_DIR, 'debug_responses')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
+    "2026-07-25",
     "2026-08-08",
     "2026-08-15",
     "2026-08-22",
