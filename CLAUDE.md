@@ -25,7 +25,7 @@ There are no tests, linting, or formatting tools configured.
 
 ## Architecture
 
-Three scripts with clear separation of concerns:
+Four modules with clear separation of concerns, plus `display.py` for rendering:
 
 ### `config.py` — User-configurable settings
 
@@ -82,7 +82,7 @@ Pure booking logic. Never triggers CAPTCHA solving. All calendar URL access goes
 2. Read URL from cache via `_read_cached_url()`. If missing → log, back off, retry
 3. GET calendar page, extract CSRF tokens (1 request). If non-200 → reset the cookie jar, back off, retry
 4. POST to navigate to target month (1 request) — response contains availability for ALL dates in that month
-5. Check each target date's CSS class for `empty` (available) via regex
+5. Check each target date's CSS class with `is_available()` — `empty` **or** `a_little`
 6. For each available date, spawn a booking thread via `ThreadPoolExecutor`
 7. Wait for all booking threads to complete, then loop back to step 1
 
@@ -94,7 +94,7 @@ Sleep between cycles is `min(RETRY_DELAY * 2**consecutive_failures, SCAN_BACKOFF
 
 `_book_date_once(...)` returns one of `'ok'`/`'done'`, `'retry'` (transient: 5xx, transport failure, or a dead session), `'unavailable'` (date genuinely not open), `'failed'` (a response repeating will not fix):
 1. Read URL from cache. If missing → `'failed'`
-2. `_open_calendar_session()` — fresh cookie jar, GET calendar, extract CSRF/auth/`s`, navigate to the target month, confirm the date is `empty`
+2. `_open_calendar_session()` — fresh cookie jar, GET calendar, extract CSRF/auth/`s`, navigate to the target month, confirm the date is available (`is_available()`)
 3. `_select_date()` — POST `service_group_select` to get the hotel list, HTML-unescaping each name
 4. Filter out `SKIP_HOTELS`, already-booked, and already-attempted hotels; then `order_hotels()` puts `PRIORITY_HOTELS` first
 5. For each hotel sequentially, call `book_one_hotel()`, re-running steps 2–3 first (fresh session per hotel)
@@ -110,11 +110,14 @@ Sleep between cycles is `min(RETRY_DELAY * 2**consecutive_failures, SCAN_BACKOFF
 6. POST to agree to rules page → follow 302
 7. POST to submit email confirmation → check for `send_complete` in response
 
+Step 7 is the request that **files the application**, and it is the one request in the program sent with `retry=False`. curl's retry covers 5xx and transport failures, which is right for the six navigation steps above and wrong here: `--max-time` can expire after the server accepted the submission and before the response arrived, so a repeat applies twice for the same room — and nothing downstream could tell, since the booking is not recorded until a response confirms it. A status 0 on this POST is logged as `outcome unknown` and the hotel is abandoned; losing one slot is the cheaper mistake.
+
 **Key functions**:
 - `scan_and_book_month(month_str, target_dates, label, stop_event=None)` — month scanner loop
 - `book_all_hotels_for_date(target_date, label)` — retrying booking for one date
 - `_book_date_once(target_date, label, tag, booked, attempted)` — one pass; returns an outcome string
 - `_open_calendar_session(...)` / `_select_date(...)` — shared session setup and date selection
+- `is_available(css_class)` / `_AVAILABLE_CLASSES` — a date is bookable when its cell carries `empty` **or** `a_little`. Both are clickable on the site (`full` and `over` are not), so both can be applied for; matching `empty` alone silently skipped every limited-availability date in the scan *and* in the booking's own re-check, i.e. the dates closest to selling out were the ones never attempted. Used by the scanner and by `_open_calendar_session`, so the two cannot disagree.
 - `_is_retryable(status)` — true for 0, 429, and 5xx. 302 is excluded; `_is_session_dead()` tells a dead session apart from flow progress
 - `_is_session_dead(status, location)` — 302 to `/service_category/index`. **Confirmed live**: that is exactly what a stale `s=` token answers (302, 0 bytes), and it is the signature of 302 of the 380 dumps on disk
 - `order_hotels(hotels)` / `is_skipped(name)` / `_norm_hotel(name)` — `PRIORITY_HOTELS` first (stable sort), skip matching after casefolding, HTML-unescaping and collapsing whitespace so a full-width space cannot silently defeat a skip entry
@@ -122,7 +125,7 @@ Sleep between cycles is `min(RETRY_DELAY * 2**consecutive_failures, SCAN_BACKOFF
 - `_future_dates(dates)` — drops dates that have already passed (`SKIP_PAST_DATES`)
 - `_retry_after(hdrs)` — seconds from a `Retry-After` header, capped at `CURL_RETRY_BACKOFF_MAX`
 - `book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name)` — books one hotel
-- `curl(cookie_file, method, url, data, headers)` — raw HTTP via curl subprocess, returns `(status, body, location)`. `body` is a `Response` (a `str` subclass carrying `.headers`, `.location`, `.request`), so call sites treat it as a plain string. Never raises: a transport failure returns `(0, '', None)`, because the scan loop has no `except` around its curl calls.
+- `curl(cookie_file, method, url, data, headers, retry=True)` — raw HTTP via curl subprocess, returns `(status, body, location)`. `body` is a `Response` (a `str` subclass carrying `.headers`, `.location`, `.request`), so call sites treat it as a plain string. Never raises: a transport failure returns `(0, '', None)`, because the scan loop has no `except` around its curl calls. `retry=False` skips the `CURL_MAX_ATTEMPTS` loop for a request that must not be repeated — see step 7 above. Both `c()` closures (scanner and booking) forward the flag, so they cannot drift apart.
 - `header_args(headers)` — curl `-H` flags for the merged header set; also used by `main.check_cached_url()`
 - `_merge_headers(headers)` — per-call headers over the browser defaults, case-insensitive. Merging in Python (rather than appending `-H` flags) is required: curl emits every header it is given, so a default plus a per-call `Accept` would send both.
 - `_user_agent()` — reads `USER_AGENT_CACHE`, re-reading on mtime change; falls back to `FALLBACK_USER_AGENT`
@@ -164,6 +167,14 @@ Imports `redact_url` and `token_summary` from `book_hotels` so there is one impl
 
 **Never caches a bad URL**: if the post-submit URL does not contain `calendar_select`, `_solve_and_cache()` screenshots it and returns `None`, leaving the previous cache entry alone. It used to save it anyway, which poisoned the cache — every scanner would then replay a non-calendar URL that can still answer 200, so `check_cached_url()` called the session healthy and no re-solve ever fired.
 
+### `display.py` — Split-panel terminal display
+
+`SplitDisplay` holds two bounded `deque`s (left = URL monitor/CAPTCHA, right = booking threads) plus a one-line URL bar, and renders them into a Rich `Layout` under `Live` at 4 Hz. Appending is lock-free: `deque.append` with a `maxlen` and a plain `str` assignment are both atomic under the GIL, and `list(deque)` in the render path is a single C-level copy, so no thread can mutate a buffer mid-iteration.
+
+**The display has no state of its own** — it renders whatever log lines have arrived. So its refresh *rate* is 4 Hz but its update *cadence* is however often something logs: one line per `URL_CHECK_INTERVAL` on the left, and on the right one line per `IDLE_LOG_INTERVAL` while no date is available. A quiet panel is the normal steady state, not a stall.
+
+**`_visual_lines()` must measure, never estimate.** It asks Rich for the wrapped height (`Text.wrap`) rather than computing `ceil(cell_len / width)`. Rich breaks on word boundaries, so the ceiling estimate *underestimates* — three 19-cell words need three lines in a 36-cell panel, not two — and `_render_panel` then selected one message too many, after which `Panel` cropped the excess off the **bottom** of its content, which is where the newest messages are. The dashboard kept redrawing and looked healthy while the last line or two never appeared. Real log lines mis-measure at 80 and 160 columns, so this was firing constantly. Only the messages that fit are measured (the selection loop stops at the first one that does not), so the cost is one wrap per visible line, not per buffered message.
+
 ## The `s=` token
 
 Not opaque. Decoded from a live 88-character token:
@@ -181,8 +192,6 @@ s= → base64 → reverse → base64 → "service_category_id=1&verify_expires=<
 - is deliberately **strict** — a truncated token still base64-decodes into plausible bytes, so anything that is not clean printable ASCII in `k=v&k=v` shape is reported as `token does not decode (N chars)` rather than as a payload.
 
 **`verify_expires` is not yet usable for scheduling refreshes.** One live sample contradicted the obvious reading: a token minted 2026-08-18 13:33 carried 2026-08-08 19:12:52, ten days in its own past. Since all 647 tokens differ and there are only two fields, *something* in there varies per solve and this is the only candidate — so either it is not a per-token expiry, or it is not an epoch at all. Every token in the previous log was truncated at 80 characters and cannot be decoded, which is why the field is now logged on each solve. Watch it across a few refreshes before letting `url_monitor` schedule against it.
-
-**Do not mint tokens.** The absent MAC means one could be forged with an arbitrary expiry, skipping Turnstile entirely. That is defeating the anti-automation control rather than solving it, and it would break silently and completely the moment a signature is added.
 
 ## Concurrency Model
 **Threads at runtime** (when started via `main.py`):
@@ -208,15 +217,17 @@ All long-lived threads are wrapped in `main._Worker`, which the watchdog can res
 
 ## Tests
 
-Two suites, both stdlib-only, both against a throwaway localhost HTTP server. Neither makes a request to ITS.
+Three suites. Two run against a throwaway localhost HTTP server and are stdlib-only; the display suite needs `rich` and touches nothing. None makes a request to ITS.
 
 ```bash
 .venv/bin/python test_http_layer.py      # 128 checks — curl + redaction layer
-.venv/bin/python test_booking_flow.py    # 145 checks — booking flow end to end
+.venv/bin/python test_booking_flow.py    # 176 checks — booking flow end to end
+.venv/bin/python test_display.py         # 126 checks — TUI rendering
 ```
 
 - **`test_http_layer.py`** — header merging (curl emits every `-H` it is given, so a duplicate would let the server pick) and redaction (a dump must never contain a cookie or token value).
-- **`test_booking_flow.py`** — the part that wins or loses a slot. A `FakeITS` server replays the real markup shapes from `docs/BOOKING_VIA_CURL.md` and the dumps in `debug_responses/`, **including the escaped-quote form AJAX responses arrive in** — the extractors are markup-exact, so a fake that prettied the markup up would test nothing. `STATE.fail_once` injects statuses per path to reproduce the production failures: a 503 on the calendar GET, a 302 to `/service_category/index` out of `service_group_select` (both mid-flow and between hotels), a 404, and the site's "no vacant rooms" page. Also covers priority ordering, skip-list normalization, `bookings.json` atomicity and corruption handling, the watchdog, log rotation, and the CAPTCHA timeout wrapper.
+- **`test_booking_flow.py`** — the part that wins or loses a slot. A `FakeITS` server replays the real markup shapes from `docs/BOOKING_VIA_CURL.md` and the dumps in `debug_responses/`, **including the escaped-quote form AJAX responses arrive in** — the extractors are markup-exact, so a fake that prettied the markup up would test nothing. `STATE.fail_once` injects per-path failures to reproduce the production ones: a 503 on the calendar GET, a 302 to `/service_category/index` out of `service_group_select` (both mid-flow and between hotels), a 404, the site's "no vacant rooms" page, and `HANGUP` — close the connection without answering, i.e. curl's status 0. The fake's calendar serves an `empty` date *and* an `a_little` one, so a filter that only matches `empty` fails rather than passing quietly. Also covers priority ordering, skip-list normalization, that the final submit is never repeated, `bookings.json` atomicity and corruption handling, the watchdog, log rotation, and the CAPTCHA timeout wrapper.
+- **`test_display.py`** — that the newest line logged is on screen, which is the one thing the dashboard has to get right and the thing it silently got wrong. Measures `_visual_lines` against what Rich really renders, then renders whole layouts at six terminal sizes and asserts the last message is visible and nothing overflows the terminal. Uses real log lines from this program plus the pathological wrap case; the messages are the fixtures, so a future change to `_render_panel`'s accounting fails here rather than in production.
 
 Pass a substring to run a subset, and `-v` to see the flow's own logging:
 
@@ -224,7 +235,7 @@ Pass a substring to run a subset, and `-v` to see the flow's own logging:
 .venv/bin/python test_booking_flow.py -v test_503
 ```
 
-Both need to bind `127.0.0.1`, which the Apple Claude Code sandbox denies; `.claude/apple/tool_allowlist.csv` allowlists both by name. **Run each in its own Bash call** — the allowlist matches on the whole command string, so chaining a test behind `&&` after an unrelated command can fall through to the sandbox and fail with `PermissionError: [Errno 1]`. Both clear proxy settings for loopback, since a local HTTP proxy would otherwise intercept and rewrite the responses.
+The two server suites need to bind `127.0.0.1`, which the Apple Claude Code sandbox denies; `.claude/apple/tool_allowlist.csv` allowlists both by name. **Run each in its own Bash call** — the allowlist matches on the whole command string, so chaining a test behind `&&` after an unrelated command can fall through to the sandbox and fail with `PermissionError: [Errno 1]`. Both clear proxy settings for loopback, since a local HTTP proxy would otherwise intercept and rewrite the responses.
 
 ## Configuration (in `config.py`)
 

@@ -35,6 +35,7 @@ FAILURES = []
 # fixture — even an expired one publishes the token format.
 S_TOKEN = 'RkFLRV9UT0tFTl9GT1JfVEVTVFNfTk9UX0FfUkVBTF9TRVNTSU9OX1RPS0VO'
 TARGET = '2026-09-05'
+TARGET_LIMITED = '2026-09-06'    # 'a_little': few rooms left, but still bookable
 OTHER_MONTH_DAY = '2026-08-05'   # what the initial calendar page shows
 
 NAGU = 'NAGU 勝浦'
@@ -42,6 +43,10 @@ RESOL = 'リソルの森'
 NIKKO = '日光千姫物語'
 SKIPME = '和倉温泉 あえの風'          # half-width space, as in SKIP_HOTELS
 SKIPME_FULLWIDTH = '和倉温泉　あえの風'  # what the site may actually send
+
+# A fail_once entry meaning "close the connection without answering", as opposed
+# to an HTTP status. Distinct from 0, which the queue uses for "serve normally".
+HANGUP = 'hangup'
 
 
 def check(name, cond, detail=''):
@@ -112,12 +117,26 @@ CALENDAR_PAGE = f"""<html><head>
 </form></body></html>"""
 
 
+def _nav_class(date_str):
+    """The CSS class the fake puts on a calendar cell.
+
+    The site marks a date `empty` (rooms free), `a_little` (few left), `full` or
+    `over`, and the first two are both clickable and both bookable — see
+    docs/BOOKING_VIA_CURL.md. The fake serves one of each, because a filter that
+    only looks for `empty` passes every other test in this file while silently
+    never attempting half the dates that are actually open.
+    """
+    if date_str == TARGET:
+        return 'empty td-n'
+    if date_str == TARGET_LIMITED:
+        return 'a_little td-n'
+    return 'full td-n'
+
+
 def nav_response(month_first_day):
     """The AJAX month-navigation response: JS that swaps the calendar in."""
-    cells = ''.join(_escaped_cell(f'{month_first_day[:7]}-{d:02d}',
-                                 'empty td-n' if f'{month_first_day[:7]}-{d:02d}' == TARGET
-                                 else 'full td-n')
-                    for d in range(1, 29))
+    days = (f'{month_first_day[:7]}-{d:02d}' for d in range(1, 29))
+    cells = ''.join(_escaped_cell(day, _nav_class(day)) for day in days)
     return f'$(".tcas_1").html(\'<div class=\\"month-navi\\">{cells}</div>\');\nloading(false);\n'
 
 
@@ -215,6 +234,14 @@ class Handler(BaseHTTPRequestHandler):
         injected = STATE.injected(path)
         if injected == 302:
             return self._session_dead()
+        if injected == HANGUP:
+            # Answer nothing and close. curl reports an empty reply, i.e. the
+            # status-0 transport failure — the case where the server may well
+            # have processed the request we are refusing to repeat.
+            if method == 'POST':
+                self._form()   # drain the body first, so curl sees EOF not a reset
+            self.close_connection = True
+            return
         if injected:
             return self._send(injected, f'<html>error {injected}</html>')
         return self.route(method, path, self._form() if method == 'POST' else {})
@@ -350,6 +377,34 @@ class Env:
         if not os.path.isdir(bh.DEBUG_DIR):
             return []
         return sorted(os.listdir(bh.DEBUG_DIR))
+
+
+class CapturedLog:
+    """Collect book_hotels' log lines while still passing them on.
+
+    Tees rather than replaces, so `-v` still shows the flow's own logging for a
+    test that asserts on what the operator is told.
+    """
+
+    def __enter__(self):
+        self.lines = []
+        self.outer = bh._log_handler
+        bh._log_handler = self._tee
+        return self
+
+    def _tee(self, msg):
+        self.lines.append(msg)
+        if self.outer:
+            self.outer(msg)
+        else:
+            print(msg, flush=True)   # what log() itself does with no handler set
+
+    def __exit__(self, *exc):
+        bh._log_handler = self.outer
+        return False
+
+    def saw(self, fragment):
+        return any(fragment in m for m in self.lines)
 
 
 # ── Tests ───────────────────────────────────────────────────────────
@@ -528,6 +583,65 @@ def test_date_unavailable(port):
               STATE.count('POST /calendar_apply/service_group_select') == 0)
 
 
+def test_limited_availability_is_booked(port):
+    """`a_little` is "few rooms left", not "unavailable".
+
+    Both classes are clickable on the real site, so both can be applied for. The
+    filter used to match `empty` only, which meant the dates closest to selling
+    out — the ones a booker exists for — were the ones never attempted.
+    """
+    with Env(port) as env:
+        date_str, booked = bh.book_all_hotels_for_date(TARGET_LIMITED, 'TEST')
+        check('a_little: returns the date', date_str == TARGET_LIMITED, date_str)
+        check('a_little: books every eligible hotel',
+              booked == [NAGU, RESOL, NIKKO], str(booked))
+        check('a_little: recorded', env.bookings() == {TARGET_LIMITED: booked},
+              str(env.bookings()))
+        check('a_little: not treated as a fault', env.dumps() == [], str(env.dumps()))
+
+
+def test_final_submit_is_never_retried(port):
+    """The request that files an application must go out at most once.
+
+    curl's retry covers 5xx and transport failures, which is right for every
+    navigation step in the chain and wrong for this one: `--max-time` can expire
+    after the server accepted the submission, and repeating it then applies twice
+    for the same room. Nothing downstream could catch that, because the booking is
+    not recorded until a response confirms it.
+    """
+    for label, injected in (('503', 503), ('transport failure', HANGUP)):
+        with Env(port) as env, CapturedLog() as log:
+            bh.CURL_MAX_ATTEMPTS = 3        # what production runs with
+            STATE.hotels = [(7, NAGU)]      # one hotel, so the count is unambiguous
+            STATE.fail_once['/apply/send_confirm'] = [injected]
+            _, booked = bh.book_all_hotels_for_date(TARGET, 'TEST')
+            check(f'final-submit: {label} sent exactly once',
+                  STATE.count('POST /apply/send_confirm') == 1,
+                  str(STATE.count('POST /apply/send_confirm')))
+            check(f'final-submit: {label} not counted as booked', booked == [], str(booked))
+            check(f'final-submit: {label} not recorded', env.bookings() == {},
+                  str(env.bookings()))
+            if injected == HANGUP:
+                # The operator has to learn that an application may exist for a
+                # hotel that is not in bookings.json.
+                check('final-submit: unknown outcome reported to the operator',
+                      log.saw('outcome unknown'), str(log.lines[-2:]))
+
+    # The same CURL_MAX_ATTEMPTS must still retry a step that only navigates,
+    # or this fix would have quietly disabled retrying everywhere.
+    with Env(port) as env:
+        bh.CURL_MAX_ATTEMPTS = 3
+        STATE.hotels = [(7, NAGU)]
+        STATE.fail_once['/calendar_apply/apply_service_select'] = [503]
+        _, booked = bh.book_all_hotels_for_date(TARGET, 'TEST')
+        check('final-submit: navigation steps still retried', booked == [NAGU], str(booked))
+        check('final-submit: retry really happened',
+              STATE.count('POST /calendar_apply/apply_service_select') == 2,
+              str(STATE.count('POST /calendar_apply/apply_service_select')))
+        check('final-submit: booked once, not twice',
+              [h for _, h in STATE.completed] == [NAGU], str(STATE.completed))
+
+
 def test_missing_url(port):
     with Env(port) as env:
         os.unlink(bh.CALENDAR_URL_CACHE)
@@ -689,6 +803,26 @@ def test_scanner_skips_past_dates(port):
             t.join(timeout=10)
 
 
+def test_scanner_spots_a_limited_availability_date(port):
+    """The scan filter decides whether a date is looked at at all.
+
+    `_open_calendar_session` re-checks availability, but a date the scanner never
+    reports is never handed to a booking thread in the first place, so this path
+    is the one that decided `a_little` slots went unbooked.
+    """
+    with Env(port) as env:
+        t, stop = _run_scanner('2026-09', [TARGET_LIMITED], 'LTD')
+        try:
+            booked = _wait_for(
+                lambda: len(env.bookings().get(TARGET_LIMITED, [])) >= 3)
+            check('scanner: a_little date spotted and booked',
+                  booked and env.bookings()[TARGET_LIMITED] == [NAGU, RESOL, NIKKO],
+                  str(env.bookings()))
+        finally:
+            stop.set()
+            t.join(timeout=10)
+
+
 # ── Persistence ─────────────────────────────────────────────────────
 
 def test_bookings_atomic_and_non_destructive():
@@ -761,6 +895,28 @@ def test_bookings_concurrent_writes():
 
 
 # ── Unit-level pieces ───────────────────────────────────────────────
+
+def test_availability_classes():
+    """Which calendar cell classes count as bookable (docs/BOOKING_VIA_CURL.md)."""
+    for cls in ('empty', 'empty td-n', 'a_little', 'a_little td-n', 'td-n a_little'):
+        check(f'available: {cls!r}', bh.is_available(cls))
+    for cls in ('full', 'full td-n', 'over', 'over td-n', 'td-n', '', None):
+        check(f'not available: {cls!r}', not bh.is_available(cls))
+
+    # Through the extractor, on the escaped markup an AJAX response really sends.
+    body = nav_response('2026-09-01')
+    check('available: empty cell read off the AJAX body',
+          bh.is_available(bh._date_css_class(body, TARGET)),
+          bh._date_css_class(body, TARGET))
+    check('available: a_little cell read off the AJAX body',
+          bh.is_available(bh._date_css_class(body, TARGET_LIMITED)),
+          bh._date_css_class(body, TARGET_LIMITED))
+    check('available: full cell read as unavailable',
+          not bh.is_available(bh._date_css_class(body, '2026-09-07')),
+          bh._date_css_class(body, '2026-09-07'))
+    check('available: a date absent from the body is not bookable',
+          not bh.is_available(bh._date_css_class(body, '2026-12-25')))
+
 
 def test_retry_classification():
     for s in (0, 429, 500, 502, 503, 504):
@@ -1019,14 +1175,17 @@ SERVER_TESTS = (
     'test_session_death_on_date_select_is_retried',
     'test_session_death_mid_hotel_loop', 'test_no_rooms_is_not_an_error',
     'test_unexpected_status_is_dumped_not_retried', 'test_date_unavailable',
+    'test_limited_availability_is_booked', 'test_final_submit_is_never_retried',
     'test_missing_url', 'test_scanner_books_and_survives_errors',
     'test_scanner_survives_dead_url', 'test_scanner_skips_past_dates',
+    'test_scanner_spots_a_limited_availability_date',
     'test_active_bookings_counter',
 )
 
 STANDALONE_TESTS = (
     'test_bookings_atomic_and_non_destructive', 'test_bookings_concurrent_writes',
-    'test_retry_classification', 'test_retry_after', 'test_hotel_name_matching',
+    'test_availability_classes', 'test_retry_classification', 'test_retry_after',
+    'test_hotel_name_matching',
     'test_future_dates', 'test_dump_throttle_and_prune',
     'test_read_cached_url_never_raises', 'test_watchdog_restarts_a_dead_worker',
     'test_group_dates_by_month', 'test_captcha_timeout_wrapper',

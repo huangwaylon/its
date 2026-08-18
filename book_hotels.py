@@ -273,7 +273,14 @@ def _is_retryable(status):
     return status == 0 or status == 429 or status >= 500
 
 
-def curl(cookie_file, method, url, data=None, headers=None):
+def curl(cookie_file, method, url, data=None, headers=None, retry=True):
+    """Make one HTTP request via curl. Returns `(status, Response, location)`.
+
+    `retry=False` disables the `CURL_MAX_ATTEMPTS` loop for a request that must
+    never be repeated — see the final submit in `book_one_hotel`. Retrying is
+    safe for everything that only *reads* or navigates, and unsafe for the one
+    request that files an application.
+    """
     cmd = ['curl', '-s', '-c', cookie_file, '-b', cookie_file,
            '-D', '/dev/stderr', '--max-redirs', '0', '--max-time', str(CURL_TIMEOUT)]
     if method == 'POST':
@@ -291,7 +298,7 @@ def curl(cookie_file, method, url, data=None, headers=None):
         for k, v in data.items():
             cmd.extend(['--data-urlencode', f'{k}={"" if v is None else v}'])
     cmd.append(url)
-    attempts = max(1, CURL_MAX_ATTEMPTS)
+    attempts = max(1, CURL_MAX_ATTEMPTS) if retry else 1
     status, body, hdrs = 0, '', ''
     for attempt in range(attempts):
         try:
@@ -764,6 +771,23 @@ def _date_css_class(body, date):
     return ex(body, rf'class=\\"([^"\\]*)\\\"[^>]*data-join-time=\\"{date}\\"') or ''
 
 
+# The classes the site puts on a calendar cell (docs/BOOKING_VIA_CURL.md):
+#   empty     available (green, ○)           — clickable
+#   a_little  limited availability (orange)  — clickable
+#   full      no availability (red)          — JS blocks the click
+#   over      a past date                    — JS blocks the click
+# Both clickable classes can be applied for. Matching only `empty` skipped every
+# limited-availability date in the scan *and* in the booking's own re-check, so
+# those slots were never attempted at all — the ones most likely to still be open
+# were the ones being ignored.
+_AVAILABLE_CLASSES = ('empty', 'a_little')
+
+
+def is_available(css_class):
+    """True if a calendar cell's CSS class marks the date as bookable."""
+    return any(c in (css_class or '') for c in _AVAILABLE_CLASSES)
+
+
 # The site's "no vacant rooms in the specified facility" page. It has no booking
 # form, so without this check it is indistinguishable from a broken extractor.
 _NO_ROOMS_TEXT = '空き部屋がございません'
@@ -904,7 +928,18 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     }
     if token_field:
         post_data['__token__'] = token_field
-    s, body, loc = c('POST', email_url, post_data)
+    # This POST *is* the application. curl's own retry must not touch it:
+    # `--max-time` can expire after the server accepted the submission and before
+    # the response arrived, and repeating it then files a second application for
+    # the same room. Nothing downstream could catch that: the booking is not
+    # recorded until a response confirms it, and losing one slot to a transport
+    # failure is much the cheaper mistake. Steps 3-8 only navigate, so they stay
+    # retryable.
+    s, body, loc = c('POST', email_url, post_data, retry=False)
+    if s == 0:
+        log(f"{tag}   {R}Email submit got no response: outcome unknown, not "
+            f"retrying ({hotel_name} may already have been applied for){X}")
+        return False
     via = None
     if s == 302 and loc:
         via, (s, body, _) = body, c('GET', loc)
@@ -966,9 +1001,11 @@ def _open_calendar_session(c, cookie_file, url, target_date, tag, label,
         _dump_debug(label, 'calendar_select', s_nav, body_nav)
         return 'failed', None, None, None
 
-    if check_availability and 'empty' not in _date_css_class(body_nav, target_date):
-        log(f"{tag} {Y}date not available{X}")
-        return 'unavailable', None, None, None
+    if check_availability:
+        cell = _date_css_class(body_nav, target_date)
+        if not is_available(cell):
+            log(f"{tag} {Y}date not available (class: {cell or 'no cell found'}){X}")
+            return 'unavailable', None, None, None
 
     return 'ok', csrf, auth, s_param
 
@@ -1046,8 +1083,8 @@ def _book_date_once(target_date, label, tag, booked, attempted):
     cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_{target_date}_')
     os.close(cookie_fd)
 
-    def c(method, u, data=None, headers=None):
-        return curl(cookie_file, method, u, data, headers)
+    def c(method, u, data=None, headers=None, retry=True):
+        return curl(cookie_file, method, u, data, headers, retry)
 
     try:
         # csrf is re-extracted per page by book_one_hotel, so it is unused here.
@@ -1161,8 +1198,8 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_scan_{month_str}_')
     os.close(cookie_fd)
 
-    def c(method, u, data=None, headers=None):
-        return curl(cookie_file, method, u, data, headers)
+    def c(method, u, data=None, headers=None, retry=True):
+        return curl(cookie_file, method, u, data, headers, retry)
 
     try:
         attempt = 0
@@ -1227,7 +1264,7 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
                 failures = 0
 
                 available = [td for td in dates
-                             if 'empty' in _date_css_class(body_nav, td)]
+                             if is_available(_date_css_class(body_nav, td))]
 
                 if not available:
                     # 116k of the last log's 150k lines were this one message.

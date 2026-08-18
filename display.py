@@ -2,7 +2,6 @@
 import threading
 from collections import deque
 
-from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
@@ -12,14 +11,24 @@ from rich.text import Text
 _URL_BAR_HEIGHT = 3  # top border + 1 content line + bottom border
 
 
-def _visual_lines(plain, width):
-    """Count visual lines a message occupies at the given panel width."""
+def _visual_lines(console, text, width):
+    """How many terminal lines `text` really occupies at `width`.
+
+    Measured with the same wrap the Panel will apply, not estimated. Rich breaks
+    on word boundaries, so a ceiling division of the cell length *underestimates*
+    — three 19-cell words need three lines in 36 cells, not two. Any
+    underestimate made `_render_panel` select one message too many, and Panel
+    then cropped the overflow off the *bottom* of its content, which is where the
+    newest messages are: the panel went on looking alive while silently no longer
+    showing the latest lines. Real log lines mis-measured at 80 and 160 columns.
+
+    Only the messages that fit are ever measured (the caller stops at the first
+    one that does not), so this costs one wrap per visible line, not per buffered
+    message.
+    """
     if width <= 0:
         return 1
-    total = 0
-    for line in plain.split('\n'):
-        total += max(1, -(-cell_len(line) // width))  # ceiling division
-    return total
+    return max(1, len(text.wrap(console, width)))
 
 
 class SplitDisplay:
@@ -49,7 +58,7 @@ class SplitDisplay:
         used = 0
         for msg in reversed(items):
             text = Text.from_ansi(msg)
-            vis = _visual_lines(text.plain, width)
+            vis = _visual_lines(self._console, text, width)
             if used + vis > height and selected:
                 break
             selected.append(text)
