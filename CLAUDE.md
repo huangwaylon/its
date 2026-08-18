@@ -127,6 +127,7 @@ Sleep between cycles is `min(RETRY_DELAY * 2**consecutive_failures, SCAN_BACKOFF
 - `_merge_headers(headers)` — per-call headers over the browser defaults, case-insensitive. Merging in Python (rather than appending `-H` flags) is required: curl emits every header it is given, so a default plus a per-call `Accept` would send both.
 - `_user_agent()` — reads `USER_AGENT_CACHE`, re-reading on mtime change; falls back to `FALLBACK_USER_AGENT`
 - `redact_url(url)` / `_redact_headers(hdrs)` / `_redact_set_cookie(v)` / `_redact_body(b)` / `_fingerprint(v)` — strip session material from anything written to `debug_responses/`. All fail closed: anything unrecognized is fingerprinted rather than passed through.
+- `token_summary(url, now=None)` / `decode_s_token(token)` / `_relative(seconds)` — decode the `s=` token for logging. See **The `s=` token** below. `token_summary` never raises; it runs in the URL monitor's logging path.
 - `ex(html, pat)` — regex group(1) extraction helper
 - `save_booking(date_str, hotel_name)` — thread-safe, **atomic**, and never destructive. `_write_bookings()` writes a same-directory temp file, fsyncs, then renames; a plain `open(..., 'w')` truncates first, so a crash midway leaves a file that parses as nothing. If the existing file was unreadable, it is renamed to `bookings.json.corrupt.<ts>.<seq>` rather than overwritten — a bad read returning `{}` followed by a normal save would otherwise rewrite the file with only the one new entry. The last log has 5 bookings for 2026-08-22 that no longer appear in `bookings.json`, which is that failure having already happened.
 - `get_booked_hotels(date_str)` — thread-safe read from `bookings.json`
@@ -140,6 +141,8 @@ Dumps are **throttled** per `(label, step)` to one per `DEBUG_DUMP_INTERVAL`, an
 ### `captcha_solver.py` — Cloudflare Turnstile solver
 
 Uses pydoll (CDP-based Chrome automation) to solve Cloudflare Turnstile CAPTCHA. Pydoll drives real Chrome via DevTools Protocol, avoiding bot detection that Playwright triggers. Requires non-headless mode (visible Chrome window) since headless Chrome gets rejected by Turnstile. Has its own `log()` function (elapsed-seconds format) separate from `book_hotels.log()` (wall-clock format).
+
+Imports `redact_url` and `token_summary` from `book_hotels` so there is one implementation of "make this safe to write down". `book_hotels` imports only `config`, so this is not a cycle. Nothing here logs a URL or token verbatim any more: the pre-solve URL goes through `redact_url`, the resulting calendar URL through `token_summary`, and the Turnstile response token is reported as a length. The old `Calendar URL: {calendar_url}` line wrote the complete `s=` token to disk on all 647 solves in the previous log.
 
 **Key functions**:
 - `get_calendar_url()` — async. Full flow: launch Chrome via pydoll → navigate to ITS homepage → click "カレンダーから探す" → solve Turnstile → submit form → save resulting URL to `CALENDAR_URL_CACHE`. Returns URL string or None.
@@ -161,8 +164,27 @@ Uses pydoll (CDP-based Chrome automation) to solve Cloudflare Turnstile CAPTCHA.
 
 **Never caches a bad URL**: if the post-submit URL does not contain `calendar_select`, `_solve_and_cache()` screenshots it and returns `None`, leaving the previous cache entry alone. It used to save it anyway, which poisoned the cache — every scanner would then replay a non-calendar URL that can still answer 200, so `check_cached_url()` called the session healthy and no re-solve ever fired.
 
-## Concurrency Model
+## The `s=` token
 
+Not opaque. Decoded from a live 88-character token:
+
+```
+s= → base64 → reverse → base64 → "service_category_id=1&verify_expires=<10 digits>"
+```
+
+47 bytes of printable ASCII with **nothing left over** — no signature, no MAC. Nothing cryptographically binds the token to the Turnstile solve that produced it. The reversal is why every token looks like it shares a suffix: the recurring `VURPM0VU` is the constant `service_category_id=1&verify_` appearing mirrored, and the field that varies (647 distinct tokens across 647 solves) sits at the front of the outer encoding, which maps to the *end* of the payload.
+
+**Consequence for logging.** Because the payload is only those two fields and one is constant, printing `verify_expires` in full is equivalent to printing the token. So `token_summary()`:
+- renders timestamp-shaped fields as a **relative delta** (`verify_expires=+1h29m`), never an absolute value;
+- masks every other value as `<N chars>`;
+- always shows field **names**, so a field the site adds later becomes visible without its value leaking;
+- is deliberately **strict** — a truncated token still base64-decodes into plausible bytes, so anything that is not clean printable ASCII in `k=v&k=v` shape is reported as `token does not decode (N chars)` rather than as a payload.
+
+**`verify_expires` is not yet usable for scheduling refreshes.** One live sample contradicted the obvious reading: a token minted 2026-08-18 13:33 carried 2026-08-08 19:12:52, ten days in its own past. Since all 647 tokens differ and there are only two fields, *something* in there varies per solve and this is the only candidate — so either it is not a per-token expiry, or it is not an epoch at all. Every token in the previous log was truncated at 80 characters and cannot be decoded, which is why the field is now logged on each solve. Watch it across a few refreshes before letting `url_monitor` schedule against it.
+
+**Do not mint tokens.** The absent MAC means one could be forged with an arbitrary expiry, skipping Turnstile entirely. That is defeating the anti-automation control rather than solving it, and it would break silently and completely the moment a signature is added.
+
+## Concurrency Model
 **Threads at runtime** (when started via `main.py`):
 - 1 URL monitor thread (daemon)
 - 1 watchdog thread (daemon) — restarts any of the above that dies
@@ -181,7 +203,7 @@ All long-lived threads are wrapped in `main._Worker`, which the watchdog can res
 - `calendar_url_cache.txt` — Current calendar session URL. Written by `captcha_solver.get_calendar_url()`, read by `book_hotels._read_cached_url()` and `main.check_cached_url()`. Contains a URL with an `s=` session token that expires periodically. Path defined once in `config.CALENDAR_URL_CACHE`. **Gitignored** — the `s=` token is a live credential.
 - `chrome_user_agent.txt` — UA of the Chrome that solved the most recent CAPTCHA. Written by `captcha_solver._save_user_agent()`, read by `book_hotels._user_agent()`. Gitignored. Absent until the first solve, in which case `FALLBACK_USER_AGENT` is used.
 - `bookings.json` — Records successful bookings as `{date: [hotel_names]}`. Thread-safe via `_bookings_lock`, written atomically (temp file + `fsync` + rename). An unparseable file is renamed to `bookings.json.corrupt.<ts>.<seq>` instead of being overwritten. This file is the only thing preventing duplicate applications, so losing it is worse than a crash.
-- `its_booking.log` / `its_booking.log.N` — rotated at startup past `LOG_MAX_BYTES`, keeping `LOG_BACKUPS`. Both patterns are gitignored: `*.log` misses the rotated names, and the URL monitor logs the first 80 characters of each new calendar URL, i.e. the head of a live `s=` token.
+- `its_booking.log` / `its_booking.log.N` — rotated at startup past `LOG_MAX_BYTES`, keeping `LOG_BACKUPS`. Both patterns are gitignored (`*.log` misses the rotated names). **Treat this file as credential-bearing.** The `s=` token has no MAC, so any decoded field is equivalent to the token; the log now records only relative deltas, but the trust boundary is the same as `calendar_url_cache.txt`.
 - `debug_responses/` — Failure dumps from `_dump_debug` (`.html` body + `.headers.txt` redacted headers). **Gitignored**: response bodies embed `s=` tokens in form actions. It was tracked until 2026-08-18; the pre-existing 380 files remain in the history of the (public) GitHub remote. The `.html` body is redacted too (`_redact_body`), since that is the file people actually open.
 
 ## Tests
@@ -190,7 +212,7 @@ Two suites, both stdlib-only, both against a throwaway localhost HTTP server. Ne
 
 ```bash
 .venv/bin/python test_http_layer.py      # 128 checks — curl + redaction layer
-.venv/bin/python test_booking_flow.py    # 119 checks — booking flow end to end
+.venv/bin/python test_booking_flow.py    # 145 checks — booking flow end to end
 ```
 
 - **`test_http_layer.py`** — header merging (curl emits every `-H` it is given, so a duplicate would let the server pick) and redaction (a dump must never contain a cookie or token value).

@@ -536,6 +536,78 @@ def test_missing_url(port):
         check('no-url: made no requests', STATE.hits == [], str(STATE.hits))
 
 
+def test_token_summary():
+    """The `s=` token decoder, and the guarantee that it leaks nothing.
+
+    The token is base64(reverse(base64("k=v&k=v"))) with no MAC, so the payload
+    is only `service_category_id` plus a timestamp. Printing that timestamp in
+    full would reconstruct the token, which is why it is rendered as a delta.
+    """
+    import base64 as b64
+
+    def mint(payload):
+        inner = b64.b64encode(payload.encode()).decode()
+        return b64.b64encode(inner[::-1].encode()).decode()
+
+    now = 1786183972
+    tok = mint(f'service_category_id=1&verify_expires={now}')
+
+    fields = bh.decode_s_token(tok)
+    check('token: fields decoded in order',
+          fields == [('service_category_id', '1'), ('verify_expires', str(now))],
+          str(fields))
+
+    # Round-trips the real shape observed live.
+    real = 'service_category_id=1&verify_expires=1786183972'
+    check('token: real payload shape round-trips',
+          bh.decode_s_token(mint(real)) == bh.decode_s_token(tok), str(fields))
+
+    url = f'https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s={tok}'
+    s = bh.token_summary(url, now=now - 3600)
+    check('token: field names shown', 'service_category_id=1' in s, s)
+    check('token: expiry shown as a delta', 'verify_expires=+1h00m' in s, s)
+    check('token: absolute timestamp NEVER logged', str(now) not in s, s)
+    check('token: raw token NEVER logged', tok not in s, s)
+
+    s = bh.token_summary(url, now=now + 90)
+    check('token: expired shows negative delta', 'verify_expires=-1m30s' in s, s)
+
+    # A field the site adds later must show its name but mask its value.
+    tok2 = mint(f'service_category_id=1&member_no=A1234567890&verify_expires={now}')
+    s = bh.token_summary(f'https://h/x?s={tok2}', now=now)
+    check('token: unknown field name shown', 'member_no=' in s, s)
+    check('token: unknown field value masked', 'A1234567890' not in s, s)
+    check('token: unknown field length reported', '<11 chars>' in s, s)
+
+    # Strictness: a truncated token must report failure, not garbage. Every
+    # token in the previous production log was cut at 80 characters.
+    check('token: truncated reports failure',
+          bh.token_summary(f'https://h/x?s={tok[:60]}').startswith('token does not decode'),
+          bh.token_summary(f'https://h/x?s={tok[:60]}'))
+    check('token: non-base64 reports failure',
+          'does not decode' in bh.token_summary('https://h/x?s=!!!!not-base64!!!!'))
+    check('token: single-layer base64 rejected',
+          bh.decode_s_token(b64.b64encode(b'service_category_id=1').decode()) is None)
+
+    # Never raises: this is in the URL monitor's logging path.
+    for bad in (None, '', 'not a url', 'https://h/x', 'https://h/x?s=',
+                'http://[garbage?s=abc', 'https://h/x?s=' + 'A' * 4000):
+        try:
+            check(f'token: no raise on {str(bad)[:24]!r}',
+                  isinstance(bh.token_summary(bad), str))
+        except Exception as e:
+            check(f'token: no raise on {str(bad)[:24]!r}', False, repr(e))
+
+
+def test_relative_duration():
+    check('relative: hours', bh._relative(9061) == '+2h31m', bh._relative(9061))
+    check('relative: minutes', bh._relative(125) == '+2m05s', bh._relative(125))
+    check('relative: seconds', bh._relative(9) == '+9s', bh._relative(9))
+    check('relative: zero', bh._relative(0) == '+0s', bh._relative(0))
+    check('relative: negative', bh._relative(-9061) == '-2h31m', bh._relative(-9061))
+    check('relative: negative seconds', bh._relative(-5) == '-5s', bh._relative(-5))
+
+
 def _run_scanner(month, dates, label):
     """Start a scanner in a thread and hand back (thread, stop_event).
 
@@ -958,7 +1030,7 @@ STANDALONE_TESTS = (
     'test_future_dates', 'test_dump_throttle_and_prune',
     'test_read_cached_url_never_raises', 'test_watchdog_restarts_a_dead_worker',
     'test_group_dates_by_month', 'test_captcha_timeout_wrapper',
-    'test_log_rotation',
+    'test_log_rotation', 'test_token_summary', 'test_relative_duration',
 )
 
 

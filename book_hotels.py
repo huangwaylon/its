@@ -6,6 +6,7 @@ cycle. If the URL is missing or expired, it simply waits for the next cycle
 (the URL monitor in main.py handles CAPTCHA solving separately).
 """
 import subprocess, re, urllib.parse, os, json, tempfile, threading, time, hashlib
+import base64
 import html as _html
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -413,6 +414,109 @@ def redact_url(url):
         return urllib.parse.urlunsplit((parts.scheme, netloc, path, query, fragment))
     except ValueError:
         return _fingerprint(url)
+
+
+# ── The `s=` token ──────────────────────────────────────────────────
+# The token is not opaque. Decoded live, an 88-character token is:
+#
+#   base64 -> reverse -> base64 -> "service_category_id=1&verify_expires=<10 digits>"
+#
+# 47 bytes of printable ASCII with nothing left over: no signature, no MAC.
+# Nothing cryptographically binds the token to the Turnstile solve that
+# produced it.
+#
+# That has a direct consequence for logging. Because the payload is only those
+# two fields, and one of them is constant, printing `verify_expires` in full is
+# equivalent to printing the token — anyone holding the log could rebuild it. So
+# timestamp fields are logged as a *relative* delta, never as an absolute value,
+# and every other field's value is masked. Field *names* are always shown, so a
+# field the site adds later becomes visible without its value leaking.
+#
+# `verify_expires` is worth watching because it could tell the URL monitor when
+# to refresh instead of guessing at URL_REFRESH_INTERVAL. It is not usable for
+# that yet: one live sample contradicted the obvious reading (a token minted
+# 2026-08-18 13:33 carried 2026-08-08 19:12:52, ten days in its own past), so
+# the field needs to be observed across several solves before anything relies on
+# it. Every token in the previous log was truncated at 80 characters and cannot
+# be decoded, which is exactly why this exists.
+
+_PRINTABLE_ASCII = re.compile(r'\A[\x20-\x7e]+\Z')
+_TOKEN_PAYLOAD = re.compile(r'\A[^=&]+=[^=&]*(?:&[^=&]+=[^=&]*)*\Z')
+# A 10-digit value in roughly 2020..2100, i.e. plausibly unix epoch seconds.
+_EPOCH_RANGE = (1577836800, 4102444800)
+
+
+def _b64_to_ascii(s):
+    """base64-decode to a printable-ASCII str, or None. Padding is inferred."""
+    for pad in ('', '=', '=='):
+        try:
+            raw = base64.b64decode(s + pad, validate=True)
+        except Exception:
+            continue
+        try:
+            out = raw.decode('ascii')
+        except UnicodeDecodeError:
+            return None
+        return out if _PRINTABLE_ASCII.match(out) else None
+    return None
+
+
+def decode_s_token(token):
+    """The token's plaintext payload as an ordered list of (key, value).
+
+    Returns None if it does not decode cleanly. Deliberately strict: a truncated
+    token still base64-decodes into plausible-looking bytes, and reporting
+    garbage as a payload is worse than reporting nothing at all.
+    """
+    if not token:
+        return None
+    middle = _b64_to_ascii(token)
+    if middle is None:
+        return None
+    payload = _b64_to_ascii(middle[::-1])
+    if payload is None or not _TOKEN_PAYLOAD.match(payload):
+        return None
+    return [(k, v) for k, _, v in (p.partition('=') for p in payload.split('&'))]
+
+
+def _relative(seconds):
+    """A signed, human duration: `+2h34m`, `-11m`, `+0s`."""
+    sign = '-' if seconds < 0 else '+'
+    s = int(abs(seconds))
+    if s >= 3600:
+        return f'{sign}{s // 3600}h{(s % 3600) // 60:02d}m'
+    if s >= 60:
+        return f'{sign}{s // 60}m{s % 60:02d}s'
+    return f'{sign}{s}s'
+
+
+def token_summary(url, now=None):
+    """Loggable summary of a calendar URL's `s=` token. Never raises.
+
+    Runs in the URL monitor's logging path — the one thread that re-mints a
+    session — so a malformed URL must not cost a solve.
+    """
+    try:
+        token = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(url or '').query).get('s', [''])[0]
+        if not token:
+            return 'no s= token in URL'
+        fields = decode_s_token(token)
+        if fields is None:
+            return f'token does not decode ({len(token)} chars)'
+        now = time.time() if now is None else now
+        out = []
+        for k, v in fields:
+            if v.isdigit() and _EPOCH_RANGE[0] <= int(v) <= _EPOCH_RANGE[1]:
+                # Relative only. The absolute value would reconstruct the token.
+                out.append(f'{k}={_relative(int(v) - now)}')
+            elif len(v) <= 4:
+                out.append(f'{k}={v}')
+            else:
+                out.append(f'{k}=<{len(v)} chars>')
+        return ' '.join(out)
+    except Exception as e:
+        return f'token unreadable ({e.__class__.__name__})'
 
 
 def _redact_set_cookie(value):

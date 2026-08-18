@@ -22,6 +22,9 @@ from pydoll.commands.input_commands import InputCommands
 from pydoll.protocol.input.types import MouseEventType, MouseButton
 
 from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE, CAPTCHA_TIMEOUT
+# Shared with the booking engine so there is one implementation of "make this
+# safe to write down". book_hotels imports only config, so this is not a cycle.
+from book_hotels import redact_url, token_summary
 
 # ── Config ──────────────────────────────────────────────────────────
 DEBUG_DIR = '/tmp/captcha_debug'
@@ -125,7 +128,9 @@ async def _click_turnstile_checkbox(tab):
         )
         token = _script_value(token_result)
         if token:
-            log(f'Turnstile token obtained: {token[:60]}...')
+            # Length only. This is Cloudflare's single-use response token; a
+            # 60-character prefix in the log was never diagnostic of anything.
+            log(f'Turnstile token obtained ({len(token)} chars)')
             return token
         elapsed = time.time() - (deadline - TOKEN_TIMEOUT)
         log(f'  Waiting for token ({elapsed:.0f}s)...')
@@ -253,10 +258,11 @@ async def _solve_and_cache():
             await asyncio.sleep(5)
 
             url = await tab.current_url
-            log(f'On captcha page: {url}')
+            log(f'On captcha page: {redact_url(url)}')
 
             if 'calendar_apply' not in url:
-                log(f'WARNING: unexpected URL (expected calendar_apply): {url}')
+                log(f'WARNING: unexpected URL (expected calendar_apply): '
+                    f'{redact_url(url)}')
                 await tab.take_screenshot(path=_debug_path('unexpected_url.png'))
 
             token = await solve_turnstile(tab)
@@ -273,7 +279,10 @@ async def _solve_and_cache():
             await asyncio.sleep(5)
 
             calendar_url = await tab.current_url
-            log(f'Calendar URL: {calendar_url}')
+            # The decoded token fields, never the URL: this line ran on all 647
+            # solves in the previous log and wrote the complete `s=` token to
+            # disk every time.
+            log(f'Calendar URL obtained — {token_summary(calendar_url)}')
 
             # Refuse to cache anything that is not a calendar session. Saving it
             # anyway used to poison the cache: every scanner would then replay a
@@ -281,7 +290,8 @@ async def _solve_and_cache():
             # called the session healthy and no re-solve ever fired. Returning
             # None leaves the previous URL in place and retries next cycle.
             if 'calendar_select' not in (calendar_url or ''):
-                log(f'FAILED: not a calendar URL, not caching: {calendar_url}')
+                log(f'FAILED: not a calendar URL, not caching: '
+                    f'{redact_url(calendar_url)}')
                 await tab.take_screenshot(path=_debug_path('not_calendar.png'))
                 return None
 
