@@ -12,6 +12,8 @@ Usage:
 
 import asyncio
 import os
+import signal
+import subprocess
 import time
 
 from pydoll.browser.chromium.chrome import Chrome
@@ -19,7 +21,7 @@ from pydoll.browser.options import ChromiumOptions
 from pydoll.commands.input_commands import InputCommands
 from pydoll.protocol.input.types import MouseEventType, MouseButton
 
-from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE
+from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE, CAPTCHA_TIMEOUT
 
 # ── Config ──────────────────────────────────────────────────────────
 DEBUG_DIR = '/tmp/captcha_debug'
@@ -156,6 +158,51 @@ async def solve_turnstile(tab, max_attempts=MAX_ATTEMPTS):
 # ── ITS Calendar URL getter ────────────────────────────────────────
 
 async def get_calendar_url():
+    """Solve the CAPTCHA and cache a fresh calendar URL, under a hard deadline.
+
+    The solve runs synchronously inside main.py's URL monitor thread, and that
+    thread is the only thing that ever re-mints a session. A pydoll or Chrome
+    hang there stops all booking indefinitely while the process keeps rendering
+    its display and looks perfectly healthy, so the deadline is not optional.
+
+    Returns the URL string, or None on failure or timeout.
+    """
+    try:
+        return await asyncio.wait_for(_solve_and_cache(), timeout=CAPTCHA_TIMEOUT)
+    except asyncio.TimeoutError:
+        log(f'TIMEOUT: solve exceeded {CAPTCHA_TIMEOUT}s, abandoning this attempt')
+        _kill_stray_chrome()
+        return None
+    except Exception as e:
+        log(f'Solve failed: {e!r}')
+        return None
+
+
+def _kill_stray_chrome():
+    """Kill Chrome processes left behind by an abandoned solve.
+
+    On a timeout the `async with Chrome(...)` block is cancelled mid-await, and
+    pydoll cannot always complete its own teardown. Over weeks of solves every
+    orphan keeps its profile directory and a few hundred MB of RSS, so they are
+    reaped here rather than accumulating until the machine runs out of memory.
+    Matched narrowly on the flags pydoll launches with, so a Chrome the user is
+    browsing in is never a candidate.
+    """
+    try:
+        out = subprocess.run(['pgrep', '-f', 'remote-debugging-port'],
+                             capture_output=True, text=True, timeout=10).stdout
+        pids = [int(p) for p in out.split() if p.isdigit()]
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                log(f'Killed stray Chrome pid {pid}')
+            except (ProcessLookupError, PermissionError):
+                pass
+    except Exception as e:
+        log(f'Could not reap stray Chrome: {e}')
+
+
+async def _solve_and_cache():
     """Navigate ITS site, solve Turnstile CAPTCHA, click 次へ, and save the calendar URL."""
     options = ChromiumOptions()
     options.headless = False
@@ -228,9 +275,15 @@ async def get_calendar_url():
             calendar_url = await tab.current_url
             log(f'Calendar URL: {calendar_url}')
 
-            if 'calendar_select' not in calendar_url:
-                log(f'WARNING: URL does not look like a calendar page: {calendar_url}')
+            # Refuse to cache anything that is not a calendar session. Saving it
+            # anyway used to poison the cache: every scanner would then replay a
+            # non-calendar URL that can still answer 200, so check_cached_url
+            # called the session healthy and no re-solve ever fired. Returning
+            # None leaves the previous URL in place and retries next cycle.
+            if 'calendar_select' not in (calendar_url or ''):
+                log(f'FAILED: not a calendar URL, not caching: {calendar_url}')
                 await tab.take_screenshot(path=_debug_path('not_calendar.png'))
+                return None
 
             tmp_path = CALENDAR_URL_CACHE + '.tmp'
             with open(tmp_path, 'w') as f:
@@ -241,7 +294,13 @@ async def get_calendar_url():
             return calendar_url
 
         finally:
-            await browser.stop()
+            # `async with Chrome(...)` stops the browser on exit too, so this is
+            # the second call. Guarded because a raise from a finally would
+            # replace a perfectly good return value with an exception.
+            try:
+                await browser.stop()
+            except Exception as e:
+                log(f'Browser stop: {e}')
             log('Browser closed')
 
 

@@ -10,15 +10,20 @@ Usage:
     uv run main.py
 """
 import asyncio
+import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
 
 import captcha_solver
 from captcha_solver import get_calendar_url
-from config import CALENDAR_URL_CACHE, URL_CHECK_INTERVAL, URL_REFRESH_INTERVAL, LOG_FILE
+from config import (
+    CALENDAR_URL_CACHE, URL_CHECK_INTERVAL, URL_REFRESH_INTERVAL, LOG_FILE,
+    LOG_MAX_BYTES, LOG_BACKUPS, TARGET_DATES, EMAIL, PRIORITY_HOTELS,
+)
 import book_hotels
 from book_hotels import R, G, Y, C, B, X
 from display import SplitDisplay
@@ -28,18 +33,25 @@ _ANSI_RE = re.compile(r'\033\[[0-9;]*m')
 MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
               'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
 
+# How often the watchdog checks that every worker thread is still alive.
+WATCHDOG_INTERVAL = 30
+
 display = SplitDisplay()
 
 _log_write = None  # set in main()
 
 
+_url_sink = None  # set in main(); routes to the TUI panel or to stdout
+
+
 def url_log(msg=''):
-    """Log to the left (URL monitor) panel."""
-    ts = datetime.now().strftime('%H:%M:%S')
-    formatted = f'{ts} {msg}'
-    display.add_left(formatted)
-    if _log_write:
-        _log_write(formatted)
+    """Log a URL-monitor message to whichever sink main() wired up."""
+    formatted = f'{datetime.now().strftime("%H:%M:%S")} {msg}'
+    if _url_sink:
+        _url_sink(formatted)
+    else:
+        # Before main() runs, and in captcha_solver.py's standalone mode.
+        print(_ANSI_RE.sub('', formatted), flush=True)
 
 
 def group_dates_by_month(dates):
@@ -62,18 +74,26 @@ def check_cached_url():
     try:
         with open(CALENDAR_URL_CACHE) as f:
             url = f.read().strip()
-    except FileNotFoundError:
+    except OSError:
         display.set_url(None)
         return None, False
     if not url:
         display.set_url(None)
         return None, False
-    r = subprocess.run(
-        ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10']
-        + book_hotels.header_args() + [url],
-        capture_output=True, text=True,
-    )
-    status = r.stdout.strip()
+    try:
+        r = subprocess.run(
+            ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10']
+            + book_hotels.header_args() + [url],
+            capture_output=True, text=True, timeout=30,
+        )
+        status = r.stdout.strip()
+    except Exception as e:
+        # Treated as a server-side blip, not an expired session: a local failure
+        # to run curl says nothing about whether the token is still good, and
+        # discarding a working URL over it would force a needless CAPTCHA solve.
+        url_log(f"{Y}URL check: could not run curl ({e!r}), will retry{X}")
+        display.set_url(url)
+        return url, False
     if status == '200':
         url_log(f"{C}URL check: valid (200){X}")
         display.set_url(url)
@@ -99,100 +119,186 @@ def url_monitor():
     while True:
         try:
             url, confirmed = check_cached_url()
+            due_for_refresh = time.time() - last_solve >= URL_REFRESH_INTERVAL
+
+            if url and (not due_for_refresh or not confirmed):
+                time.sleep(URL_CHECK_INTERVAL)
+                continue
+
+            if url:
+                # A proactive refresh replaces a token that is still working.
+                # Bookings hold the old one across a ~7-request chain, so
+                # swapping it underneath them risks losing a slot to housekeeping.
+                # A repair (url is None) is not deferred - there is nothing left
+                # to protect.
+                active = book_hotels.active_bookings()
+                if active:
+                    url_log(f"{Y}Proactive refresh deferred "
+                            f"({active} booking(s) in flight){X}")
+                    time.sleep(URL_CHECK_INTERVAL)
+                    continue
+                url_log(f"{Y}Proactive refresh "
+                        f"({int(time.time() - last_solve)}s since last solve)...{X}")
+            else:
+                url_log(f"{B}URL invalid or missing, solving CAPTCHA...{X}")
+
+            try:
+                new_url = asyncio.run(get_calendar_url())
+                if new_url:
+                    last_solve = time.time()
+                    url_log(f"{G}New URL saved: {new_url[:80]}...{X}")
+                    display.set_url(new_url)
+                else:
+                    url_log(f"{R}CAPTCHA solve failed, will retry next cycle{X}")
+                    if url:  # Had valid URL; reset timer to avoid spamming retries
+                        last_solve = time.time()
+            except Exception as e:
+                url_log(f"{R}CAPTCHA solve error: {e!r}{X}")
+                if url:  # Had valid URL; reset timer to avoid spamming retries
+                    last_solve = time.time()
+
         except Exception as e:
             # This thread is the only thing that re-solves the CAPTCHA. If it
             # dies, booking stops forever while main() keeps rendering the
-            # display and the process looks healthy.
-            url_log(f"{R}URL check error: {e}{X}")
-            time.sleep(URL_CHECK_INTERVAL)
-            continue
-        due_for_refresh = time.time() - last_solve >= URL_REFRESH_INTERVAL
-
-        if url and (not due_for_refresh or not confirmed):
-            time.sleep(URL_CHECK_INTERVAL)
-            continue
-
-        if url:
-            url_log(f"{Y}Proactive refresh ({int(time.time() - last_solve)}s since last solve)...{X}")
-        else:
-            url_log(f"{B}URL invalid or missing, solving CAPTCHA...{X}")
-
-        try:
-            new_url = asyncio.run(get_calendar_url())
-            if new_url:
-                last_solve = time.time()
-                url_log(f"{G}New URL saved: {new_url[:80]}...{X}")
-                display.set_url(new_url)
-            else:
-                url_log(f"{R}CAPTCHA solve failed, will retry next cycle{X}")
-                if url:  # Had valid URL; reset timer to avoid spamming retries
-                    last_solve = time.time()
-        except Exception as e:
-            url_log(f"{R}CAPTCHA solve error: {e}{X}")
-            if url:  # Had valid URL; reset timer to avoid spamming retries
-                last_solve = time.time()
+            # display and the process looks healthy. The watchdog would restart
+            # it, but not losing it in the first place is cheaper.
+            url_log(f"{R}URL monitor error: {e!r}{X}")
 
         time.sleep(URL_CHECK_INTERVAL)
+
+
+def _rotate_log():
+    """Roll LOG_FILE over once it passes LOG_MAX_BYTES, keeping LOG_BACKUPS.
+
+    The last unattended run wrote 9 MB in six days with no bound at all. Rotation
+    happens at startup rather than mid-write so no log handler needs a lock.
+    """
+    try:
+        if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) < LOG_MAX_BYTES:
+            return
+        for i in range(LOG_BACKUPS - 1, 0, -1):
+            src, dst = f'{LOG_FILE}.{i}', f'{LOG_FILE}.{i + 1}'
+            if os.path.exists(src):
+                os.replace(src, dst)
+        os.replace(LOG_FILE, f'{LOG_FILE}.1')
+    except OSError as e:
+        print(f'Could not rotate {LOG_FILE}: {e}', file=sys.stderr)
+
+
+class _Worker:
+    """A named restartable daemon thread.
+
+    Every worker here is a daemon and main() blocks on the display rather than
+    joining any of them, so a thread that dies leaves the process running with
+    one fewer month being scanned - or, for the URL monitor, with nothing left
+    that can re-mint a session. Both failures are invisible without a watchdog.
+    """
+
+    def __init__(self, name, target, args=()):
+        self.name, self.target, self.args = name, target, args
+        self.thread = None
+        self.restarts = 0
+
+    def start(self):
+        self.thread = threading.Thread(target=self.target, args=self.args,
+                                       name=self.name, daemon=True)
+        self.thread.start()
+
+    def ensure_alive(self):
+        if self.thread is not None and self.thread.is_alive():
+            return False
+        self.restarts += 1
+        self.start()
+        return True
+
+
+def watchdog(workers):
+    """Restart any worker thread that has stopped. Runs forever."""
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+        for w in workers:
+            try:
+                if w.ensure_alive():
+                    url_log(f"{R}Worker '{w.name}' died - restarted "
+                            f"(restart #{w.restarts}){X}")
+            except Exception as e:
+                url_log(f"{R}Watchdog could not restart '{w.name}': {e!r}{X}")
 
 
 def main():
     global _log_write
 
-    # Open persistent log file
+    _rotate_log()
     log_file = open(LOG_FILE, 'a', encoding='utf-8')
     log_file.write(f'\n=== Session started {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ===\n')
     log_file.flush()
 
     def _write_log(msg):
-        log_file.write(_ANSI_RE.sub('', msg) + '\n')
-        log_file.flush()
+        try:
+            log_file.write(_ANSI_RE.sub('', msg) + '\n')
+            log_file.flush()
+        except OSError:
+            pass  # a full disk must not take down a booking thread
 
     _log_write = _write_log
 
-    # Wire up log handlers for split display + file logging
-    def right_handler(msg):
-        display.add_right(msg)
-        _write_log(msg)
+    # With no terminal - nohup, launchd, a pipe - Rich's full-screen Live display
+    # has nothing to draw on and its escape sequences only corrupt the log. An
+    # unattended run is the normal case for this program, so fall back to plain
+    # line logging on stdout.
+    interactive = sys.stdout.isatty()
 
-    def left_handler(msg):
-        display.add_left(msg)
-        _write_log(msg)
+    if interactive:
+        def right_handler(msg):
+            display.add_right(msg)
+            _write_log(msg)
+
+        def left_handler(msg):
+            display.add_left(msg)
+            _write_log(msg)
+    else:
+        def right_handler(msg):
+            print(_ANSI_RE.sub('', msg), flush=True)
+            _write_log(msg)
+
+        left_handler = right_handler
 
     book_hotels._log_handler = right_handler
     captcha_solver._log_handler = left_handler
-
+    globals()['_url_sink'] = left_handler
     url_log("=" * 60)
     url_log(f"{B}ITS BOOKING SYSTEM{X}")
-    url_log(f"Email: {book_hotels.EMAIL}")
-    url_log(f"Dates: {', '.join(book_hotels.TARGET_DATES)}")
+    url_log(f"Email: {EMAIL}")
+    url_log(f"Dates: {', '.join(TARGET_DATES)}")
+    url_log(f"Priority hotels: {', '.join(PRIORITY_HOTELS) or '(none)'}")
+    url_log(f"Display: {'split TUI' if interactive else 'plain stdout (no tty)'}")
     url_log("=" * 60)
 
-    # Start URL monitor thread
-    monitor = threading.Thread(target=url_monitor, daemon=True)
-    monitor.start()
-    url_log(f"{C}URL monitor thread started{X}")
-
-    # Start booking scanner threads (1 per month)
-    months = group_dates_by_month(book_hotels.TARGET_DATES)
-    month_labels = [MONTH_ABBR[int(m[5:7])] for m in months]
-    url_log(f"{B}Starting {len(months)} scanner threads ({', '.join(month_labels)}) "
-            f"for {len(book_hotels.TARGET_DATES)} dates{X}")
-    url_log("=" * 60)
-
-    threads = []
+    months = group_dates_by_month(TARGET_DATES)
+    workers = [_Worker('url-monitor', url_monitor)]
     for month_str, dates in months.items():
         label = MONTH_ABBR[int(month_str[5:7])]
-        t = threading.Thread(
-            target=book_hotels.scan_and_book_month,
-            args=(month_str, dates, label),
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
+        workers.append(_Worker(f'scan-{label}', book_hotels.scan_and_book_month,
+                               (month_str, dates, label)))
 
-    # Run split display (blocks until Ctrl+C)
+    url_log(f"{B}Starting {len(months)} scanner threads "
+            f"({', '.join(MONTH_ABBR[int(m[5:7])] for m in months)}) "
+            f"for {len(TARGET_DATES)} dates{X}")
+    url_log("=" * 60)
+
+    for w in workers:
+        w.start()
+
+    threading.Thread(target=watchdog, args=(workers,),
+                     name='watchdog', daemon=True).start()
+    url_log(f"{C}Watchdog started ({len(workers)} workers, "
+            f"{WATCHDOG_INTERVAL}s interval){X}")
+
     try:
-        display.run()
+        if interactive:
+            display.run()
+        else:
+            threading.Event().wait()
     except KeyboardInterrupt:
         pass
     print(f"{Y}Interrupted, exiting.{X}")

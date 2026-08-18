@@ -160,3 +160,9 @@ debug_responses/
 # Both caches are written tmp-then-rename; a kill mid-write leaves the token
 # behind in the .tmp sibling.
 *.tmp
+# `*.log` above catches its_booking.log, but rotation renames it to
+# its_booking.log.1 and the URL monitor logs the first 80 characters of each new
+# calendar URL — i.e. the head of a live `s=` token.
+*.log.*
+# Salvaged copies of an unparseable bookings.json.
+bookings.json.corrupt.*

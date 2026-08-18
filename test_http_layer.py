@@ -22,7 +22,12 @@ import book_hotels as bh
 os.environ['NO_PROXY'] = os.environ['no_proxy'] = '127.0.0.1,localhost'
 
 FAILURES = []
-LONG_TOKEN = 'PUl6TjVNRE94WURPM0VUUHpWbWNwQkhlbDlWZW1sbWNsWm5KeDBEWnA5VmV5'
+# Synthetic, and deliberately self-describing: base64 of
+# "FAKE_TOKEN_FOR_TESTS_NOT_A_REAL_SESSION_TOKEN". Same 60-character length as a
+# real ITS `s=` token, which is all these tests depend on. The value that used to
+# sit here was a real (expired) token — reverse-base64 of a live session string —
+# so it published both the token and the format to a public remote.
+LONG_TOKEN = 'RkFLRV9UT0tFTl9GT1JfVEVTVFNfTk9UX0FfUkVBTF9TRVNTSU9OX1RPS0VO'
 
 
 def check(name, cond, detail=''):
@@ -384,9 +389,11 @@ def test_dump_debug(srv, tmpdir):
         files = sorted(os.listdir(tmpdir))
         html = [f for f in files if f.endswith('.html')]
         hdrs = [f for f in files if f.endswith('.headers.txt')]
-        check('dump wrote a body file', len(html) == 1, str(files))
+        # The 302 body is 0 bytes — 302 of the 380 real dumps are — so no .html
+        # is written for it. The headers file still records the size.
+        check('no .html for an empty body', html == [], str(files))
         check('dump wrote a headers file', len(hdrs) == 1, str(files))
-        check('label spaces sanitized', 'NAGU_勝浦' in html[0], html[0])
+        check('label spaces sanitized', 'NAGU_勝浦' in hdrs[0], hdrs[0])
 
         with open(os.path.join(tmpdir, hdrs[0])) as f:
             text = f.read()
