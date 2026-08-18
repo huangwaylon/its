@@ -1,0 +1,5 @@
+# Project-scoped unsandboxed commands for the ITS booker.
+# test_http_layer.py binds a throwaway localhost HTTP server, which the
+# sandbox denies (PermissionError on socket.bind). It makes no outbound
+# network requests.
+python test_http_layer.py,contains_match,Local-only HTTP layer tests; needs to bind 127.0.0.1

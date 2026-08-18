@@ -69,7 +69,8 @@ def check_cached_url():
         display.set_url(None)
         return None, False
     r = subprocess.run(
-        ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10', url],
+        ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10']
+        + book_hotels.header_args() + [url],
         capture_output=True, text=True,
     )
     status = r.stdout.strip()
@@ -96,7 +97,15 @@ def url_monitor():
     """
     last_solve = time.time()
     while True:
-        url, confirmed = check_cached_url()
+        try:
+            url, confirmed = check_cached_url()
+        except Exception as e:
+            # This thread is the only thing that re-solves the CAPTCHA. If it
+            # dies, booking stops forever while main() keeps rendering the
+            # display and the process looks healthy.
+            url_log(f"{R}URL check error: {e}{X}")
+            time.sleep(URL_CHECK_INTERVAL)
+            continue
         due_for_refresh = time.time() - last_solve >= URL_REFRESH_INTERVAL
 
         if url and (not due_for_refresh or not confirmed):

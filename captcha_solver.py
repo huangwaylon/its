@@ -19,7 +19,7 @@ from pydoll.browser.options import ChromiumOptions
 from pydoll.commands.input_commands import InputCommands
 from pydoll.protocol.input.types import MouseEventType, MouseButton
 
-from config import CALENDAR_URL_CACHE
+from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE
 
 # ── Config ──────────────────────────────────────────────────────────
 DEBUG_DIR = '/tmp/captcha_debug'
@@ -45,6 +45,34 @@ def log(msg):
 def _debug_path(name):
     os.makedirs(DEBUG_DIR, exist_ok=True)
     return os.path.join(DEBUG_DIR, name)
+
+
+def _script_value(result):
+    """Unwrap a CDP Runtime.evaluate result to its plain string value."""
+    if isinstance(result, dict):
+        result = result.get('result', {}).get('result', {}).get('value', '')
+    return result if isinstance(result, str) else ''
+
+
+async def _save_user_agent(tab):
+    """Record Chrome's user agent alongside the session token it minted.
+
+    book_hotels replays the token with curl; sending the UA of the browser
+    that actually solved the CAPTCHA keeps the two from disagreeing.
+    """
+    try:
+        ua = _script_value(await tab.execute_script('return navigator.userAgent'))
+        ua = (ua.splitlines() or [''])[0].strip()
+        if not ua or 'Headless' in ua:
+            log(f'Not recording user agent: {ua or "(empty)"}')
+            return
+        tmp_path = USER_AGENT_CACHE + '.tmp'
+        with open(tmp_path, 'w') as f:
+            f.write(ua + '\n')
+        os.replace(tmp_path, USER_AGENT_CACHE)
+        log(f'Recorded Chrome user agent: {ua}')
+    except Exception as e:
+        log(f'Could not record user agent: {e}')
 
 
 # ── Turnstile solver ────────────────────────────────────────────────
@@ -93,9 +121,7 @@ async def _click_turnstile_checkbox(tab):
         token_result = await tab.execute_script(
             'return document.querySelector(\'input[name="cf-turnstile-response"]\')?.value || ""'
         )
-        token = ''
-        if isinstance(token_result, dict):
-            token = token_result.get('result', {}).get('result', {}).get('value', '')
+        token = _script_value(token_result)
         if token:
             log(f'Turnstile token obtained: {token[:60]}...')
             return token
@@ -163,6 +189,8 @@ async def get_calendar_url():
             log('Navigating to ITS homepage...')
             await tab.go_to('https://as.its-kenpo.or.jp/', timeout=30)
             await asyncio.sleep(3)
+
+            await _save_user_agent(tab)
 
             log('Looking for カレンダーから探す link...')
             await tab.execute_script("""

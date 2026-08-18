@@ -33,6 +33,7 @@ Central configuration file for all tunable constants. Stdlib only (`import os`).
 - Paths: `CALENDAR_URL_CACHE`, `BOOKINGS_FILE`
 - Booking settings: `TARGET_DATES`, `EMAIL`, `NUM_GUESTS`
 - Network tuning: `RETRY_DELAY`, `CURL_MAX_ATTEMPTS`, `URL_CHECK_INTERVAL`, `URL_REFRESH_INTERVAL`
+- HTTP fingerprint: `BROWSER_HEADERS`, `ACCEPT_LANGUAGE`, `FALLBACK_USER_AGENT`, `USER_AGENT_CACHE`
 - Hotel skip list: `SKIP_HOTELS` (with commented-out "keep" list for reference)
 
 Imported by `book_hotels.py`, `captcha_solver.py`, and `main.py`.
@@ -94,12 +95,18 @@ Pure booking logic. Never triggers CAPTCHA solving. All calendar URL access goes
 - `scan_and_book_month(month_str, target_dates, label)` — month scanner loop
 - `book_all_hotels_for_date(target_date, label)` — single-pass booking for one date
 - `book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name)` — books one hotel
-- `curl(cookie_file, method, url, data, headers)` — raw HTTP via curl subprocess, returns `(status, body, location)`
+- `curl(cookie_file, method, url, data, headers)` — raw HTTP via curl subprocess, returns `(status, body, location)`. `body` is a `Response` (a `str` subclass carrying `.headers`, `.location`, `.request`), so call sites treat it as a plain string. Never raises: a transport failure returns `(0, '', None)`, because the scan loop has no `except` around its curl calls.
+- `header_args(headers)` — curl `-H` flags for the merged header set; also used by `main.check_cached_url()`
+- `_merge_headers(headers)` — per-call headers over the browser defaults, case-insensitive. Merging in Python (rather than appending `-H` flags) is required: curl emits every header it is given, so a default plus a per-call `Accept` would send both.
+- `_user_agent()` — reads `USER_AGENT_CACHE`, re-reading on mtime change; falls back to `FALLBACK_USER_AGENT`
+- `redact_url(url)` / `_redact_headers(hdrs)` / `_redact_set_cookie(v)` / `_redact_body(b)` / `_fingerprint(v)` — strip session material from anything written to `debug_responses/`. All fail closed: anything unrecognized is fingerprinted rather than passed through.
 - `ex(html, pat)` — regex group(1) extraction helper
 - `save_booking(date, hotel_name)` — thread-safe append to `bookings.json`
 - `get_booked_hotels(date)` — thread-safe read from `bookings.json`
 - `_read_cached_url()` — reads `CALENDAR_URL_CACHE`, returns URL string or None
 - `_load_bookings()` — private, reads `bookings.json`, must only be called under `_bookings_lock`
+
+**Debug dumps** (`_dump_debug`): on an unexpected response, writes two sibling files to `DEBUG_DIR` — `<stem>.html` (body) and `<stem>.headers.txt` (redacted response headers). The headers are the diagnostic payload: `x-runtime` present means Rails generated the response, absent means Apache/ALB/WAF did; `content-length: 0` with an empty body means the server sent nothing by intent rather than the body being truncated; `set-cookie` shows whether the session was re-issued or reset (`Max-Age=0`). Redaction is a **whitelist** — unrecognized header values are replaced with `[len=N sha256=xxxxxxxx]`, so a future session-bearing header cannot leak by default. Cookie names and attributes are kept, values fingerprinted; the digest prefix is stable, so two dumps can be compared to tell a fresh `_src_session` from a reused one without either file containing the id.
 
 ### `captcha_solver.py` — Cloudflare Turnstile solver
 
@@ -107,6 +114,8 @@ Uses pydoll (CDP-based Chrome automation) to solve Cloudflare Turnstile CAPTCHA.
 
 **Key functions**:
 - `get_calendar_url()` — async. Full flow: launch Chrome via pydoll → navigate to ITS homepage → click "カレンダーから探す" → solve Turnstile → submit form → save resulting URL to `CALENDAR_URL_CACHE`. Returns URL string or None.
+- `_save_user_agent(tab)` — async. Records Chrome's `navigator.userAgent` to `USER_AGENT_CACHE` so the curl requests that replay the session token carry the UA of the browser that minted it. Skips a `Headless` UA.
+- `_script_value(result)` — unwraps a CDP `Runtime.evaluate` result to its plain value
 - `solve_turnstile(tab, max_attempts=3)` — async. Solves Cloudflare Turnstile on the given pydoll tab. Returns cf-turnstile-response token or None.
 - `_click_turnstile_checkbox(tab)` — async. Finds the `.cf-turnstile` widget, calculates checkbox coordinates, dispatches CDP mouse events to click it, then polls for the response token.
 
@@ -133,8 +142,20 @@ Uses pydoll (CDP-based Chrome automation) to solve Cloudflare Turnstile CAPTCHA.
 
 ## Data Files
 
-- `calendar_url_cache.txt` — Current calendar session URL. Written by `captcha_solver.get_calendar_url()`, read by `book_hotels._read_cached_url()` and `main.check_cached_url()`. Contains a URL with an `s=` session token that expires periodically. Path defined once in `config.CALENDAR_URL_CACHE`.
+- `calendar_url_cache.txt` — Current calendar session URL. Written by `captcha_solver.get_calendar_url()`, read by `book_hotels._read_cached_url()` and `main.check_cached_url()`. Contains a URL with an `s=` session token that expires periodically. Path defined once in `config.CALENDAR_URL_CACHE`. **Gitignored** — the `s=` token is a live credential.
+- `chrome_user_agent.txt` — UA of the Chrome that solved the most recent CAPTCHA. Written by `captcha_solver._save_user_agent()`, read by `book_hotels._user_agent()`. Gitignored. Absent until the first solve, in which case `FALLBACK_USER_AGENT` is used.
 - `bookings.json` — Records successful bookings as `{date: [hotel_names]}`. Thread-safe via `_bookings_lock`.
+- `debug_responses/` — Failure dumps from `_dump_debug` (`.html` body + `.headers.txt` redacted headers). **Gitignored**: response bodies embed `s=` tokens in form actions. It was tracked until 2026-08-18; the pre-existing 380 files remain in the history of the (public) GitHub remote. The `.html` body is redacted too (`_redact_body`), since that is the file people actually open.
+
+## Tests
+
+`test_http_layer.py` covers the curl/debug-dump layer — header merging and redaction — against a throwaway localhost HTTP server. Stdlib only; makes no requests to ITS.
+
+```bash
+.venv/bin/python test_http_layer.py
+```
+
+It needs to bind `127.0.0.1`, which the Apple Claude Code sandbox denies; `.claude/apple/tool_allowlist.csv` allowlists it. It also sets `NO_PROXY` for loopback, since a local HTTP proxy would otherwise intercept and rewrite the responses.
 
 ## Configuration (in `config.py`)
 
@@ -147,6 +168,15 @@ Uses pydoll (CDP-based Chrome automation) to solve Cloudflare Turnstile CAPTCHA.
 - `SKIP_HOTELS` — Hotels to never book (commented-out section = "keep" list for reference)
 - `URL_CHECK_INTERVAL` — Seconds between URL validity checks (default 10)
 - `URL_REFRESH_INTERVAL` — Seconds between proactive URL refreshes (default 600)
+- `BROWSER_HEADERS` — Send browser-like headers on the curl requests (default True)
+- `ACCEPT_LANGUAGE` — `Accept-Language` sent when `BROWSER_HEADERS` is on
+- `FALLBACK_USER_AGENT` — UA used only until the first CAPTCHA solve records Chrome's real one
+
+**Deliberately not sent** as browser headers, each for a specific reason:
+- `Origin` — absent means Rails skips its origin check entirely; sending it opts into a check that fails if the app sees `http` behind the ALB, producing an `InvalidAuthenticityToken` redirect indistinguishable from the bug being diagnosed.
+- `Sec-Fetch-*`, `sec-ch-ua`, `Upgrade-Insecure-Requests` — one static value must contradict one of the two request classes made here (navigation form POST vs XHR). A self-inconsistent set is a stronger bot signal than sending none.
+- `Accept-Encoding` / `--compressed` — this curl build has no brotli or zstd, and a content-encoding failure yields an empty body, i.e. it would manufacture more of the exact 0-byte responses under investigation.
+- A mobile UA or a non-Japanese `Accept-Language` — the site may serve a different template, which would break the markup-exact extractors and, worse, the `SKIP_HOTELS` name matching (unmatched names mean booking hotels meant to be skipped).
 
 ## Logging
 

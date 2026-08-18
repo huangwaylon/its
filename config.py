@@ -7,6 +7,7 @@ CALENDAR_URL_CACHE = os.path.join(_DIR, 'calendar_url_cache.txt')
 BOOKINGS_FILE = os.path.join(_DIR, 'bookings.json')
 LOG_FILE = os.path.join(_DIR, 'its_booking.log')
 DEBUG_DIR = os.path.join(_DIR, 'debug_responses')
+USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
@@ -27,6 +28,29 @@ RETRY_DELAY = 20          # seconds between scan retry attempts
 CURL_MAX_ATTEMPTS = 2     # max attempts per curl request (1 = no retry)
 URL_CHECK_INTERVAL = 60   # seconds between URL validity checks
 URL_REFRESH_INTERVAL = 1800  # seconds between proactive URL refreshes
+
+# ── HTTP fingerprint ─────────────────────────────────────────────────
+# The calendar session token is minted in real Chrome by captcha_solver, then
+# replayed by curl. With this off, those replays identify as `curl/8.x`, an
+# obvious mid-session client switch. On, they carry the UA of the Chrome that
+# actually solved the CAPTCHA (recorded to USER_AGENT_CACHE at solve time).
+#
+# Deliberately NOT sent: Origin (absent = Rails skips its origin check
+# entirely), Sec-Fetch-* and sec-ch-ua (a single static value contradicts one
+# of the two request classes we make), and Accept-Encoding (this curl build
+# has no brotli/zstd, and a decode failure yields an empty body — the exact
+# symptom being diagnosed).
+# Note the TLS fingerprint is still curl's, so a browser UA is a UA/TLS
+# mismatch. If the failure rate gets worse after this, flip BROWSER_HEADERS
+# off and compare.
+BROWSER_HEADERS = True
+ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+ACCEPT_LANGUAGE = 'ja-JP,ja;q=0.9'
+# Used only until the first CAPTCHA solve records Chrome's real UA.
+FALLBACK_USER_AGENT = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+)
 
 # ── Hotel skip list ──────────────────────────────────────────────────
 SKIP_HOTELS = [
