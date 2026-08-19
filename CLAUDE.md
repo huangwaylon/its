@@ -36,7 +36,7 @@ govern the design:
 uv run main.py                       # normal operation: solve CAPTCHA, then book forever
 .venv/bin/python captcha_solver.py   # solve only; writes calendar_url_cache.txt
 .venv/bin/python check_env.py        # preflight: .env, IMAP, the confirmation gate
-.venv/bin/python test_http_layer.py      # curl + redaction layer
+.venv/bin/python test_http_layer.py      # curl + dump layer
 .venv/bin/python test_booking_flow.py    # booking flow end to end
 ```
 
@@ -110,10 +110,10 @@ three recorded bans hit the scanner's `calendar_get`, so the risk lives in the *
 cadence, not in booking retries. Budget freed by `SCAN_REUSE_SESSION` is banked, not
 respent.
 
-**Debug dump redaction is a whitelist.** Anything unrecognised becomes
-`[len=N sha256=xxxxxxxx]`, so a future session-bearing header cannot leak by default, and the
-digest is stable so two dumps compare without holding a session id. It covers
-`config.APPLICANT` too, since 申込内容確認画面 echoes those values back.
+**Debug dump redaction is a whitelist** over headers and bodies, not URLs. Anything unrecognised
+becomes `[len=N sha256=xxxxxxxx]`, so a future session-bearing header cannot leak by default. It
+covers `config.APPLICANT`, since 申込内容確認画面 echoes those back — insurance identity, a separate
+concern from the session token.
 
 ### The other modules — their docstrings are the reference
 
@@ -125,18 +125,17 @@ digest is stable so two dumps compare without holding a session id. It covers
   off to Chrome, and again by Chrome on the 申込内容確認画面; **`unmapped` non-empty must never
   submit**; every non-confirmed outcome logs `HUMAN NEEDED`. IMAP timeouts go to
   `IMAP4_SSL(...)`, never `socket.setdefaulttimeout()`.
-- **`browser.py`** owns the process's one Chrome and is **the only thing that can file an
-  application**. Serialised because `captcha_solver._kill_stray_chrome()` reaps by
+- **`browser.py`** owns the one Chrome and is **the only thing that can file an application**.
+  Serialised because `captcha_solver._kill_stray_chrome()` reaps by
   `pgrep -f remote-debugging-port`, matching a filing browser as readily as a solving one — a
   timed-out solve would SIGKILL it between 申込する and 確認. *Every* field `:missing` means a
   consumed link, not a fill bug.
-- **`captcha_solver.py`** runs under a hard `CAPTCHA_TIMEOUT` (it occupies the one thread that
-  can re-mint a session) and **never caches a URL without `calendar_select`** — a non-calendar
-  URL still answers 200, so caching one poisons the cache with a healthy-looking session.
+- **`captcha_solver.py`** runs under a hard `CAPTCHA_TIMEOUT` (it occupies the one thread that can
+  re-mint a session) and **never caches a URL without `calendar_select`** — a non-calendar URL
+  answers 200 too, so caching one poisons the cache with a healthy-looking session.
 
-**The `s=` token** decodes to `service_category_id=1&verify_expires=<10 digits>`, unsigned — two
-fields, one constant, so **any decoded field is equivalent to the token**. Nothing decodes or
-logs it; `redact_url()` fingerprints it.
+**The `s=` token** decodes to `service_category_id=1&verify_expires=<10 digits>`, unsigned. URLs
+are logged and dumped **verbatim** — both files are gitignored and the token expires anyway.
 
 ## Concurrency Model
 
@@ -153,8 +152,9 @@ under `_pending_lock`; one cookie-jar temp file per thread, never shared.
 ## Data Files
 
 All gitignored: `calendar_url_cache.txt` (the `s=` token — a live credential),
-`chrome_user_agent.txt`, `its_booking.log` / `.log.N` (credential-bearing), `debug_responses/`
-(redacted, but tracked until 2026-08-18, so earlier files are in the public remote's history). `holds.json` is `{date: [hotel_names]}` and those are **holds, not reservations** — each
+`chrome_user_agent.txt`, `its_booking.log` / `.log.N` (both carry `s=` tokens verbatim),
+`debug_responses/` (tracked until 2026-08-18, so earlier files are in the public remote's
+history). `holds.json` is `{date: [hotel_names]}` and those are **holds, not reservations** — each
 lapses unless the emailed link was followed, but it is still the only thing preventing
 duplicate applications, so losing it is worse than a crash. `reservations.json` is
 `{date: ["hotel\t申込受付番号"]}`; those **are** confirmed, so an entry means a real
@@ -169,7 +169,7 @@ bind `127.0.0.1`, which the Apple Claude Code sandbox denies, so
 the allowlist matches the whole command string, so chaining one behind `&&` falls through to the
 sandbox. Both clear proxy settings for loopback, since a local proxy would rewrite responses.
 
-- **`test_http_layer.py`** — header merging, UA injection, mobile-UA rejection, redaction.
+- **`test_http_layer.py`** — header merging, UA injection, mobile-UA rejection, dump redaction.
 - **`test_booking_flow.py`** — the part that wins or loses a room. `FakeITS` replays the real
   markup **including the escaped quotes AJAX responses arrive in**, because the extractors are
   markup-exact; `STATE.fail_once` injects the production failures; the calendar serves an

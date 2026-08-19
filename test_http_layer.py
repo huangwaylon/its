@@ -82,42 +82,6 @@ def serve():
 
 # ── Pure-function tests ─────────────────────────────────────────────
 
-def test_redact_url():
-    out = bh.redact_url(f'https://as.its-kenpo.or.jp/apply/empty_new?s={LONG_TOKEN}')
-    check('redact_url keeps host and path', out.startswith('https://as.its-kenpo.or.jp/apply/empty_new?s='), out)
-    check('redact_url drops the token', LONG_TOKEN not in out, out)
-    check('redact_url fingerprints length', f'len={len(LONG_TOKEN)}' in out, out)
-
-    plain = 'https://as.its-kenpo.or.jp/service_category/index'
-    check('redact_url passes through query-less URLs', bh.redact_url(plain) == plain)
-    check('redact_url keeps short values', bh.redact_url('http://x/y?n=1&m=ab') == 'http://x/y?n=1&m=ab')
-    check('redact_url tolerates empty', bh.redact_url('') == '' and bh.redact_url(None) == '')
-
-    # Real ITS path segments must survive intact or the dumps lose their point.
-    # The longest real ITS segment; shorter ones follow, redaction is length-scoped.
-    seg = 'check_apply_service_coma'
-    check('redact_url keeps real path segments',
-          seg in bh.redact_url(f'https://h/calendar_apply/{seg}'))
-
-    # Fail-closed shapes: a token can hide outside a query value.
-    out = bh.redact_url(f'https://h/calendar_apply/index/{LONG_TOKEN}')
-    check('token in path redacted', LONG_TOKEN not in out, out)
-    out = bh.redact_url(f'https://h/x?{LONG_TOKEN}')
-    check('bare query component redacted', LONG_TOKEN not in out, out)
-    out = bh.redact_url(f'https://h/x#{LONG_TOKEN}')
-    check('fragment redacted', LONG_TOKEN not in out, out)
-    out = bh.redact_url('https://user:supersecretpassword@h/x')
-    check('userinfo redacted', 'supersecretpassword' not in out, out)
-
-    # redact_url runs on every request and on every dump, so a malformed URL
-    # must not take out a booking attempt or lose the artifact being written.
-    for bad in ('http://[garbage', 'http://[v1.x]y/z'):
-        try:
-            check(f'malformed URL does not raise: {bad}', isinstance(bh.redact_url(bad), str))
-        except Exception as e:
-            check(f'malformed URL does not raise: {bad}', False, repr(e))
-
-
 def test_redact_set_cookie():
     out = bh._redact_set_cookie('_src_session=deadbeefcafe1234; path=/; HttpOnly; Max-Age=0')
     check('cookie name kept', out.startswith('_src_session='), out)
@@ -160,7 +124,7 @@ def test_redact_headers():
     check('content-length kept', 'content-length: 0' in out, out)
     check('unknown header value redacted', 'should-not-appear' not in out, out)
     check('unknown header name kept', 'x-secret-thing:' in out, out)
-    check('location token redacted', LONG_TOKEN not in out, out)
+    check('location kept verbatim', LONG_TOKEN in out, out)
     check('location path kept', '/service_category/index' in out, out)
     check('cookie value redacted', 'secretvalue' not in out, out)
     check('unparsed line redacted', 'garbage line' not in out and '# unparsed:' in out, out)
@@ -179,8 +143,12 @@ def test_redact_headers():
     check('odd-cased cookie header redacted', 'oddcasing' not in out, out)
     check('odd-cased cookie name preserved', 'SeT-CookIE' in out, out)
 
-    check('malformed location does not raise',
-          'garbage' not in bh._redact_headers('HTTP/1.1 302 Found\r\nlocation: http://[garbage\r\n'))
+    # A malformed Location must not take out the dump being written.
+    try:
+        out = bh._redact_headers('HTTP/1.1 302 Found\r\nlocation: http://[garbage\r\n')
+        check('malformed location does not raise', isinstance(out, str), repr(out))
+    except Exception as e:
+        check('malformed location does not raise', False, repr(e))
 
 
 def test_redact_body():
@@ -357,11 +325,10 @@ def test_curl_against_local_server(srv):
         check('None header absent from the wire', sent.get('x-csrf-token') is None,
               str(sent.get('x-csrf-token')))
 
-        # The request line on the Response must not carry the token.
         RECEIVED.clear()
         _, body, _ = bh.curl(cookie_file, 'GET', f'{base}/ok?s={LONG_TOKEN}')
-        check('request line redacts the s= token', LONG_TOKEN not in body.request, body.request)
-        check('request line keeps the path', '/ok?s=' in body.request, body.request)
+        check('request line records the URL verbatim', f'/ok?s={LONG_TOKEN}' in body.request,
+              body.request)
     finally:
         os.unlink(cookie_file)
 
@@ -391,7 +358,6 @@ def test_dump_debug(srv, tmpdir):
         check('headers file keeps status line', 'HTTP/1.1 302' in text, text)
         check('headers file keeps x-runtime', 'x-runtime: 0.0123' in text.lower(), text)
         check('headers file keeps location path', '/service_category/index' in text, text)
-        check('NO token in headers file', LONG_TOKEN not in text, text)
         check('NO cookie value in headers file', 'deadbeefcafe1234' not in text, text)
         check('NO unknown header value in headers file', 'should-not-appear' not in text, text)
 

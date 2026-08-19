@@ -35,7 +35,7 @@ from config import (
     CONFIRM_MAIL_TIMEOUT, CONFIRM_POLL_INTERVAL, RESERVATIONS_FILE,
 )
 import book_hotels as bh
-from book_hotels import log, R, G, Y, C, B, X, redact_url, BASE
+from book_hotels import log, R, G, Y, C, B, X, BASE
 
 # Replaceable so the tests can inject messages without an IMAP server, exactly as
 # `book_hotels._log_handler` is replaceable. Signature: (since_epoch) -> [str]
@@ -518,7 +518,7 @@ def confirm_from_email(link, target_date, hotel_name, tag):
 
 
 def _run_leg(c, link, target_date, hotel_name, tag, label):
-    log(f"{tag}   {C}Application link: {redact_url(link)}{X}")
+    log(f"{tag}   {C}Application link: {link}{X}")
 
     s, body, loc = c('GET', link)
     if s == 302 and loc and not _rejected(s, body, loc):

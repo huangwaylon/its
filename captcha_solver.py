@@ -23,8 +23,6 @@ from pydoll.protocol.input.types import MouseEventType, MouseButton
 from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE, CAPTCHA_TIMEOUT
 import browser
 from browser import value as _script_value
-# One implementation of "make this safe to write down"; not a cycle.
-from book_hotels import redact_url
 
 MAX_ATTEMPTS = 3          # Turnstile retries before giving up
 TOKEN_POLL_INTERVAL = 2   # seconds between token checks
@@ -213,9 +211,9 @@ async def _solve_and_cache():
         await asyncio.sleep(5)
 
         url = await tab.current_url
-        log(f'On captcha page: {redact_url(url)}')
+        log(f'On captcha page: {url}')
         if 'calendar_apply' not in url:
-            log(f'WARNING: unexpected URL (expected calendar_apply): {redact_url(url)}')
+            log(f'WARNING: unexpected URL (expected calendar_apply): {url}')
 
         token = await solve_turnstile(tab)
         if not token:
@@ -230,12 +228,12 @@ async def _solve_and_cache():
         await asyncio.sleep(5)
 
         calendar_url = await tab.current_url
-        log(f'Calendar URL obtained — {redact_url(calendar_url)}')
+        log(f'Calendar URL obtained — {calendar_url}')
 
         # A non-calendar URL still answers 200, so caching one makes the session
         # look healthy forever and no re-solve ever fires.
         if 'calendar_select' not in (calendar_url or ''):
-            log(f'FAILED: not a calendar URL, not caching: {redact_url(calendar_url)}')
+            log(f'FAILED: not a calendar URL, not caching: {calendar_url}')
             return None
 
         tmp_path = CALENDAR_URL_CACHE + '.tmp'

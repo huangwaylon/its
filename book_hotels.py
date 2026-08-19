@@ -290,7 +290,7 @@ def curl(cookie_file, method, url, data=None, headers=None, retry=True):
         time.sleep(delay)
     loc = re.search(r'location: (.+)', hdrs, re.IGNORECASE)
     location = loc.group(1).strip() if loc else None
-    return status, Response(body, hdrs, location, f'{method} {redact_url(url)}'), location
+    return status, Response(body, hdrs, location, f'{method} {url}'), location
 
 
 def _retry_after(hdrs):
@@ -342,7 +342,7 @@ _SAFE_HEADERS = frozenset("""
     strict-transport-security transfer-encoding upgrade vary via x-cache
     x-content-type-options x-frame-options x-permitted-cross-domain-policies
     x-powered-by x-request-id x-runtime x-xss-protection
-    cf-cache-status cf-ray
+    cf-cache-status cf-ray location
 """.split())
 
 # Set-Cookie attributes, kept verbatim. Anything else in the attribute list is
@@ -352,51 +352,11 @@ _COOKIE_ATTRS = frozenset(
     'expires max-age domain path samesite priority'.split())
 _COOKIE_FLAGS = frozenset('secure httponly partitioned'.split())
 
-_MAX_PLAIN = 12       # query values / fragments longer than this are secrets
-_MAX_SEGMENT = 32     # path segments longer than this are secrets
-                      # (the longest real ITS segment is check_apply_service_coma, 24)
-
-
 def _fingerprint(value):
     """Stable, non-reversible stand-in for a secret. The digest is what lets two
     dumps be compared — same session or a fresh one — without either holding it."""
     digest = hashlib.sha256(value.encode('utf-8', 'replace')).hexdigest()[:8]
     return f'[len={len(value)} sha256={digest}]'
-
-
-def _redact_query_part(pair):
-    key, eq, value = pair.partition('=')
-    if not eq:  # a bare `?TOKEN` component
-        return key if len(key) <= _MAX_PLAIN else _fingerprint(key)
-    return f'{key}={value}' if len(value) <= _MAX_PLAIN else f'{key}={_fingerprint(value)}'
-
-
-def redact_url(url):
-    """Keep scheme, host and path shape; fingerprint anything token-length.
-
-    The path is the diagnostic (`/service_category/index` = session thrown away,
-    `/apply/empty_new` = flow advanced); the `s=` token is a live credential wherever
-    it appears. Never raises — it runs on every request and every dump.
-    """
-    if not url:
-        return ''
-    try:
-        parts = urllib.parse.urlsplit(url)
-    except ValueError:
-        return _fingerprint(url)
-    netloc = parts.netloc
-    if '@' in netloc:  # strip any user:password@
-        netloc = f'[redacted]@{netloc.rpartition("@")[2]}'
-    path = '/'.join(seg if len(seg) <= _MAX_SEGMENT else _fingerprint(seg)
-                    for seg in parts.path.split('/'))
-    query = '&'.join(_redact_query_part(p) for p in parts.query.split('&')) \
-        if parts.query else ''
-    fragment = parts.fragment if len(parts.fragment) <= _MAX_PLAIN \
-        else _fingerprint(parts.fragment)
-    try:
-        return urllib.parse.urlunsplit((parts.scheme, netloc, path, query, fragment))
-    except ValueError:
-        return _fingerprint(url)
 
 
 def _redact_set_cookie(value):
@@ -445,8 +405,6 @@ def _redact_headers(hdrs):
         key, value = name.strip().lower(), value.strip()
         if key == 'set-cookie':
             out.append(f'{name}: {_redact_set_cookie(value)}')
-        elif key == 'location':
-            out.append(f'{name}: {redact_url(value)}')
         elif key in _SAFE_HEADERS:
             out.append(f'{name}: {value}')
         else:
@@ -573,7 +531,7 @@ def _dump_debug(label, step, status, body, via=None, throttle=True):
             if via is not None:
                 f.write('\n# ── preceding response (the redirect that led here) ──\n')
                 f.write(_headers_section(via))
-        loc = redact_url(getattr(via if via is not None else body, 'location', None) or '')
+        loc = getattr(via if via is not None else body, 'location', None) or''
         log(f"  {Y}Debug response saved: {os.path.basename(stem)}"
             f" — location: {loc or '(none)'}{X}")
         _prune_debug_dir()
@@ -739,7 +697,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         title = ex(body, r'<title>(.*?)</title>') or '(no title)'
         snippet = re.sub(r'<[^>]+>', '', body)[:200].strip()
         log(f"{tag}   {R}Missing form params on booking page (status {s}, missing: {', '.join(missing)}){X}")
-        log(f"{tag}   {R}  url: {redact_url(loc)}{X}")
+        log(f"{tag}   {R}  url: {loc}{X}")
         log(f"{tag}   {R}  title: {title}{X}")
         log(f"{tag}   {R}  snippet: {snippet}{X}")
         _dump_debug(label, 'step5_booking_form', s, body)

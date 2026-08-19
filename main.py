@@ -106,9 +106,7 @@ def url_monitor():
                 new_url = asyncio.run(get_calendar_url())
                 if new_url:
                     last_solve = time.time()
-                    # The path, not the token: the URL is a bearer credential.
-                    url_log(f"{G}New URL saved — "
-                            f"{book_hotels.redact_url(new_url)}{X}")
+                    url_log(f"{G}New URL saved — {new_url}{X}")
                     continue
                 url_log(f"{R}CAPTCHA solve failed, will retry next cycle{X}")
             except Exception as e:
