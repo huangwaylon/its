@@ -62,7 +62,14 @@ USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
+    # "2026-09-16",
+    "2026-09-05",
     "2026-09-16",
+    "2026-09-19",
+    "2026-09-20",
+    "2026-09-21",
+    "2026-09-22",
+    "2026-09-26",
 ]
 NUM_GUESTS = '2'
 
@@ -264,7 +271,7 @@ PRIORITY_HOTELS = [
 # Matched after normalizing case, HTML entities, and full-width vs half-width
 # spaces, so an entry cannot silently miss on whitespace alone.
 SKIP_HOTELS = [
-    # "ブルーベリーヒル勝浦",
+    "ブルーベリーヒル勝浦",
     "ホテル日航プリンセス京都",
     "ホテルハーヴェスト南紀田辺",
     "草津温泉　ホテルヴィレッジ",
