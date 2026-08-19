@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """Complete the application that the site's confirmation email points at.
 
-`book_hotels.book_one_hotel` stops at `send_complete`, which is only
-「メール送信を完了しました」 — an email was dispatched. The official 空き照会申込手順
-continues with steps 7-9 (open the emailed URL, fill the form, 申込する → 確認 →
-申込受付番号), and this module is those three. Step 9 is the first irreversible,
-money-bearing action in the program: past it a real reservation exists, carrying a
-real cancellation liability. Two things guard it.
+`book_hotels` stops at `send_complete`, which only dispatches a mail. This module is
+the official steps 7-9 off the link in it — 申込する → 確認 → 申込受付番号 — and step 9
+is the first irreversible, money-bearing action in the program. Two things guard it.
 
-`book_hotels.confirm_allowed()` is consulted immediately before each committing
-POST, not once at the top. Free cancellation ends at D-10, so anything nearer than
-`AUTO_CONFIRM_MIN_DAYS` is left for a person — the room is still held and the email
-still sent, so they can finish it themselves.
+`bh.confirm_allowed()` is consulted immediately before *each* committing POST, not
+once at the top: free cancellation ends at D−10, so anything nearer is left for a
+person, who can finish from the mail themselves because the hold and the mail stand.
 
-And the form is filled from what the form itself declares, never from hard-coded
-field names: `map_fields` matches the live form's own inputs against the values in
-`config.APPLICANT`, and `unmapped` lists anything it could not place. A form we do
-not fully understand is abandoned and dumped for a human rather than submitted
-half-filled against somebody's insurance number.
+And the form is filled from what the form declares, never from hard-coded names:
+`map_fields` matches the live controls against `config.APPLICANT` and `unmapped`
+lists what it could not place. A form we do not fully understand is dumped for a
+human rather than submitted half-filled against somebody's insurance number.
 """
 import email
 import email.utils
@@ -33,9 +28,7 @@ from config import (
     RESERVATIONS_FILE, BROWSER_CONFIRM,
 )
 import book_hotels as bh
-from book_hotels import log, R, G, Y, C, B, X, redact_url
-
-BASE = 'https://as.its-kenpo.or.jp'
+from book_hotels import log, R, G, Y, C, B, X, redact_url, BASE
 
 # Replaceable so the tests can inject messages without an IMAP server, exactly as
 # `book_hotels._log_handler` is replaceable. Signature: (since_epoch) -> [str]
@@ -173,42 +166,33 @@ def wait_for_apply_link(since_epoch, poll=5.0):
                 best = (link, when)
         if best:
             return best[0]
-        if time.monotonic() >= deadline:
+        # Never sleep past the deadline: each poll opens a fresh IMAP connection, so
+        # the interval stays coarse, but overshooting it only wastes the wait.
+        left = deadline - time.monotonic()
+        if left <= 0:
             return None
-        time.sleep(poll)
+        time.sleep(min(poll, left))
 
 
 # ── the applicant form ───────────────────────────────────────────────
 
 _TIMEOUT_TEXT = 'セッションがタイムアウトしました'
 
-# The emailed link's own expiry page, served 200 with no form at all:
-# 「30分が経過しましたので、ご利用のURLは無効となりました。ＩＴＳホームページより最初
-# から空き照会申込手続きをおこなってください。」 That is the step-7 hold lapsing, and it
-# is the one failure on this leg that is certainly not a bug — but it renders as a
-# formless page, so it used to be reported as 'no form' and dumped as
-# step10_no_form, i.e. indistinguishable from the applicant form's markup having
-# changed underneath the parser. Confirmed live on 2026-08-19 against a link 1h27m
-# old.
+# The emailed link's own expiry page — the 30-minute hold lapsing — served 200 with
+# no form at all. The only failure on this leg that is certainly not a bug, but it
+# renders as a formless page, so without this text it is indistinguishable from the
+# applicant form's markup having changed underneath the parser.
 _EXPIRED_TEXT = 'ご利用のURLは無効となりました'
-
-
-def _hold_expired(body):
-    return bool(body) and _EXPIRED_TEXT in body
 
 
 def _rejected(status, body, location):
     """True when a response is the site refusing the session rather than answering.
 
-    Two shapes, and following the redirect hides both: a 302 to
-    `/service_category/index`, and that page's own text once followed. The first
-    live run reported "No confirmation form on 申込内容確認画面" for what was really
-    a rejected POST, because the 302 had already been followed into the top page.
+    Must be checked *before* the redirect is followed: once followed, a rejected POST
+    is indistinguishable from "no confirmation form on 申込内容確認画面".
     """
-    if bh._is_session_dead(status, location):
-        return True
-    return bool(body) and (_TIMEOUT_TEXT in body
-                           or bh._SESSION_DEAD_PATH in (location or ''))
+    return bh._is_session_dead(status, location) or bool(
+        body and _TIMEOUT_TEXT in body)
 
 
 _TAG_RE = re.compile(r'<(input|select|textarea)\b([^>]*)>', re.I)
@@ -231,9 +215,10 @@ def _strip_tags(s):
 def parse_form(html, prefer_action=None):
     """`(action, fields)` for the form most likely to be the applicant form.
 
-    `fields` are dicts of name/type/value/required/label/options. `label` is the
-    visible text immediately before the control, which is how the Japanese field
-    names are recovered — this site labels by proximity, not by `for=`.
+    `fields` are dicts of name/type/value/label/options. `label` is the visible text
+    immediately before the control, which is how the Japanese field names are
+    recovered — this site labels by proximity, not by `for=`. There is deliberately
+    no `required` key: the live form marks nothing required. See `map_fields`.
     """
     forms = re.findall(r'(?is)<form\b([^>]*)>(.*?)</form>', html or '')
     if not forms:
@@ -311,14 +296,14 @@ _MAP_RULES = (
 )
 
 
-def applicant_values(applicant=None, email_address=None):
+def applicant_values(email_address=None):
     """`config.APPLICANT` plus the forms the live page actually asks for.
 
     The captured form wants one combined カナ氏名 box rather than separate 姓/名,
     and the birth date as three dropdowns. Deriving those here keeps `.env` as the
     plain facts off the insurance card.
     """
-    a = dict(APPLICANT if applicant is None else applicant)
+    a = dict(APPLICANT)
     if email_address:
         a.setdefault('email', email_address)
 
@@ -356,17 +341,15 @@ def _match_option(options, wanted):
 def _match_rule(name, label, values):
     """Which `_MAP_RULES` key fills the control called `name`, or None.
 
-    **Field name first, label only as a fallback.** The site labels by proximity
-    and never with `for=`, so `label` is just the 400 characters preceding the
-    control — `apply[month]`'s is the tail of the year dropdown's option list, and
-    `apply[state]`'s is the 〒 field's markup. A label can therefore contain another
-    field's Japanese label, and then 生年月日 gets filled with a カナ氏名.
+    **Field name first, label only as a fallback.** The site labels by proximity and
+    never with `for=`, so `label` is just the 400 characters before the control —
+    `apply[month]`'s is the tail of the year dropdown's options, `apply[state]`'s is
+    the 〒 field's markup. A label can contain another field's Japanese label.
 
-    A field name is structural, so a name match wins even when we have no value for
-    it: the field is reported unmapped and a human finishes the application. With
-    `ITS_ADDR` unset, `apply[address]` used to fall through to the label pass, match
-    the 〒 a few characters before it, and would have submitted the *postcode* as
-    the street address against somebody's insurance record.
+    A name is structural, so a name match wins even with no value configured: the
+    field is reported unmapped and a human finishes it. Otherwise `apply[address]`
+    with `ITS_ADDR` unset falls through to the label pass, matches the 〒 a few
+    characters before it, and submits the *postcode* as the street address.
     """
     for candidate, (name_pat, _label_pat) in _MAP_RULES:
         if re.search(name_pat, name, re.I):
@@ -377,22 +360,20 @@ def _match_rule(name, label, values):
     return None
 
 
-def map_fields(fields, applicant=None, email_address=None):
+def map_fields(fields, email_address=None):
     """`(post_data, unmapped)` — fill what we recognise, report what we do not.
 
-    **`required` attributes cannot be trusted here.** The live applicant form marks
-    nothing required: no `required` attribute anywhere and not one occurrence of
-    「必須」. A guard keyed on that attribute reported "15 fields, 0 unmapped" for a
-    form in which 事業所名, the birth month and day, and the whole address were
-    blank, and the submission was rejected.
+    **`required` cannot be trusted here**: the live form marks nothing required and
+    never says 「必須」, so a guard keyed on it reported "15 fields, 0 unmapped" for a
+    form with 事業所名, the birth month and day and the whole address blank.
 
-    So the rule is the other way round: any *visible* control we could neither fill
-    from `applicant` nor leave at a server-provided value is unmapped, and a caller
-    finding `unmapped` non-empty must not submit. These values are 資格認証のキー,
-    checked against the insurance record, so a partly-filled form is not a near
-    miss — it is a rejected application and a wasted room hold.
+    The rule is the other way round: any visible control we could neither fill from
+    `APPLICANT` nor leave at a server-provided value is unmapped, and **a caller
+    finding `unmapped` non-empty must not submit.** These are 資格認証のキー, checked
+    against the insurance record, so a half-filled form is a rejected application and
+    a wasted hold, not a near miss.
     """
-    a = applicant_values(applicant, email_address)
+    a = applicant_values(email_address)
     post, unmapped = {}, []
 
     for f in fields:
@@ -433,8 +414,8 @@ def map_fields(fields, applicant=None, email_address=None):
 # ── committing the application ───────────────────────────────────────
 
 def _save_reservation(target_date, hotel_name, receipt):
-    """Record a confirmed reservation. Separate from bookings.json, which holds
-    *holds*; an entry here means a real cancellation liability exists."""
+    """Record a confirmed reservation. Separate from holds.json: an entry here
+    means a real cancellation liability exists."""
     bh.save_booking(target_date, f'{hotel_name}\t{receipt}'.strip(),
                     path=RESERVATIONS_FILE)
 
@@ -442,21 +423,17 @@ def _save_reservation(target_date, hotel_name, receipt):
 _RECEIPT_RE = re.compile(r'申込受付番号[^0-9A-Za-z]{0,12}([0-9A-Za-z-]{4,})')
 
 # Replaceable so the tests can exercise the fallback without launching Chrome, the
-# same way `_mail_source` stands in for a mailbox. Signature matches
-# `browser_apply.submit`.
+# same way `_mail_source` stands in for a mailbox. Signature matches `browser.submit`.
 _browser_submit = None
 
 
 def _submit_in_browser(link, post, target_date, hotel_name, tag):
     """Finish the application in real Chrome after curl's 申込する was refused.
 
-    Everything the curl path does after this point happens inside the browser, so
-    this returns a final `(status, detail)` and records the reservation itself.
-
-    The hidden fields are dropped: `_method` and `authenticity_token` are already in
-    the DOM, and the ones we scraped belong to a *different* page load. Re-writing
-    them over the live values is how a browser submit would fail for a reason that
-    looks like the bug it is working around.
+    Everything the curl path does past this point happens in the browser, so this
+    returns the final `(status, detail)` and records the reservation itself. The
+    hidden fields are dropped: `_method` and `authenticity_token` are already in the
+    DOM, and the scraped copies belong to a *different* page load.
     """
     if not BROWSER_CONFIRM:
         log(f"{tag}   {Y}BROWSER_CONFIRM is off, so 申込する ends here{X}")
@@ -465,14 +442,14 @@ def _submit_in_browser(link, post, target_date, hotel_name, tag):
     submit = _browser_submit
     if submit is None:
         try:
-            import browser_apply
+            import browser
         except Exception as e:
             # pydoll missing or broken. The hold and the mail still stand, so this
             # is a degraded outcome, not a crash.
-            log(f"{tag}   {R}Cannot load browser_apply ({e!r}); "
+            log(f"{tag}   {R}Cannot load browser ({e!r}); "
                 f"申込する cannot be retried in a browser{X}")
             return 'failed', 'apply post session rejected (no browser available)'
-        submit = browser_apply.submit
+        submit = browser.submit
 
     values = {k: v for k, v in post.items()
               if k not in ('_method', 'authenticity_token')}
@@ -493,12 +470,10 @@ def _submit_in_browser(link, post, target_date, hotel_name, tag):
 def parse_receipt(body):
     """The 申込受付番号 on 申込完了画面, or ''.
 
-    Searched against the tag-stripped text, not the markup. The live page renders it
-    as `<strong>申込受付番号：  10287126</strong>` — label and number inside one tag,
-    which the pattern happens to read correctly. One tag between the two, which any
-    template change could introduce, and `[0-9A-Za-z-]{4,}` matches the *tag name*:
-    the receipt recorded in reservations.json becomes `strong`, and the only record
-    that a real reservation exists carries a made-up number.
+    Searched against the **tag-stripped** text. The live page is
+    `<strong>申込受付番号：  10287126</strong>` — one tag around both — so a raw-markup
+    regex works by luck; one tag between them and `[0-9A-Za-z-]{4,}` captures
+    `strong`, writing a made-up number into the only record that a reservation exists.
     """
     text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', body or ''))
     m = _RECEIPT_RE.search(text)
@@ -544,7 +519,7 @@ def confirm_from_email(c, target_date, hotel_name, tag):
         log(f"{tag}   {R}Application page returned {s}{X}")
         bh._dump_debug(label, 'step10_apply_page', s, body)
         return 'failed', f'apply page {s}'
-    if _hold_expired(body):
+    if _EXPIRED_TEXT in body:
         # Not a parser problem and not worth a dump: the 30 minutes ran out.
         log(f"{tag}   {Y}The 30-minute hold expired before the mail was "
             f"followed — the site has released {hotel_name}{X}")
@@ -581,10 +556,8 @@ def confirm_from_email(c, target_date, hotel_name, tag):
     if s == 302 and loc and not _rejected(s, body, loc):
         s, body, loc = c('GET', loc)
     if _rejected(s, body, loc):
-        # Distinguished from "no form on the page", which is what this looked like
-        # on the first live run once the 302 had been followed. The guard runs before
-        # the body is read because the 302 is served whatever we post — see Finding 6
-        # in docs/BOOKING_VIA_CURL.md for the full matrix and the open question of
+        # The 302 is served whatever we post — the site refuses the *client*, not
+        # the request. docs/SITE.md §5 has the bisect matrix and the open question of
         # whether it reproduces off an intercepting HTTPS proxy.
         log(f"{tag}   {R}申込する was rejected: the site dropped the session "
             f"(Rails 302 to /service_category/index, independent of what we "

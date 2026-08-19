@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """Check the .env setup before it matters.
 
-Every value here is validated by the ITS site at the moment it matters least: mid
-booking, inside a 30-minute room hold, with a contested slot on the line. So check
-them at your desk instead.
+The ITS site validates every value here at the moment it matters least: mid booking,
+inside a 30-minute hold, with a contested slot on the line. Check them at your desk.
 
     .venv/bin/python check_env.py
 
-Prints no secrets. The app password is only ever reported as a length, and no
-message body is read — only how many matching messages exist and when the newest
-one arrived.
+Prints no secrets — the app password only ever as a length, and no message body.
 """
 import re
-import socket
 import sys
 import unicodedata
 from datetime import date
@@ -23,25 +19,21 @@ OK, WARN, BAD = '\033[92m', '\033[93m', '\033[91m'
 DIM, X = '\033[2m', '\033[0m'
 
 problems = []
-warnings = []
 
 
 def _pad(text, width):
-    """Left-justify by display width, not character count.
-
-    Every label here is half Japanese, and 記号 occupies four columns for two
-    characters, so `str.ljust` leaves the output ragged.
-    """
+    """Left-justify by display width, not character count: 記号 occupies four
+    columns for two characters, so `str.ljust` leaves the output ragged."""
     cells = sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text)
     return text + ' ' * max(0, width - cells)
 
 
-def report(label, value, ok, detail='', fatal=True):
-    mark = f'{OK}ok{X}' if ok else (f'{BAD}FAIL{X}' if fatal else f'{WARN}warn{X}')
+def report(label, value, ok, detail=''):
+    mark = f'{OK}ok{X}' if ok else f'{BAD}FAIL{X}'
     print(f'  [{mark}] {_pad(label, 24)} {value}'
           + (f'  {DIM}{detail}{X}' if detail else ''))
     if not ok:
-        (problems if fatal else warnings).append(f'{label}: {detail or "not set"}')
+        problems.append(f'{label}: {detail or "not set"}')
 
 
 # Full-width katakana, plus the long vowel mark and the middle dot used in names.
@@ -161,7 +153,7 @@ def check_imap_login():
             report('mailbox', box.strip('"'), typ == 'OK',
                    '' if typ == 'OK' else 'could not select a mailbox')
 
-    except (OSError, socket.timeout) as e:
+    except OSError as e:
         report('connection', f'{config.IMAP_HOST}:{config.IMAP_PORT}', False,
                f'{type(e).__name__}: {e} — IMAP disabled, or the network blocks 993')
 
@@ -175,7 +167,7 @@ def check_gate():
         print(f'  {WARN}TARGET_DATES is empty{X}')
     for d in sorted(config.TARGET_DATES):
         left = bh.days_until(d)
-        ok, why = bh.confirm_allowed(d)
+        ok, _why = bh.confirm_allowed(d)
         if left is not None and left < 0:
             verdict = f'{DIM}past{X}'
         elif ok:
@@ -197,10 +189,6 @@ def main():
         print(f'{BAD}{len(problems)} problem(s) to fix:{X}')
         for p in problems:
             print(f'  - {p}')
-    if warnings:
-        print(f'{WARN}{len(warnings)} warning(s):{X}')
-        for w in warnings:
-            print(f'  - {w}')
     if not problems:
         print(f'{OK}Ready.{X}')
     return 1 if problems else 0

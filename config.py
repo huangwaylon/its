@@ -55,7 +55,7 @@ def _load_dotenv(path):
 _load_dotenv(os.path.join(_DIR, '.env'))
 
 CALENDAR_URL_CACHE = os.path.join(_DIR, 'calendar_url_cache.txt')
-BOOKINGS_FILE = os.path.join(_DIR, 'bookings.json')
+HOLDS_FILE = os.path.join(_DIR, 'holds.json')
 LOG_FILE = os.path.join(_DIR, 'its_booking.log')
 DEBUG_DIR = os.path.join(_DIR, 'debug_responses')
 USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
@@ -102,7 +102,7 @@ BOOK_RETRY_DELAY = 2.0    # seconds before re-attempting a date
 # Rails authenticity_token is valid for the life of the session — validation is a
 # stateless unmask against session[:_csrf_token], with no nonce store — so the
 # GET is skippable while the session lasts, halving the steady-state scan to one
-# request. See Finding 1 in docs/BOOKING_VIA_CURL.md.
+# request. See docs/SITE.md §4.
 #
 # Reuse is self-limiting: a rejected token is detected by response *shape*, the
 # tokens are re-minted in the same cycle, and after this many consecutive
@@ -164,7 +164,7 @@ CONFIRM_MAIL_TIMEOUT = 180     # seconds to poll IMAP for the message
 #
 # `POST /apply/confirm` answers 302 → /service_category/index for curl whatever it
 # sends, while the identical POST from Chrome succeeds: the site refuses the
-# *client*, not the request. Finding 6 in docs/BOOKING_VIA_CURL.md has the matrix
+# *client*, not the request. docs/SITE.md §5 has the bisect matrix
 # and the open question — that measurement was taken through an intercepting HTTPS
 # proxy, so check whether it reproduces off one. curl is still tried first, so if
 # the cause is environmental this simply stops firing.

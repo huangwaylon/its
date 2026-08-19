@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Entry point — starts booking threads and a URL monitor.
+"""Entry point — one scanner thread per target month, plus a URL monitor.
 
-- Booking threads (1 per month) run indefinitely, reading the calendar URL
-  from calendar_url_cache.txt each cycle. They only book; never trigger CAPTCHA.
-- URL monitor thread runs indefinitely, checking the cached URL validity.
-  If invalid or missing, it solves the CAPTCHA synchronously (blocking until done).
+Scanners only book; they never trigger a CAPTCHA. The URL monitor is the only thing
+that can re-mint a session, and it solves synchronously in its own thread, which is
+what prevents overlapping solves without a lock. A watchdog restarts either.
 
 Usage:
     uv run main.py
@@ -21,11 +20,12 @@ from datetime import datetime
 import captcha_solver
 from captcha_solver import get_calendar_url
 from config import (
-    CALENDAR_URL_CACHE, URL_CHECK_INTERVAL, URL_REFRESH_INTERVAL, LOG_FILE,
+    URL_CHECK_INTERVAL, URL_REFRESH_INTERVAL, LOG_FILE,
     LOG_MAX_BYTES, LOG_BACKUPS, TARGET_DATES, EMAIL, PRIORITY_HOTELS,
 )
 import book_hotels
 from book_hotels import R, G, Y, C, B, X
+from book_hotels import log as url_log
 
 _ANSI_RE = re.compile(r'\033\[[0-9;]*m')
 
@@ -34,18 +34,6 @@ MONTH_ABBR = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
 
 # How often the watchdog checks that every worker thread is still alive.
 WATCHDOG_INTERVAL = 30
-
-_sink = None  # set in main(); prints to stdout and appends to LOG_FILE
-
-
-def url_log(msg=''):
-    """Log a URL-monitor message to whichever sink main() wired up."""
-    formatted = f'{datetime.now().strftime("%H:%M:%S")} {msg}'
-    if _sink:
-        _sink(formatted)
-    else:
-        # Before main() runs, and in captcha_solver.py's standalone mode.
-        print(_ANSI_RE.sub('', formatted), flush=True)
 
 
 def group_dates_by_month(dates):
@@ -58,18 +46,14 @@ def group_dates_by_month(dates):
 
 
 def check_cached_url():
-    """Read calendar_url_cache.txt and test if the URL is still valid (HTTP 200).
+    """Test whether the cached calendar URL is still valid (HTTP 200).
 
     Returns (url, confirmed_valid):
-      - (url, True)  — server returned 200, session confirmed active
-      - (url, False) — server error (5xx) or connection failure; session assumed valid
+      - (url, True)  — 200, session confirmed active
+      - (url, False) — 5xx or connection failure; session assumed valid
       - (None, False) — no cached URL, or session expired (302, 4xx, etc.)
     """
-    try:
-        with open(CALENDAR_URL_CACHE) as f:
-            url = f.read().strip()
-    except OSError:
-        return None, False
+    url = book_hotels._read_cached_url()
     if not url:
         return None, False
     try:
@@ -80,9 +64,9 @@ def check_cached_url():
         )
         status = r.stdout.strip()
     except Exception as e:
-        # Treated as a server-side blip, not an expired session: a local failure
-        # to run curl says nothing about whether the token is still good, and
-        # discarding a working URL over it would force a needless CAPTCHA solve.
+        # A server-side blip, not an expired session: a local failure to run curl
+        # says nothing about the token, and discarding a working URL over it would
+        # force a needless CAPTCHA solve.
         url_log(f"{Y}URL check: could not run curl ({e!r}), will retry{X}")
         return url, False
     if status == '200':
@@ -96,12 +80,11 @@ def check_cached_url():
 
 
 def url_monitor():
-    """Monitor the calendar URL cache and solve CAPTCHA when needed.
+    """Monitor the calendar URL cache and solve the CAPTCHA when needed.
 
-    Runs forever in its own thread. Proactively refreshes the URL every
-    URL_REFRESH_INTERVAL seconds, even if the current URL is still valid.
-    Because the CAPTCHA solve is synchronous, it naturally blocks
-    re-triggering while a solve is in progress.
+    Runs forever. Proactively re-solves every URL_REFRESH_INTERVAL even when the
+    current URL still works. The solve is synchronous, which is what blocks a second
+    one from starting without needing a lock.
     """
     last_solve = time.time()
     while True:
@@ -114,11 +97,9 @@ def url_monitor():
                 continue
 
             if url:
-                # A proactive refresh replaces a token that is still working.
-                # Bookings hold the old one across a ~7-request chain, so
-                # swapping it underneath them risks losing a slot to housekeeping.
-                # A repair (url is None) is not deferred - there is nothing left
-                # to protect.
+                # A proactive refresh replaces a token that still works, and a
+                # booking holds the old one across a ~10-request chain. A repair
+                # (url is None) is never deferred — nothing is left to protect.
                 active = book_hotels.active_bookings()
                 if active:
                     url_log(f"{Y}Proactive refresh deferred "
@@ -146,9 +127,9 @@ def url_monitor():
                 last_solve = time.time()
 
         except Exception as e:
-            # This thread is the only thing that re-solves the CAPTCHA. If it
-            # dies, booking stops forever while the process still looks healthy.
-            # The watchdog would restart it, but not losing it is cheaper.
+            # The only thread that can re-solve the CAPTCHA. If it dies, booking
+            # stops forever while the process still looks healthy; the watchdog
+            # would restart it, but not losing it is cheaper.
             url_log(f"{R}URL monitor error: {e!r}{X}")
 
         time.sleep(URL_CHECK_INTERVAL)
@@ -157,8 +138,7 @@ def url_monitor():
 def _rotate_log():
     """Roll LOG_FILE over once it passes LOG_MAX_BYTES, keeping LOG_BACKUPS.
 
-    The last unattended run wrote 9 MB in six days with no bound at all. Rotation
-    happens at startup rather than mid-write so no log handler needs a lock.
+    At startup rather than mid-write, so no log handler needs a lock.
     """
     try:
         if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) < LOG_MAX_BYTES:
@@ -175,10 +155,10 @@ def _rotate_log():
 class _Worker:
     """A named restartable daemon thread.
 
-    Every worker here is a daemon and main() never joins any of them, so a thread
-    that dies leaves the process running with one fewer month being scanned - or,
-    for the URL monitor, with nothing left that can re-mint a session. Both
-    failures are invisible without a watchdog.
+    Every worker is a daemon and main() never joins any of them, so a thread that
+    dies leaves the process running with one fewer month scanned — or, for the URL
+    monitor, with nothing left that can re-mint a session. Both are invisible
+    without a watchdog.
     """
 
     def __init__(self, name, target, args=()):
@@ -213,8 +193,6 @@ def watchdog(workers):
 
 
 def main():
-    global _sink
-
     _rotate_log()
     log_file = open(LOG_FILE, 'a', encoding='utf-8')
     log_file.write(f'\n=== Session started {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ===\n')
@@ -229,7 +207,6 @@ def main():
         except OSError:
             pass  # a full disk must not take down a booking thread
 
-    _sink = sink
     book_hotels._log_handler = sink
     captcha_solver._log_handler = sink
     url_log("=" * 60)

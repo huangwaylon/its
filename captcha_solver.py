@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Cloudflare Turnstile solver using pydoll (CDP) browser automation.
+"""Cloudflare Turnstile solver — real Chrome over CDP, via pydoll.
+
+Playwright's bundled Chromium trips the bot detection; headless is rejected outright.
+See docs/SITE.md §6 for what the site does and why the click is where it is.
+
+`_click_turnstile_checkbox` and `minimise` reach for CDP through the **private**
+`tab._connection_handler`, because mouse events must cross a cross-origin iframe
+boundary, which a DOM click cannot. A pydoll upgrade can break those two call sites.
 
 Usage:
-    # Solve ITS captcha and save calendar URL
-    .venv/bin/python captcha_solver.py
-
-    # As module
-    from captcha_solver import get_calendar_url
-    url = await get_calendar_url()
+    .venv/bin/python captcha_solver.py       # solve, cache the calendar URL
 """
 
 import asyncio
@@ -16,26 +18,24 @@ import signal
 import subprocess
 import time
 
-from pydoll.browser.chromium.chrome import Chrome
-from pydoll.browser.options import ChromiumOptions
 from pydoll.commands.input_commands import InputCommands
 from pydoll.protocol.input.types import MouseEventType, MouseButton
 
 from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE, CAPTCHA_TIMEOUT
-import chrome_guard
+import browser
+from browser import value as _script_value
 # One implementation of "make this safe to write down"; not a cycle.
 from book_hotels import redact_url
 
-# ── Config ──────────────────────────────────────────────────────────
-SCREENSHOT_DIR = '/tmp/captcha_debug'   # failure screenshots, not config.DEBUG_DIR
 MAX_ATTEMPTS = 3          # Turnstile retries before giving up
 TOKEN_POLL_INTERVAL = 2   # seconds between token checks
 TOKEN_TIMEOUT = 30        # max seconds to wait for token after click
+                          # MAX_ATTEMPTS * TOKEN_TIMEOUT must fit in CAPTCHA_TIMEOUT
 
 # ── Logging ─────────────────────────────────────────────────────────
 _t0 = time.time()
 
-_log_handler = None  # Set externally for display routing
+_log_handler = None  # main() routes this to stdout + LOG_FILE
 
 
 def log(msg):
@@ -47,23 +47,11 @@ def log(msg):
         print(formatted, flush=True)
 
 
-def _debug_path(name):
-    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-    return os.path.join(SCREENSHOT_DIR, name)
-
-
-def _script_value(result):
-    """Unwrap a CDP Runtime.evaluate result to its plain string value."""
-    if isinstance(result, dict):
-        result = result.get('result', {}).get('result', {}).get('value', '')
-    return result if isinstance(result, str) else ''
-
-
 async def _save_user_agent(tab):
     """Record Chrome's user agent alongside the session token it minted.
 
-    book_hotels replays the token with curl; sending the UA of the browser
-    that actually solved the CAPTCHA keeps the two from disagreeing.
+    book_hotels replays the token with curl; sending the UA of the browser that
+    actually solved the CAPTCHA keeps the two from disagreeing.
     """
     try:
         ua = _script_value(await tab.execute_script('return navigator.userAgent'))
@@ -139,18 +127,18 @@ async def _click_turnstile_checkbox(tab):
     return None
 
 
-async def solve_turnstile(tab, max_attempts=MAX_ATTEMPTS):
+async def solve_turnstile(tab):
     """Solve Cloudflare Turnstile on the given pydoll tab.
 
     Returns the cf-turnstile-response token string, or None on failure.
     """
-    for attempt in range(1, max_attempts + 1):
-        log(f'═══ Turnstile attempt {attempt}/{max_attempts} ═══')
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        log(f'═══ Turnstile attempt {attempt}/{MAX_ATTEMPTS} ═══')
         token = await _click_turnstile_checkbox(tab)
         if token:
             return token
 
-        if attempt < max_attempts:
+        if attempt < MAX_ATTEMPTS:
             # Reload the page to get a fresh Turnstile widget
             log('Reloading page for fresh Turnstile challenge...')
             await tab.refresh()
@@ -166,12 +154,12 @@ async def get_calendar_url():
     """Solve the CAPTCHA and cache a fresh calendar URL, under a hard deadline.
 
     The solve occupies the one thread that can re-mint a session, so an untimed
-    Chrome hang would stop all booking behind a healthy-looking display. Serialised
-    against `browser_apply`'s Chrome — see `chrome_guard`.
+    Chrome hang would stop all booking behind a healthy-looking process. Serialised
+    against the application-filing browser — see `browser`.
 
     Returns the URL string, or None on failure or timeout.
     """
-    with chrome_guard.chrome() as owned:
+    with browser.chrome() as owned:
         if not owned:
             log('Chrome is busy filing an application; deferring this solve')
             return None
@@ -191,8 +179,9 @@ def _kill_stray_chrome():
     """Kill Chrome processes left behind by an abandoned solve.
 
     A cancelled `async with Chrome(...)` cannot always finish pydoll's teardown, and
-    each orphan keeps a profile directory and a few hundred MB of RSS. Matched
-    narrowly on pydoll's launch flags, so a user's own Chrome is never a candidate.
+    each orphan keeps a profile directory and a few hundred MB of RSS. Only safe
+    under the `browser.chrome()` lock: the match is on pydoll's launch flags, which
+    an application-filing browser carries too.
     """
     try:
         out = subprocess.run(['pgrep', '-f', 'remote-debugging-port'],
@@ -209,99 +198,65 @@ def _kill_stray_chrome():
 
 
 async def _solve_and_cache():
-    """Navigate ITS site, solve Turnstile CAPTCHA, click 次へ, and save the calendar URL."""
-    options = ChromiumOptions()
-    options.headless = False
-    options.add_argument('--no-sandbox')
-    options.add_argument('--lang=ja-JP')
-    options.add_argument('--window-size=1280,1600')
-
+    """Navigate ITS, solve Turnstile, click 次へ, and cache the calendar URL."""
     log('Starting Chrome browser via pydoll...')
-    async with Chrome(options=options) as browser:
-        tab = await browser.start()
+    async with browser.launch() as chrome:
+        tab = await chrome.start()
+        await browser.minimise(tab)
 
-        try:
-            # Minimize window via CDP - hidden but still renders normally
-            try:
-                win = await tab._connection_handler.execute_command(
-                    {'method': 'Browser.getWindowForTarget', 'params': {}}
-                )
-                window_id = win.get('result', win).get('windowId')
-                if window_id:
-                    await tab._connection_handler.execute_command({
-                        'method': 'Browser.setWindowBounds',
-                        'params': {
-                            'windowId': window_id,
-                            'bounds': {'windowState': 'minimized'},
-                        },
-                    })
-                    log('Browser window minimized via CDP')
-            except Exception as e:
-                log(f'Could not minimize window: {e}')
+        log('Navigating to ITS homepage...')
+        await tab.go_to('https://as.its-kenpo.or.jp/', timeout=30)
+        await asyncio.sleep(3)
 
-            log('Navigating to ITS homepage...')
-            await tab.go_to('https://as.its-kenpo.or.jp/', timeout=30)
-            await asyncio.sleep(3)
+        await _save_user_agent(tab)
 
-            await _save_user_agent(tab)
-
-            log('Looking for カレンダーから探す link...')
-            await tab.execute_script("""
-                const links = document.querySelectorAll('a');
-                for (const a of links) {
-                    if (a.textContent.includes('カレンダーから探す')) {
-                        a.click();
-                        return true;
-                    }
+        log('Looking for カレンダーから探す link...')
+        await tab.execute_script("""
+            const links = document.querySelectorAll('a');
+            for (const a of links) {
+                if (a.textContent.includes('カレンダーから探す')) {
+                    a.click();
+                    return true;
                 }
-                return false;
-            """)
-            await asyncio.sleep(5)
+            }
+            return false;
+        """)
+        await asyncio.sleep(5)
 
-            url = await tab.current_url
-            log(f'On captcha page: {redact_url(url)}')
+        url = await tab.current_url
+        log(f'On captcha page: {redact_url(url)}')
+        if 'calendar_apply' not in url:
+            log(f'WARNING: unexpected URL (expected calendar_apply): {redact_url(url)}')
 
-            if 'calendar_apply' not in url:
-                log(f'WARNING: unexpected URL (expected calendar_apply): '
-                    f'{redact_url(url)}')
-                await tab.take_screenshot(path=_debug_path('unexpected_url.png'))
+        token = await solve_turnstile(tab)
+        if not token:
+            log('FAILED to solve Turnstile')
+            return None
 
-            token = await solve_turnstile(tab)
-            if not token:
-                log('FAILED to solve Turnstile')
-                await tab.take_screenshot(path=_debug_path('turnstile_failed.png'))
-                return None
+        log('Turnstile solved! Submitting form...')
+        await tab.execute_script("""
+            const btn = document.querySelector('input[value="次へ"]');
+            if (btn) { btn.disabled = false; btn.form.submit(); }
+        """)
+        await asyncio.sleep(5)
 
-            log('Turnstile solved! Submitting form...')
-            await tab.execute_script("""
-                const btn = document.querySelector('input[value="次へ"]');
-                if (btn) { btn.disabled = false; btn.form.submit(); }
-            """)
-            await asyncio.sleep(5)
+        calendar_url = await tab.current_url
+        log(f'Calendar URL obtained — {redact_url(calendar_url)}')
 
-            calendar_url = await tab.current_url
-            # The decoded token fields, never the URL itself.
-            log(f'Calendar URL obtained — {redact_url(calendar_url)}')
+        # Refuse to cache anything that is not a calendar session: a non-calendar
+        # URL still answers 200, so check_cached_url would call the session healthy
+        # and no re-solve would ever fire.
+        if 'calendar_select' not in (calendar_url or ''):
+            log(f'FAILED: not a calendar URL, not caching: {redact_url(calendar_url)}')
+            return None
 
-            # Refuse to cache anything that is not a calendar session: a
-            # non-calendar URL still answers 200, so check_cached_url would call
-            # the session healthy and no re-solve would ever fire.
-            if 'calendar_select' not in (calendar_url or ''):
-                log(f'FAILED: not a calendar URL, not caching: '
-                    f'{redact_url(calendar_url)}')
-                await tab.take_screenshot(path=_debug_path('not_calendar.png'))
-                return None
+        tmp_path = CALENDAR_URL_CACHE + '.tmp'
+        with open(tmp_path, 'w') as f:
+            f.write(calendar_url + '\n')
+        os.replace(tmp_path, CALENDAR_URL_CACHE)
+        log(f'Saved to {CALENDAR_URL_CACHE}')
 
-            tmp_path = CALENDAR_URL_CACHE + '.tmp'
-            with open(tmp_path, 'w') as f:
-                f.write(calendar_url + '\n')
-            os.replace(tmp_path, CALENDAR_URL_CACHE)
-            log(f'Saved to {CALENDAR_URL_CACHE}')
-
-            return calendar_url
-
-        finally:
-            log('Browser closed')
+        return calendar_url
 
 
 if __name__ == '__main__':

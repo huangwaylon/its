@@ -6,6 +6,7 @@ cycle. If the URL is missing or expired, it simply waits for the next cycle
 (the URL monitor in main.py handles CAPTCHA solving separately).
 """
 import subprocess, re, urllib.parse, os, json, tempfile, threading, time, hashlib
+import contextlib
 import html as _html
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +14,7 @@ from datetime import datetime, date
 
 from config import (
     CALENDAR_URL_CACHE, EMAIL, NUM_GUESTS,
-    BOOKINGS_FILE, RETRY_DELAY, CURL_MAX_ATTEMPTS, SKIP_HOTELS,
+    HOLDS_FILE, RETRY_DELAY, CURL_MAX_ATTEMPTS, SKIP_HOTELS,
     DEBUG_DIR, USER_AGENT_CACHE, BROWSER_HEADERS, ACCEPT, ACCEPT_LANGUAGE,
     FALLBACK_USER_AGENT, PRIORITY_HOTELS,
     CURL_RETRY_BACKOFF, CURL_RETRY_BACKOFF_MAX, CURL_TIMEOUT,
@@ -37,9 +38,9 @@ B = '\033[1m'    # bold
 X = '\033[0m'    # reset
 
 
-_log_handler = None  # Set externally for display routing
+_log_handler = None  # main() routes this to stdout + LOG_FILE
 
-def log(msg=''):
+def log(msg):
     ts = datetime.now().strftime('%H:%M:%S')
     formatted = f'{ts} {msg}'
     if _log_handler:
@@ -48,12 +49,12 @@ def log(msg=''):
         print(formatted, flush=True)
 
 
-# Thread-safe bookings access
+# Thread-safe holds access
 _bookings_lock = threading.Lock()
 
 # Number of dates currently mid-booking. main.py's URL monitor reads this to hold
 # off a *proactive* CAPTCHA refresh: a booking holds one `s=` token across a
-# ~7-request chain, and replacing it underneath is a needless way to lose a slot.
+# ~10-request chain, and replacing it underneath is a needless way to lose a slot.
 _active_lock = threading.Lock()
 _active_bookings = 0
 
@@ -63,25 +64,24 @@ def active_bookings():
         return _active_bookings
 
 
-class _BookingInFlight:
-    def __enter__(self):
-        global _active_bookings
-        with _active_lock:
-            _active_bookings += 1
-
-    def __exit__(self, *exc):
-        global _active_bookings
+@contextlib.contextmanager
+def _booking_in_flight():
+    global _active_bookings
+    with _active_lock:
+        _active_bookings += 1
+    try:
+        yield
+    finally:
         with _active_lock:
             _active_bookings -= 1
-        return False
 
 
 def _read_cached_url():
     """Read the current calendar URL from cache file.
 
-    Never raises. A scanner's loop body has no `except` around this, and an
-    OSError here (not just a missing file) would kill the thread for that month
-    permanently while the rest of the process went on looking healthy.
+    Never raises. A scanner's loop body has no `except` around this, and an OSError
+    here — not just a missing file — would kill that month's thread permanently while
+    the rest of the process went on looking healthy.
     """
     try:
         with open(CALENDAR_URL_CACHE) as f:
@@ -94,13 +94,10 @@ def _read_cached_url():
 def _load_bookings(path):
     """`(bookings, ok)`. `ok` is False when the file's contents are unknown.
 
-    Callers must not treat `not ok` as "nothing is booked": a bad read returning
-    {} followed by a normal save would rewrite the file with only the one new
-    entry and destroy every prior booking. The last log has 5 bookings for
-    2026-08-22 that no longer appear in bookings.json, which is exactly that
-    failure having already happened. Losing the record of one application risks a
-    duplicate attempt later; losing the file risks duplicating every application
-    ever made.
+    Callers must not treat `not ok` as "nothing is booked": a bad read returning {}
+    followed by a normal save would rewrite the file with only the one new entry.
+    Losing one record risks a duplicate attempt; losing the file risks duplicating
+    every application ever made. Assumes `_bookings_lock` is held.
     """
     if not os.path.exists(path):
         return {}, True
@@ -119,11 +116,11 @@ def _load_bookings(path):
 def save_booking(date_str, hotel_name, path=None):
     """Record a successful booking. Thread-safe, atomic, never destructive.
 
-    `path` defaults to BOOKINGS_FILE; `confirm_booking` passes RESERVATIONS_FILE.
-    It is a parameter rather than a swapped module global because both files are
-    written from booking threads that run concurrently.
+    `path` defaults to HOLDS_FILE; `confirm_booking` passes RESERVATIONS_FILE. It is
+    a parameter rather than a swapped module global because both files are written
+    from booking threads that run concurrently.
     """
-    path = path or BOOKINGS_FILE
+    path = path or HOLDS_FILE
     with _bookings_lock:
         bookings, ok = _load_bookings(path)
         if not ok:
@@ -136,22 +133,20 @@ def save_booking(date_str, hotel_name, path=None):
         try:
             _write_bookings(bookings, path)
         except OSError as e:
-            # The booking itself succeeded on the site; losing the record only
-            # risks a duplicate attempt later, so this must not raise into the
-            # booking thread and abort the remaining hotels.
+            # The booking succeeded on the site; losing the record only risks a
+            # duplicate attempt later, so this must not raise into the booking
+            # thread and abort the remaining hotels.
             log(f"{R}BOOKED but failed to record {hotel_name} for {date_str}: {e}{X}")
 
 
 def _write_bookings(bookings, path):
-    """Write the bookings file atomically — same directory, then rename.
+    """Write atomically — same directory, fsync, then rename.
 
-    A plain `open(..., 'w')` truncates first, so a crash or a full disk midway
-    through leaves a half-written file that parses as nothing. This process is
-    meant to run unattended for weeks; the record of what is already booked is
-    the only thing preventing duplicate applications.
+    A plain `open(..., 'w')` truncates first, so a crash midway leaves a file that
+    parses as nothing. This record is the only thing preventing duplicate applications.
     """
     d = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(dir=d, prefix='.bookings_', suffix='.tmp')
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.holds_', suffix='.tmp')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(bookings, f, ensure_ascii=False, indent=2)
@@ -168,14 +163,13 @@ def _write_bookings(bookings, path):
 
 def get_booked_hotels(date_str):
     with _bookings_lock:
-        return _load_bookings(BOOKINGS_FILE)[0].get(date_str, [])
-
+        return _load_bookings(HOLDS_FILE)[0].get(date_str, [])
 
 
 # ── Per-(date, hotel) cooldowns ──────────────────────────────────────
-# `attempted` in book_all_hotels_for_date only lives for one call, so without
-# this a date that stays available keeps re-attempting the same failing hotels
-# every scan cycle. See HOTEL_RETRY_COOLDOWN in config.
+# `attempted` in book_all_hotels_for_date only lives for one call, so without this
+# a date that stays available keeps re-attempting the same failing hotels every
+# scan cycle. See HOTEL_RETRY_COOLDOWN in config.
 _cooldown_lock = threading.Lock()
 _cooldowns = {}   # (date_str, normalized hotel name) -> monotonic expiry
 
@@ -183,10 +177,8 @@ _cooldowns = {}   # (date_str, normalized hotel name) -> monotonic expiry
 def set_cooldown(date_str, hotel_name, seconds):
     """Hold off on this (date, hotel) for `seconds`. Later calls win.
 
-    `hotel_name=None` cools off the whole date. A per-hotel cooldown alone still
-    left the date paying the three setup requests every cycle just to rediscover
-    that every hotel on it is cooling off, which is most of what the cooldown was
-    supposed to save.
+    `hotel_name=None` cools off the whole date, so a date whose every hotel is
+    cooling off stops paying the setup requests just to rediscover that.
     """
     key = (date_str, _norm_hotel(hotel_name))
     with _cooldown_lock:
@@ -246,11 +238,10 @@ _UA_PLATFORMS = ('Macintosh', 'Windows NT', 'X11')
 def _user_agent():
     """Read the UA of the Chrome that minted the current session token.
 
-    Re-reads when captcha_solver rewrites the file, so the UA can never drift
-    out of sync with the session it was captured alongside. Never raises:
-    callers sit outside curl()'s try block, and an exception here would kill a
-    scanner thread or — worse — the URL monitor, which would stop CAPTCHA
-    solving for good while the process went on looking healthy.
+    Re-reads when captcha_solver rewrites the file, so the UA cannot drift out of
+    sync with the session it was captured alongside. Never raises: callers sit
+    outside curl()'s try block, and an exception here would kill a scanner thread
+    or — worse — the URL monitor, the only thing that can re-mint a session.
     """
     global _ua_cache
     with _ua_lock:
@@ -383,6 +374,31 @@ def _retry_after(hdrs):
 def ex(html, pat):
     m = re.search(pat, html)
     return m.group(1) if m else None
+
+
+# Named once because they are markup-exact: a template change is then a one-line
+# fix rather than a hunt through six identical literals.
+_AUTH_RE = r'name="authenticity_token" value="(.*?)"'
+_CSRF_RE = r'csrf-token.*?content="(.*?)"'
+_S_RE = r'name="s" id="s" value="(.*?)"'
+
+# Every AJAX request the site expects as Rails-UJS. All four are required: without
+# X-Requested-With the server answers HTML or a redirect instead of JavaScript.
+def _ajax(csrf, referer):
+    return {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
+            'Accept': 'text/javascript, application/javascript, */*; q=0.01',
+            'Referer': referer}
+
+
+def _follow(c, s, body, loc):
+    """Follow a 302 by hand. Returns `(status, body, via)`.
+
+    `via` is the redirect itself, kept because a dump taken after the follow-up GET
+    records the wrong response's headers — the 302's are the ones worth reading.
+    """
+    if s == 302 and loc:
+        return (*c('GET', loc)[:2], body)
+    return s, body, None
 
 
 # Headers written verbatim to debug dumps. Everything else has its value
@@ -563,27 +579,17 @@ _PII_INPUT = re.compile(
 def _redact_applicant(body):
     """Strip the applicant's identity data out of a body before it is stored.
 
-    `config.APPLICANT` holds 記号 / 番号 / カナ氏名 / 生年月日 / 電話 / 住所 / 事業所名 —
-    identity credentials for somebody's insurance record. 申込内容確認画面 echoes
-    every one of them back, and a dump of it goes into `DEBUG_DIR`, whose contents
-    were tracked in a public remote until 2026-08-18.
+    `config.APPLICANT` holds 記号/番号/カナ氏名/生年月日/電話/住所/事業所名 — 資格認証のキー
+    for somebody's insurance record — and 申込内容確認画面 echoes every one back.
 
-    Two passes, because neither alone is enough:
+    Two passes, because neither alone is enough: every `value="…"` on an input whose
+    *name* looks like an identity field (which survives the site reformatting the
+    value), plus each configured value found literally in the prose (which catches
+    「記号 1234」 rendered as text rather than as a control).
 
-    - every `value="…"` on an input whose *name* looks like an identity field,
-      which survives the site reformatting the value; and
-    - each configured value found literally in the prose, which catches
-      「記号 1234」 rendered as text rather than as a form control.
-
-    `sex` and `zokugara` are deliberately left alone: 男/女 and 本人 are drawn from a
-    two- and five-value domain, so they identify nobody, and they appear in the
-    form's own `<option>` labels whatever we submit — redacting them would shred
-    the markup the dump exists to show. Values shorter than 3 characters are
-    skipped for the same reason.
-
-    Best-effort by construction, and load-bearing only as a second line of defence:
-    the first is that these pages are dumped at all only when the flow has already
-    failed.
+    `sex` and `zokugara` are deliberately left alone — 男/女 and 本人 identify nobody
+    and appear in the form's own `<option>` labels regardless, so redacting them
+    would shred the markup the dump exists to show. Same for values under 3 chars.
     """
     def by_name(m):
         if not _PII_FIELD_NAME.search(m.group('name')):
@@ -635,19 +641,15 @@ def _headers_section(resp):
 def _dump_debug(label, step, status, body, via=None, throttle=True):
     """Save an unexpected HTTP response for later debugging.
 
-    Writes the redacted body to `<stem>.html` and the redacted response headers
-    to `<stem>.headers.txt`. The headers are the diagnostic payload: whether a
-    302 carries `x-runtime` (Rails generated it) or not (Apache/ALB/WAF did),
-    whether `content-length` is 0 by intent or the body was truncated in
-    transit, and whether `set-cookie` re-issued the session.
+    Writes the redacted body to `<stem>.html` and redacted response headers to
+    `<stem>.headers.txt`. The headers are the diagnostic payload: whether a 302
+    carries `x-runtime` (Rails made it) or not (Apache/ALB/WAF did), whether
+    `content-length` is 0 by intent or truncated, whether `set-cookie` re-issued
+    the session. `via` is the response *before* a redirect was followed — without
+    it the dump records the follow-up GET's headers instead of the 302's.
 
-    `via` is the response *before* a redirect was followed. Without it, a dump
-    taken after `if s == 302: c('GET', loc)` records the follow-up GET's headers
-    and throws away the 302's — which is exactly the response worth reading.
-
-    Throttled per (label, step) and pruned to DEBUG_DUMP_KEEP files: a failure
-    that repeats every cycle would otherwise write one pair of files per cycle for
-    as long as it lasted.
+    Throttled per (label, step) and pruned to DEBUG_DUMP_KEEP files, so a failure
+    that repeats every cycle cannot fill the disk.
     """
     try:
         if throttle and not _dump_allowed(label, step):
@@ -750,28 +752,19 @@ _SKIP_NORM = frozenset(_norm_hotel(n) for n in SKIP_HOTELS if _norm_hotel(n))
 _PRIORITY_NORM = tuple(_norm_hotel(p) for p in PRIORITY_HOTELS if _norm_hotel(p))
 
 
-def _priority_rank(name):
-    """Index of the first PRIORITY_HOTELS substring this name matches.
-
-    len(PRIORITY_HOTELS) — i.e. last — when nothing matches, so a plain sort on
-    this rank puts priority hotels in front in the configured order and leaves
-    everything else in the site's own order.
-    """
-    n = _norm_hotel(name)
-    for i, p in enumerate(_PRIORITY_NORM):
-        if p in n:
-            return i
-    return len(_PRIORITY_NORM)
-
-
 def order_hotels(hotels):
-    """Sort (id, name) pairs so PRIORITY_HOTELS come first, order preserved.
+    """Sort (id, name) pairs so PRIORITY_HOTELS come first, in configured order.
 
-    Sorting is stable, so non-priority hotels keep the site's ordering. This is
-    the difference between attempting NAGU with the first ~7 requests after a
-    slot is spotted and attempting it a minute later, behind five other hotels.
+    Hotels are booked sequentially at ~10 requests each, so this is the difference
+    between attempting NAGU immediately after a slot is spotted and attempting it a
+    minute later, behind five others. Stable, so the rest keep the site's order;
+    unmatched names rank last.
     """
-    return sorted(hotels, key=lambda h: _priority_rank(h[1]))
+    def rank(name):
+        n = _norm_hotel(name)
+        return next((i for i, p in enumerate(_PRIORITY_NORM) if p in n),
+                    len(_PRIORITY_NORM))
+    return sorted(hotels, key=lambda h: rank(h[1]))
 
 
 def is_skipped(name):
@@ -784,15 +777,10 @@ def _date_css_class(body, date):
     return ex(body, rf'class=\\"([^"\\]*)\\\"[^>]*data-join-time=\\"{date}\\"') or ''
 
 
-# The classes the site puts on a calendar cell (docs/BOOKING_VIA_CURL.md):
-#   empty     available (green, ○)           — clickable
-#   a_little  limited availability (orange)  — clickable
-#   full      no availability (red)          — JS blocks the click
-#   over      a past date                    — JS blocks the click
-# Both clickable classes can be applied for. Matching only `empty` skipped every
-# limited-availability date in the scan *and* in the booking's own re-check, so
-# those slots were never attempted at all — the ones most likely to still be open
-# were the ones being ignored.
+# Calendar cell classes: `empty` (○) and `a_little` (few left) are both clickable
+# and both applicable for; `full` and `over` are not. Matching `empty` alone
+# silently skipped every limited-availability date — the slots most likely to still
+# be open were the ones being ignored. See docs/SITE.md §4.
 _AVAILABLE_CLASSES = ('empty', 'a_little')
 
 
@@ -805,10 +793,8 @@ def is_available(css_class):
 # form, so without this check it is indistinguishable from a broken extractor.
 _NO_ROOMS_TEXT = '空き部屋がございません'
 
-# Path every expired-session redirect lands on. Confirmed live: a stale `s=`
-# token answers 302, 0 bytes, `Location: /service_category/index` — the exact
-# signature of 302 of the 380 dumps on disk, including every
-# `service_group_select` failure.
+# Path every expired-session redirect lands on: a stale `s=` token answers 302,
+# 0 bytes, `Location: /service_category/index`. The largest failure class on disk.
 _SESSION_DEAD_PATH = '/service_category/index'
 
 
@@ -819,13 +805,11 @@ def _is_session_dead(status, location):
 def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     """Book a single hotel for a date. Steps 3-9. Returns True on success.
 
-    Sets this (date, hotel)'s cooldown on the way through, so a hotel that keeps
-    failing is not re-attempted on every scan cycle for as long as the date stays
-    available. The short cooldown is claimed on entry and covers every failure
-    below; reaching step 7 upgrades it to the long one, because from that request
-    onwards we may be holding the room.
+    Claims this (date, hotel)'s cooldown on entry, so a hotel that keeps failing is
+    not re-attempted every scan cycle for as long as the date stays available.
     """
     set_cooldown(target_date, hotel_name, HOTEL_RETRY_COOLDOWN)
+    label = f"{target_date}_{hotel_name}"
 
     # STEP 3: Select hotel
     log(f"{tag} {C}Booking: {hotel_name}{X}")
@@ -835,9 +819,9 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     services = re.findall(r'data-apply-service-id="(\d+)".*?>(.*?)</a>', body)
     if not services:
         log(f"{tag}   {R}No services for {hotel_name}{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step3_service_select', s, body)
+        _dump_debug(label, 'step3_service_select', s, body)
         return False
-    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+    auth = ex(body, _AUTH_RE)
 
     # STEP 4: Select service (302)
     service_id = services[0][0]
@@ -846,22 +830,20 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'join_time': target_date, 's': s_param, 'apply_service_id': service_id})
     if not loc or 'empty_new' not in loc:
         log(f"{tag}   {R}Step 4 redirect failed{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step4_check_coma', s, body)
+        _dump_debug(label, 'step4_check_coma', s, body)
         return False
 
     # STEP 5: Load booking form
     referer_url = loc
     s, body, _ = c('GET', loc)
-    csrf = ex(body, r'csrf-token.*?content="(.*?)"')
-    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+    csrf = ex(body, _CSRF_RE)
+    auth = ex(body, _AUTH_RE)
     form_action = ex(body, r'action="(/apply/empty_create\?s=[^"]+)"')
     coma_s = ex(body, r"coma_search\('([^']+)'\)")
     if not form_action or not coma_s:
-        # The site's own "no vacant rooms at the specified facility" page has no
-        # booking form, so it lands here. It is an ordinary outcome of racing for
-        # a slot, not a fault: reporting it as a missing-parameter error buried
-        # four red lines and a debug dump in the log every time someone else got
-        # there first.
+        # The site's own no-vacant-rooms page has no booking form, so it lands here.
+        # That is an ordinary lost race, not a fault — often this bot reading back
+        # its own abandoned hold — so it gets no red lines and no dump.
         if _NO_ROOMS_TEXT in body:
             log(f"{tag}   {Y}No rooms left at {hotel_name} (site reports facility full){X}")
             return False
@@ -873,7 +855,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         log(f"{tag}   {R}  url: {redact_url(loc)}{X}")
         log(f"{tag}   {R}  title: {title}{X}")
         log(f"{tag}   {R}  snippet: {snippet}{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step5_booking_form', s, body)
+        _dump_debug(label, 'step5_booking_form', s, body)
         return False
 
     # STEP 6: Search rooms
@@ -882,24 +864,22 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         {'utf8': '\u2713', 'authenticity_token': auth,
          'apply[join_time]': target_date, 'apply[night_count]': '1',
          'apply[stay_persons]': NUM_GUESTS, 'apply[hope_rooms]': '1'},
-        {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
-         'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-         'Referer': referer_url})
+        _ajax(csrf, referer_url))
     if 'service_category' in body:
         log(f"{tag}   {R}Session expired at room search{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step6_room_search', s, body)
+        _dump_debug(label, 'step6_room_search', s, body)
         return False
     rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
     guid = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
     if not rooms:
         log(f"{tag}   {R}No rooms available{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step6_no_rooms', s, body)
+        _dump_debug(label, 'step6_no_rooms', s, body)
         return False
     log(f"{tag}   {C}{len(rooms)} rooms -> selecting room{X}")
 
-    # STEP 7: Submit room. This POST takes the site's hold on the room and is the
-    # point of no return: nothing in this program can release one. The site then
-    # refuses a second application at the same facility, answering the room search
+    # STEP 7: Submit room. This POST takes the site's hold and is the point of no
+    # return: nothing in this program can release one. The site then refuses a second
+    # application at the same facility, answering the room search
     # 「空き部屋がございません」, so nothing here has to track the hold itself.
     room_id = rooms[0][0]
     s, body, loc = c('POST', BASE + form_action,
@@ -908,44 +888,39 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'apply[stay_persons]': NUM_GUESTS, 'apply[hope_rooms]': '1',
          'apply_session_guid': guid, f'apply[coma[{room_id}]]': room_id},
         {'Referer': referer_url})
-    via = None
-    if s == 302 and loc:
-        via, (s, body, _) = body, c('GET', loc)
+    s, body, via = _follow(c, s, body, loc)
 
     # STEP 8: Agree to rules
     if '\u540c\u610f' not in body:
         log(f"{tag}   {R}Not on rules page{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step8_rules', s, body, via)
+        _dump_debug(label, 'step8_rules', s, body, via)
         return False
-    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+    auth = ex(body, _AUTH_RE)
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
-    s_rule_m = re.search(r'name="s"[^>]*value="([^"]*)"', body)
-    s_rule = s_rule_m.group(1) if s_rule_m else None
-    rule_url = BASE + form_act if form_act else None
-    if not rule_url:
+    # The hidden `s` is mandatory even though the action carries no `s` query param;
+    # omit it and the server drops the session. Send no `commit`: 同意する is a button.
+    s_rule = ex(body, r'name="s"[^>]*value="([^"]*)"')
+    if not form_act:
         log(f"{tag}   {R}Missing rules form action{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step8_rules_form', s, body)
+        _dump_debug(label, 'step8_rules_form', s, body)
         return False
     post_data = {'utf8': '\u2713', 'authenticity_token': auth}
     if s_rule:
         post_data['s'] = s_rule
-    s, body, loc = c('POST', rule_url, post_data)
-    via = None
-    if s == 302 and loc:
-        via, (s, body, _) = body, c('GET', loc)
+    s, body, loc = c('POST', BASE + form_act, post_data)
+    s, body, via = _follow(c, s, body, loc)
 
     # STEP 9: Submit email
     if 'email' not in body.lower():
         log(f"{tag}   {R}Not on email page{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step9_email_page', s, body, via)
+        _dump_debug(label, 'step9_email_page', s, body, via)
         return False
-    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
+    auth = ex(body, _AUTH_RE)
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
     token_field = ex(body, r'name="__token__"[^>]*value="([^"]*)"')
-    email_url = BASE + form_act if form_act else None
-    if not email_url:
+    if not form_act:
         log(f"{tag}   {R}Missing email form action{X}")
-        _dump_debug(f"{target_date}_{hotel_name}", 'step9_email_form', s, body)
+        _dump_debug(label, 'step9_email_form', s, body)
         return False
     post_data = {
         'utf8': '\u2713', 'authenticity_token': auth,
@@ -953,41 +928,38 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     }
     if token_field:
         post_data['__token__'] = token_field
-    # This POST only *dispatches the confirmation email* — the response page is
-    # 「メール送信を完了しました」, not a reservation. It still must never be
-    # repeated: it consumes `__token__` and sends mail, and `--max-time` can expire
-    # after the server accepted it, so a retry would submit twice with no way to
-    # tell. Steps 3-8 only navigate, so they stay retryable.
-    s, body, loc = c('POST', email_url, post_data, retry=False)
+    # This POST only *dispatches the confirmation email* — the response is
+    # 「メール送信を完了しました」, not a reservation. It must never be repeated: it
+    # consumes `__token__` and sends mail, and `--max-time` can expire after the
+    # server accepted it. Steps 3-8 only navigate, so they stay retryable.
+    s, body, loc = c('POST', BASE + form_act, post_data, retry=False)
     if s == 0:
         log(f"{tag}   {R}Email submit got no response: outcome unknown, not "
             f"retrying ({hotel_name} may already have been applied for){X}")
         return False
-    via = None
-    if s == 302 and loc:
-        via, (s, body, _) = body, c('GET', loc)
+    s, body, via = _follow(c, s, body, loc)
 
     if 'send_complete' in body:
         # Not a reservation: this is 「メール送信を完了しました」. The room is held and
-        # the site has emailed a link that still has to be followed.
-        # bookings.json records the *hold*.
+        # the site has emailed a link that still has to be followed. holds.json
+        # records the *hold*.
         log(f"{tag}   {B}{G}HELD + MAIL SENT: {hotel_name}{X}")
         save_booking(target_date, hotel_name)
         _finish_from_email(c, target_date, hotel_name, tag)
         return True
 
     log(f"{tag}   {R}Final page not send_complete{X}")
-    _dump_debug(f"{target_date}_{hotel_name}", 'step9_final', s, body, via)
+    _dump_debug(label, 'step9_final', s, body, via)
     return False
 
 
 def _finish_from_email(c, target_date, hotel_name, tag):
-    """Run steps 7-9 off the emailed link, if that module is usable.
+    """Run the emailed leg, if that module is usable.
 
-    Imported here rather than at module scope: `confirm_booking` imports this
-    module, and it must never be able to stop a booking thread. A hold plus a sent
-    email is already worth keeping — the human fallback works from exactly that
-    state — so any failure in here is logged and swallowed.
+    Imported here rather than at module scope: `confirm_booking` imports this one,
+    and it must never be able to stop a booking thread. A hold plus a sent mail is
+    already worth keeping — the human fallback works from exactly that state — so
+    every failure here is logged and swallowed.
     """
     try:
         import confirm_booking
@@ -1015,16 +987,30 @@ def _finish_from_email(c, target_date, hotel_name, tag):
             f"the mail to {EMAIL} is sent. Open its link and finish now.{X}")
 
 
+def _calendar_select(c, csrf, s_param, month_first_day, referer):
+    """POST the month-nav AJAX. One response carries every date in that month."""
+    return c('POST', BASE + '/calendar_apply/calendar_select',
+             {'join_date': month_first_day, 's': s_param},
+             _ajax(csrf, referer))
+
+
+def _month_rendered(status, body):
+    """True when a month-nav response actually carries a calendar.
+
+    Status alone is not a sufficient test. Under Rails'
+    `protect_from_forgery with: :null_session` a request whose CSRF token is rejected
+    is not answered with 422 \u2014 it runs with an empty session and can return 200 with
+    no date cells in it. A caller that trusted the status would report "no dates
+    available" for as long as it kept replaying a stale token, while looking healthy.
+    """
+    return status == 200 and 'data-join-time' in body
+
+
 def _open_calendar_session(c, cookie_file, url, target_date, tag, label,
                            check_availability=True):
     """Start a clean session on the calendar, positioned on target_date's month.
 
-    Shared by the first booking attempt and by every subsequent hotel in the
-    loop, which previously carried its own copy of these twenty lines and had
-    already drifted (the copy dropped the availability check and ignored the
-    navigation's status).
-
-    Returns `(outcome, csrf, auth, s_param)` where outcome is one of:
+    Returns `(outcome, auth, s_param)` where outcome is one of:
       'ok'           \u2014 session live, month in view
       'retry'        \u2014 transient: 5xx, transport failure, or a dead session
       'unavailable'  \u2014 the date is genuinely not open for application
@@ -1036,88 +1022,83 @@ def _open_calendar_session(c, cookie_file, url, target_date, tag, label,
     if s != 200:
         if _is_retryable(s) or _is_session_dead(s, loc):
             log(f"{tag} {Y}calendar GET {s}, will retry{X}")
-            return 'retry', None, None, None
+            return 'retry', None, None
         log(f"{tag} {Y}calendar GET returned {s}{X}")
         _dump_debug(label, 'calendar_get', s, body)
-        return 'failed', None, None, None
+        return 'failed', None, None
 
-    csrf = ex(body, r'csrf-token.*?content="(.*?)"')
-    auth = ex(body, r'name="authenticity_token" value="(.*?)"')
-    s_param = ex(body, r'name="s" id="s" value="(.*?)"')
+    csrf = ex(body, _CSRF_RE)
+    auth = ex(body, _AUTH_RE)
+    s_param = ex(body, _S_RE)
 
     if f'data-join-time="{target_date}"' in body:
-        return 'ok', csrf, auth, s_param
+        return 'ok', auth, s_param
 
     target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
-    s_nav, body_nav, loc_nav = c('POST', BASE + '/calendar_apply/calendar_select',
-        {'join_date': target_ym, 's': s_param},
-        {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
-         'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-         'Referer': url})
-    if s_nav != 200:
-        if _is_retryable(s_nav) or _is_session_dead(s_nav, loc_nav):
-            log(f"{tag} {Y}month nav {s_nav}, will retry{X}")
-            return 'retry', None, None, None
+    s_nav, body_nav, loc_nav = _calendar_select(c, csrf, s_param, target_ym, url)
+    # Gated on the response *shape*, not the status \u2014 see _month_rendered. Gating on
+    # the status alone reported a null-session 200 as 'unavailable', i.e. as the date
+    # being full, which is the one answer that suppresses the retry this needs.
+    if not _month_rendered(s_nav, body_nav):
+        if s_nav == 200 or _is_retryable(s_nav) or _is_session_dead(s_nav, loc_nav):
+            log(f"{tag} {Y}month nav {s_nav} with no calendar, will retry{X}")
+            return 'retry', None, None
         log(f"{tag} {Y}month nav returned {s_nav}{X}")
         _dump_debug(label, 'calendar_select', s_nav, body_nav)
-        return 'failed', None, None, None
+        return 'failed', None, None
 
     if check_availability:
         cell = _date_css_class(body_nav, target_date)
         if not is_available(cell):
             log(f"{tag} {Y}date not available (class: {cell or 'no cell found'}){X}")
-            return 'unavailable', None, None, None
+            return 'unavailable', None, None
 
-    return 'ok', csrf, auth, s_param
+    return 'ok', auth, s_param
 
 
 def _select_date(c, target_date, auth, s_param, tag, label):
     """POST service_group_select. Returns `(outcome, hotels, auth)`.
 
-    This is the request that produces the single largest failure class on disk:
-    a 302 to /service_category/index with an empty body. That is a dead session,
-    and it is worth another attempt on a fresh one rather than costing the slot.
+    This produces the single largest failure class on disk: a 302 to
+    /service_category/index with an empty body. That is a dead session, and worth
+    another attempt on a fresh one rather than costing the slot.
     """
     s, body, loc = c('POST', BASE + '/calendar_apply/service_group_select',
         {'utf8': '\u2713', 'authenticity_token': auth,
          'join_time': target_date, 's': s_param})
     if s != 200:
+        _dump_debug(label, 'service_group_select', s, body)
         if _is_retryable(s) or _is_session_dead(s, loc):
             log(f"{tag} {Y}date select {s} "
                 f"({'session expired' if _is_session_dead(s, loc) else 'transient'}),"
                 f" will retry{X}")
-            _dump_debug(label, 'service_group_select', s, body)
-            return 'retry', [], auth
+            return 'retry', [], None
         log(f"{tag} {Y}date select returned {s}{X}")
-        _dump_debug(label, 'service_group_select', s, body)
-        return 'failed', [], auth
+        return 'failed', [], None
 
     all_hotels = [(gid, _html.unescape(name)) for gid, name in
                   re.findall(r'data-service-group-id="(\d+)".*?>(.*?)</a>', body)]
     if not all_hotels:
         log(f"{tag} {Y}no hotels listed (status 200){X}")
         _dump_debug(label, 'service_group_select', s, body)
-        return 'failed', [], auth
-    return 'ok', all_hotels, ex(body, r'name="authenticity_token" value="(.*?)"')
+        return 'failed', [], None
+    return 'ok', all_hotels, ex(body, _AUTH_RE)
 
 
 def book_all_hotels_for_date(target_date, label):
     """Book every eligible hotel for one date, retrying transient failures.
 
-    Returns (date, list_of_booked_hotels).
-
-    A date the scanner just saw as available is worth more than one request.
-    Before, a single 503 on the first GET \u2014 49 of them in the last log, several
-    landing in the same second the slot was spotted \u2014 abandoned the whole date
-    until the next scan cycle RETRY_DELAY later. Retries only cover the setup
-    requests; once a hotel booking is under way it either completes or is left
-    alone, so nothing can be applied for twice.
+    Returns (date, list_of_booked_hotels). A date the scanner just saw as available
+    is worth more than one request, so a transient failure on the setup requests is
+    retried on a completely fresh session. Retries cover only those: once a hotel
+    booking is under way it either completes or is left alone, so nothing can be
+    applied for twice.
     """
     tag = f"[{label}]"
     booked = []
     attempted = set()
 
-    with _BookingInFlight():
+    with _booking_in_flight():
         for attempt in range(1, max(1, BOOK_MAX_ATTEMPTS) + 1):
             if attempt > 1:
                 log(f"{tag} {C}retry {attempt}/{BOOK_MAX_ATTEMPTS} on a fresh session{X}")
@@ -1132,13 +1113,8 @@ def book_all_hotels_for_date(target_date, label):
 
 
 def _cool_date_if_exhausted(target_date, names, tag):
-    """Cool the whole date while every hotel offered for it is cooling off.
-
-    Set as soon as a pass runs out of candidates, not on the pass after. A
-    per-hotel cooldown alone still left the date paying `_open_calendar_session`
-    plus `_select_date` every cycle purely to rediscover there is nothing on it
-    worth trying, which is most of what the cooldown was meant to save.
-    """
+    """Cool the whole date while every hotel offered for it is cooling off, so the
+    date stops paying the setup requests just to rediscover that."""
     waits = [cooldown_remaining(target_date, n) for n in names]
     if not waits or not all(w > 0 for w in waits):
         return
@@ -1171,8 +1147,7 @@ def _book_date_once(target_date, label, tag, booked, attempted):
         return curl(cookie_file, method, u, data, headers, retry)
 
     try:
-        # csrf is re-extracted per page by book_one_hotel, so it is unused here.
-        outcome, _csrf, auth, s_param = _open_calendar_session(
+        outcome, auth, s_param = _open_calendar_session(
             c, cookie_file, url, target_date, tag, label)
         if outcome != 'ok':
             return outcome
@@ -1185,34 +1160,29 @@ def _book_date_once(target_date, label, tag, booked, attempted):
         log(f"{tag} {C}Found {len(all_hotels)} hotels: "
             f"{', '.join(n for _, n in all_hotels)}{X}")
 
-        already_booked = get_booked_hotels(target_date)
-        booked_norm = {_norm_hotel(n) for n in already_booked}
-        attempted_norm = {_norm_hotel(n) for n in attempted}
-        skipped = [n for _, n in all_hotels if is_skipped(n)]
-        already = [n for _, n in all_hotels
-                   if _norm_hotel(n) in booked_norm | attempted_norm]
-        cooling = [n for _, n in all_hotels if in_cooldown(target_date, n)]
-        # Normalized on both sides. Comparing raw names let one full-width space
-        # in bookings.json defeat the already-booked filter, which is a duplicate
+        # Normalized on both sides. Comparing raw names let one full-width space in
+        # holds.json defeat the already-booked filter, which is a duplicate
         # application; is_skipped() has always normalized, so the two disagreed.
-        hotels = order_hotels([(gid, name) for gid, name in all_hotels
-                               if not is_skipped(name)
-                               and _norm_hotel(name) not in booked_norm
-                               and _norm_hotel(name) not in attempted_norm
-                               and not in_cooldown(target_date, name)])
+        seen = {_norm_hotel(n) for n in get_booked_hotels(target_date)}
+        seen |= {_norm_hotel(n) for n in attempted}
+        hotels, filtered = [], []
+        for gid, name in all_hotels:
+            if is_skipped(name):
+                filtered.append(f'{name} (skip list)')
+            elif _norm_hotel(name) in seen:
+                filtered.append(f'{name} (already booked/attempted)')
+            elif in_cooldown(target_date, name):
+                filtered.append(f'{name} (cooling off '
+                                f'{cooldown_remaining(target_date, name) / 60:.0f}m)')
+            else:
+                hotels.append((gid, name))
+        hotels = order_hotels(hotels)
 
         if not hotels:
-            reasons = []
-            if skipped:
-                reasons.append(f"skip list: {', '.join(skipped)}")
-            if already:
-                reasons.append(f"already booked/attempted: {', '.join(already)}")
-            if cooling:
-                reasons.append('cooling off: ' + ', '.join(
-                    f'{n} ({cooldown_remaining(target_date, n) / 60:.0f}m)'
-                    for n in cooling))
-            log(f"{tag} {Y}All hotels filtered out ({'; '.join(reasons)}){X}")
-            _cool_date_if_exhausted(target_date, cooling, tag)
+            log(f"{tag} {Y}All hotels filtered out ({'; '.join(filtered)}){X}")
+            _cool_date_if_exhausted(
+                target_date, [n for _, n in all_hotels
+                              if in_cooldown(target_date, n)], tag)
             return 'done'
 
         log(f"{tag} {C}{len(hotels)} to book (priority first): "
@@ -1222,7 +1192,7 @@ def _book_date_once(target_date, label, tag, booked, attempted):
             if i > 0:
                 # Fresh session per hotel. A failure here is worth reporting up
                 # so the outer loop can retry the hotels not yet reached.
-                outcome, _csrf, auth, s_param = _open_calendar_session(
+                outcome, auth, s_param = _open_calendar_session(
                     c, cookie_file, url, target_date, tag, label,
                     check_availability=False)
                 if outcome != 'ok':
@@ -1251,12 +1221,8 @@ def _book_date_once(target_date, label, tag, booked, attempted):
 
 
 def _future_dates(target_dates):
-    """Drop dates that have already passed.
-
-    Over a multi-week run every target date eventually goes by, and a past date
-    can never be booked - the site marks those cells `over`. Polling them keeps
-    a month's scanner asking forever about something that cannot happen.
-    """
+    """Drop dates that have already passed — the site marks those cells `over`,
+    so polling them asks forever about something that cannot happen."""
     if not SKIP_PAST_DATES:
         return list(target_dates)
     today = date.today().isoformat()
@@ -1269,16 +1235,12 @@ _ISO_DATE = re.compile(r'\A\d{4}-\d{2}-\d{2}\Z')
 def days_until(target_date, today=None):
     """Whole days from `today` to `target_date`, or None if it will not parse.
 
-    Strictly `YYYY-MM-DD`, which is the only form used anywhere in this program —
-    `TARGET_DATES`, `data-join-time` and the `bookings.json` keys are all that
-    shape. `date.fromisoformat` alone is far more liberal: since 3.11 it also
-    accepts `20260905` and week dates like `2026-W36-6`, and a safety gate should
-    not quietly widen because the standard library did. Anything else here means a
-    caller is passing something unexpected, which is exactly when to stop.
+    Strictly `YYYY-MM-DD`, the only shape used anywhere here. `date.fromisoformat`
+    alone is far more liberal — since 3.11 it also takes `20260905` and week dates —
+    and a safety gate should not quietly widen because the standard library did.
 
     None rather than a raise or a guess: every caller treats an unknown distance as
-    "do not commit", and a silent 0 would read as "today", the most dangerous
-    possible interpretation.
+    "do not commit", and a silent 0 would read as "today".
     """
     if not isinstance(target_date, str) or not _ISO_DATE.match(target_date):
         return None
@@ -1292,20 +1254,14 @@ def days_until(target_date, today=None):
 def confirm_allowed(target_date, today=None):
     """`(allowed, reason)` — may the application for this date be *completed*?
 
-    Completing an application means 予約確定: a real reservation carrying a real
-    cancellation liability. Free cancellation is web-only and ends at D−10; from
-    D−9 it costs 50% and has to be arranged by telephone in office hours, and the
-    full amount on the day of use. So anything inside that window must not be
-    committed without a person deciding to.
+    Completing means 予約確定, a real reservation with a real cancellation liability.
+    Free cancellation is web-only and ends at D−10, so anything nearer is left for a
+    person to decide. This gates the final POSTs only: the room hold and the
+    confirmation email still happen, which is what lets a human finish by hand.
 
-    This gate governs the final POSTs only. It deliberately does not stop the room
-    hold or the confirmation email: those are free and reversible (the hold simply
-    lapses after 30 minutes), and having them in place is what lets a human finish
-    a near-date booking themselves if they want it.
-
-    Fails closed. An unparseable date, a missing config value or a clock we cannot
-    reason about all return False, because the cost of wrongly committing is a
-    non-refundable booking and the cost of wrongly refusing is one lost slot.
+    Fails closed — an unparseable date or an unusable config value returns False,
+    because wrongly committing costs a non-refundable booking and wrongly refusing
+    costs one slot.
     """
     if not AUTO_CONFIRM:
         return False, 'AUTO_CONFIRM is off'
@@ -1328,38 +1284,21 @@ def confirm_allowed(target_date, today=None):
     return True, ''
 
 
-def _month_rendered(status, body):
-    """True when a month-nav response actually carries a calendar.
-
-    Status alone is not a sufficient test. If the site runs Rails'
-    `protect_from_forgery with: :null_session`, a request whose CSRF token is
-    rejected is not answered with 422 — it runs with an empty session and can
-    return 200 and a page with no date cells in it. A scanner that trusted the
-    status would then report "no dates available" for as long as it kept
-    replaying a stale token, while looking perfectly healthy.
-    """
-    return status == 200 and 'data-join-time' in body
-
-
 def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     """Scan a month's calendar for availability, spawn booking threads per date.
 
-    Runs indefinitely. Each cycle checks ALL target dates for the month with a
-    single `calendar_select` POST; the calendar GET that mints the csrf/s pair for
-    it is skipped while a cached pair still works (SCAN_REUSE_SESSION), so the
+    Runs indefinitely. Each cycle covers every target date in the month with a
+    single `calendar_select` POST; the calendar GET that mints the csrf/s pair is
+    skipped while a cached pair still works (SCAN_REUSE_SESSION), so the
     steady-state cycle is one request rather than two.
-
-    When availability is found, spawns parallel booking threads (one per date).
-    If URL is missing or expired, logs and waits for next cycle.
 
     The whole loop body is guarded. Nothing in here may end the thread: it is the
     only thing scanning this month, it is a daemon, and main() never joins it — so
     an escaping exception would stop the month silently while the process carried
     on looking healthy.
 
-    `stop_event` is an optional threading.Event for a cooperative shutdown.
-    Production leaves it None and relies on daemon threads; the tests set it so a
-    finished test's scanner cannot keep booking into the next one's fixtures.
+    `stop_event` is an optional cooperative shutdown. Production leaves it None; the
+    tests set it so a finished test's scanner cannot book into the next one's fixtures.
     """
     tag = f"[{label}]"
     month_ym = f"{month_str}-01"
@@ -1383,30 +1322,24 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     def mint_tokens(url, attempt):
         """GET the calendar for a fresh (csrf, s) pair. None if the GET failed.
 
-        This is the request session reuse exists to avoid, and it is also the
-        most failure-prone one in the program — most dumps on record are a 503
-        here, and a 503 is how the 24-hour IP ban presents.
+        The request session reuse exists to avoid, and the most failure-prone one in
+        the program: most dumps on record are a 503 here, and a 503 is how the
+        24-hour IP ban presents.
         """
         st, bd, lc = c('GET', url)
         if st != 200:
-            # The cookie jar is only reset after a failure. Truncating it every
-            # cycle asked the site for a brand-new session about 4,300 times a
-            # day and threw a working one away each time.
+            # Reset the cookie jar only after a failure. Truncating it every cycle
+            # asked for a brand-new session ~4,300 times a day, discarding a
+            # working one each time.
             if _is_session_dead(st, lc) or _is_retryable(st):
                 open(cookie_file, 'w').close()
             log(f"{tag} {Y}[{attempt}] URL returned {st}, waiting...{X}")
             return None
-        return (ex(bd, r'csrf-token.*?content="(.*?)"'),
-                ex(bd, r'name="s" id="s" value="(.*?)"'))
+        return ex(bd, _CSRF_RE), ex(bd, _S_RE)
 
     def nav_month(tokens, url):
-        """POST calendar_select. Its response carries every date in the month."""
         csrf, s_param = tokens
-        return c('POST', BASE + '/calendar_apply/calendar_select',
-            {'join_date': month_ym, 's': s_param},
-            {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
-             'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-             'Referer': url})
+        return _calendar_select(c, csrf, s_param, month_ym, url)
 
     try:
         attempt = 0

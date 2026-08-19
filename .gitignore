@@ -1,176 +1,32 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
+.venv/
 
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintainted in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-
-# ITS booker runtime artifacts — these carry live session material.
-# calendar_url_cache.txt holds the `s=` session token; debug_responses/ holds
-# raw server responses (form actions embed `s=` tokens) plus redacted headers.
+# Runtime artifacts carrying live session material.
+# calendar_url_cache.txt holds the `s=` token; debug_responses/ holds raw server
+# responses, whose form actions embed `s=` tokens.
 calendar_url_cache.txt
 chrome_user_agent.txt
 debug_responses/
-# Both caches are written tmp-then-rename; a kill mid-write leaves the token
-# behind in the .tmp sibling.
+# Both caches are written tmp-then-rename; a kill mid-write leaves the token in
+# the .tmp sibling.
 *.tmp
-# `*.log` above catches its_booking.log, but rotation renames it to
-# its_booking.log.1, and the log is credential-bearing.
+
+# The log is credential-bearing, and rotation renames it to its_booking.log.1,
+# which `*.log` alone would miss.
+*.log
 *.log.*
-# Confirmed reservations, with their 申込受付番号 — and, unlike bookings.json, a
-# record that a real cancellation liability exists.
+
+# Holds (each lapses unless the emailed link was followed) and confirmed
+# reservations with their 申込受付番号 — an entry in the latter means a real
+# cancellation liability exists.
+holds.json
 reservations.json
+
 # Applicant identity (記号/番号/カナ氏名/生年月日) and the Gmail app password reach
-# the program only through the environment. `.env` is matched above, but only as an
-# exact name; anything of that shape must stay out too, because this repository's
-# history is on a public remote.
+# the program only through the environment. This repository's history is on a
+# public remote, so anything of that shape stays out.
 .env
 .env.*
 *.env
-local_settings.py

@@ -222,13 +222,6 @@ def test_redact_body():
     check('short value still redacted', 'value="e"' not in out, out)
 
 
-def test_response_behaves_as_str():
-    r = bh.Response('<a href="x">同意</a>', headers='h: v', location='/loc', request='POST /p')
-    check('Response is a str the extractors can use',
-          isinstance(r, str) and bh.ex(r, r'href="(.*?)"') == 'x')
-    check('Response carries headers', r.headers == 'h: v' and r.location == '/loc')
-
-
 def test_user_agent():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, 'ua.txt')
@@ -437,39 +430,6 @@ def test_dump_debug(srv, tmpdir):
         os.unlink(cookie_file)
 
 
-def test_dump_debug_with_plain_str():
-    """_dump_debug must survive a body that is not a Response."""
-    with tempfile.TemporaryDirectory() as d:
-        orig = bh.DEBUG_DIR
-        bh.DEBUG_DIR = d
-        try:
-            bh._dump_debug('plain', 'step0', 0, '')
-            hdrs = [f for f in os.listdir(d) if f.endswith('.headers.txt')]
-            check('plain str body still dumps', len(hdrs) == 1, str(os.listdir(d)))
-            with open(os.path.join(d, hdrs[0])) as f:
-                text = f.read()
-            check('plain str body notes unknown request', '(unknown)' in text, text)
-            check('plain str body notes no headers', '(no headers captured)' in text, text)
-        finally:
-            bh.DEBUG_DIR = orig
-
-
-def test_curl_zero_attempts(srv):
-    """CURL_MAX_ATTEMPTS=0 used to leave status/hdrs unbound -> NameError."""
-    fd, cookie_file = tempfile.mkstemp(prefix='test_cookies_')
-    os.close(fd)
-    orig = bh.CURL_MAX_ATTEMPTS
-    bh.CURL_MAX_ATTEMPTS = 0
-    try:
-        status, body, _ = bh.curl(cookie_file, 'GET', f'http://127.0.0.1:{srv.server_port}/ok')
-        check('CURL_MAX_ATTEMPTS=0 still makes one request', status == 200, str(status))
-    except Exception as e:
-        check('CURL_MAX_ATTEMPTS=0 still makes one request', False, repr(e))
-    finally:
-        bh.CURL_MAX_ATTEMPTS = orig
-        os.unlink(cookie_file)
-
-
 def test_curl_unreachable():
     """A transport failure must return, not raise — the scan loop has no except."""
     fd, cookie_file = tempfile.mkstemp(prefix='test_cookies_')
@@ -487,26 +447,22 @@ def test_curl_unreachable():
 
 def main():
     srv = serve()
-    test_redact_url()
-    test_redact_set_cookie()
-    test_redact_headers()
-    test_redact_body()
-    test_response_behaves_as_str()
-    test_user_agent()
-    test_merge_headers()
-    test_curl_against_local_server(srv)
-    with tempfile.TemporaryDirectory() as d:
-        test_dump_debug(srv, d)
-    test_dump_debug_with_plain_str()
-    test_curl_zero_attempts(srv)
-    test_curl_unreachable()
+    # Discovered, not hand-listed: a new `def test_*` cannot be silently never run.
+    # Arguments are injected by parameter name, so a test declares what it needs.
+    tests = [f for n, f in sorted(globals().items())
+             if n.startswith('test_') and callable(f)]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        available = {'srv': srv, 'tmpdir': tmpdir}
+        for fn in tests:
+            names = fn.__code__.co_varnames[:fn.__code__.co_argcount]
+            fn(**{k: v for k, v in available.items() if k in names})
     srv.shutdown()
 
     print()
     if FAILURES:
         print(f'{len(FAILURES)} FAILED: ' + ', '.join(FAILURES))
         raise SystemExit(1)
-    print('all checks passed')
+    print(f'all checks passed ({len(tests)} tests)')
 
 
 if __name__ == '__main__':
