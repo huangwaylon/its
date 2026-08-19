@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
-"""Complete the application that the site's confirmation email points at.
+"""Turn holds into reservations, off the link in the site's confirmation mail.
 
-`book_hotels` stops at `send_complete`, which only dispatches a mail. This module is
-the official steps 7-9 off the link in it — 申込する → 確認 → 申込受付番号 — and step 9
-is the first irreversible, money-bearing action in the program. Two things guard it.
+`book_hotels` stops at `send_complete` (a mail dispatched) and enqueues the hold here.
+`worker()` drains that queue serially: read the applicant form, then 申込する → 確認 →
+申込受付番号. That commit is the first irreversible, money-bearing action in the program.
 
-`bh.confirm_allowed()` is consulted immediately before *each* committing POST, not
-once at the top: free cancellation ends at D−10, so anything nearer is left for a
-person, who can finish from the mail themselves because the hold and the mail stand.
+**curl reads; only Chrome commits.** `POST /apply/confirm` answers 302 →
+/service_category/index for curl whatever it sends (0 for 3 in the logs, and refused
+across every variation in docs/SITE.md §5) while Chrome is 2 for 2, so the curl attempt
+was deleted rather than kept as a dead first try. The GET and the form parse work fine
+over curl and stay there.
 
-And the form is filled from what the form declares, never from hard-coded names:
-`map_fields` matches the live controls against `config.APPLICANT` and `unmapped`
-lists what it could not place. A form we do not fully understand is dumped for a
-human rather than submitted half-filled against somebody's insurance number.
+Three things guard the commit:
+
+- `bh.confirm_allowed()` runs before the commit and again on the 申込内容確認画面.
+- The form is filled from what the form declares, never hard-coded names; anything
+  `map_fields` cannot place is `unmapped`, and an unmapped form is dumped for a human
+  rather than submitted half-filled against somebody's insurance number.
+- Each emailed link is claimed exactly once, so two holds cannot collide.
 """
 import email
 import email.utils
 import imaplib
+import os
 import re
+import tempfile
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
 
 from config import (
     IMAP_HOST, IMAP_PORT, IMAP_USER, IMAP_APP_PASSWORD, MAIL_FROM, APPLICANT,
-    CONFIRM_MAIL_TIMEOUT,
-    RESERVATIONS_FILE, BROWSER_CONFIRM,
+    CONFIRM_MAIL_TIMEOUT, CONFIRM_POLL_INTERVAL, RESERVATIONS_FILE,
 )
 import book_hotels as bh
 from book_hotels import log, R, G, Y, C, B, X, redact_url, BASE
@@ -38,12 +45,9 @@ _mail_source = None
 # ── the emailed link ─────────────────────────────────────────────────
 
 def message_text(raw_bytes):
-    """All text of a message, charset-decoded.
-
-    ITS mail is Japanese and may arrive as ISO-2022-JP or UTF-8, base64 or
-    quoted-printable, and as either plain text or multipart. Every part is
-    concatenated because the application URL only has to appear in one of them.
-    """
+    """All text of a message, charset-decoded. ITS mail may be ISO-2022-JP or UTF-8,
+    base64 or quoted-printable, plain or multipart; every part is concatenated because
+    the URL only has to appear in one."""
     try:
         msg = email.message_from_bytes(raw_bytes)
     except Exception:
@@ -64,23 +68,17 @@ def message_text(raw_bytes):
 
 
 def _url_re():
-    """URLs on the configured site only.
-
-    The host restriction is a safety property: the mail body is the one input to
-    this module we do not author, and following an arbitrary link out of it would
-    post somebody's 記号/番号 wherever that link pointed. Built from `BASE` rather
-    than hard-coded so the tests can point it at a loopback fake.
-    """
+    """URLs on the configured site only — a safety property, since the mail body is
+    the one input here nobody in this repo authors and an arbitrary link would receive
+    somebody's 記号/番号. Built from `BASE` so the tests can use a loopback fake."""
     return re.compile(re.escape(BASE.rstrip('/')) + r'/[^\s<>"\']+')
 
 
 def extract_apply_link(text):
     """The application URL in a confirmation mail, or None.
 
-    Prefers a link carrying a session-ish parameter: the live mail's link is
-    `/apply/new?c=<36 chars>`, so `c=` matters as much as `s=`. Among candidates the
-    longest wins, because the mail also contains short generic links — the site's
-    homepage, a do-not-reply notice — that would otherwise be picked.
+    Prefers a link carrying `c=` or `s=`; among those the longest wins, because the
+    mail also carries short generic links that would otherwise be picked.
     """
     urls = [u.rstrip('.,)>]') for u in _url_re().findall(text or '')]
     if not urls:
@@ -99,12 +97,11 @@ def _imap_messages(since_epoch):
     out = []
     try:
         # Scoped to this connection: setdefaulttimeout() is process-wide and would
-        # silently retime pydoll's CDP websocket and every other socket we own.
+        # retime pydoll's CDP websocket too.
         with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=30) as m:
             m.login(IMAP_USER, IMAP_APP_PASSWORD)
-            # All Mail, not INBOX: Gmail's own classifier or a stray filter can
-            # file the message elsewhere, and losing a held room to a
-            # mailbox-selection detail would be an absurd way to lose it.
+            # All Mail, not INBOX: Gmail's classifier or a stray filter can file it
+            # elsewhere, and a mailbox detail is an absurd way to lose a room.
             for box in ('"[Gmail]/All Mail"', 'INBOX'):
                 if m.select(box, readonly=True)[0] == 'OK':
                     break
@@ -124,13 +121,9 @@ def _imap_messages(since_epoch):
 
 
 def _message_epoch(raw_bytes):
-    """The message's Date header as an epoch, or None.
-
-    `parsedate_to_datetime` *raises* on a malformed header rather than returning
-    None, and this runs with a room held: an uncaught ValueError here reached
-    `book_hotels._finish_from_email`, which swallows everything, so a bad Date on
-    any unrelated message in the mailbox silently cost the booking.
-    """
+    """The Date header as an epoch, or None. `parsedate_to_datetime` *raises* on a
+    malformed header, and one bad Date on any unrelated message in the mailbox used to
+    silently cost a booking."""
     try:
         msg = email.message_from_bytes(raw_bytes)
         dt = email.utils.parsedate_to_datetime(msg.get('Date') or '')
@@ -141,37 +134,78 @@ def _message_epoch(raw_bytes):
     return dt.timestamp()
 
 
-def wait_for_apply_link(since_epoch, poll=5.0):
-    """Poll the mailbox for this booking's application link.
+def _fetch_links(since_epoch):
+    """`[(link, arrival_epoch)]` for every confirmation mail since `since_epoch`.
 
-    Matched on **when the message arrived**, not on the stay date. The mail names
-    only the date it was sent — a live 2026-08-19 message for a 2026-09-16 stay
-    contains 「2026年08月19日」 twice and 09-16 nowhere — so a stay-date filter can
-    never match and always falls through to a guess. Arrival time is the honest
-    discriminator, and the newest qualifying message wins.
+    One IMAP round trip serves the whole queue. `arrival_epoch` is None when the source
+    cannot supply one (the tests inject strings); callers treat that as eligible.
     """
-    deadline = time.monotonic() + CONFIRM_MAIL_TIMEOUT
-    while True:
-        source = _mail_source or _imap_messages
-        best = None
-        for raw in source(since_epoch):
-            text = raw if isinstance(raw, str) else message_text(raw)
-            link = extract_apply_link(text)
-            if not link:
+    out = []
+    for raw in (_mail_source or _imap_messages)(since_epoch):
+        text = raw if isinstance(raw, str) else message_text(raw)
+        link = extract_apply_link(text)
+        if link:
+            out.append((link, None if isinstance(raw, str) else _message_epoch(raw)))
+    return out
+
+
+# ── the pending-hold queue ───────────────────────────────────────────
+# One worker drains this serially, which buys two things:
+#
+# - A booking thread no longer blocks for CONFIRM_MAIL_TIMEOUT plus a browser submit,
+#   so several dates opening at once are all held at full speed.
+# - **Two holds can no longer consume the same emailed link.** They did: two dates
+#   held in the same second on 2026-08-19 both got the same `c=` UUID from the old
+#   newest-mail-wins matcher, filing one application against an unknown date and
+#   wasting the other hold.
+#
+# Safe to run off-thread because `/apply/new?c=<uuid>` establishes its own session —
+# which is also why the browser fallback works from a fresh Chrome.
+_pending_lock = threading.Lock()
+_pending = []      # [(held_at, target_date, hotel_name)], oldest first
+_claimed = set()   # `c=` values already handed to a leg; never reused
+
+# Slack on the IMAP SINCE floor: the mail is dispatched seconds before the hold is
+# enqueued, and neither clock is ours.
+_CLOCK_SLACK = 300
+
+
+def enqueue(target_date, hotel_name, held_at=None):
+    """Register a hold whose emailed leg still has to run."""
+    with _pending_lock:
+        _pending.append((held_at or time.time(), target_date, hotel_name))
+        return len(_pending)
+
+
+def pending_count():
+    with _pending_lock:
+        return len(_pending)
+
+
+def _link_id(link):
+    """The `c=` (or `s=`) value that identifies one application, for claiming."""
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)
+    return (q.get('c') or q.get('s') or [link])[0]
+
+
+def _take_link(hold_at, links):
+    """Claim the **oldest** unclaimed link that could belong to this hold.
+
+    Oldest, not newest: the queue drains oldest hold first and the site mails one per
+    hold in that order, so oldest-to-oldest lines up. Newest-wins is what handed two
+    holds the same link.
+    """
+    for link, when in sorted(links, key=lambda p: (p[1] is not None, p[1])):
+        if when is not None and when < hold_at - _CLOCK_SLACK:
+            continue
+        with _pending_lock:
+            key = _link_id(link)
+            if key in _claimed:
                 continue
-            when = None if isinstance(raw, str) else _message_epoch(raw)
-            if when is not None and when < since_epoch:
-                continue
-            if best is None or (when or 0) >= (best[1] or 0):
-                best = (link, when)
-        if best:
-            return best[0]
-        # Never sleep past the deadline: each poll opens a fresh IMAP connection, so
-        # the interval stays coarse, but overshooting it only wastes the wait.
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return None
-        time.sleep(min(poll, left))
+            _claimed.add(key)
+        return link
+    return None
+
 
 
 # ── the applicant form ───────────────────────────────────────────────
@@ -212,24 +246,21 @@ def _strip_tags(s):
     return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', s or '')).strip()
 
 
-def parse_form(html, prefer_action=None):
+def parse_form(html):
     """`(action, fields)` for the form most likely to be the applicant form.
 
-    `fields` are dicts of name/type/value/label/options. `label` is the visible text
-    immediately before the control, which is how the Japanese field names are
-    recovered — this site labels by proximity, not by `for=`. There is deliberately
-    no `required` key: the live form marks nothing required. See `map_fields`.
+    `fields` are dicts of name/type/value/label/options; `label` is the visible text
+    immediately before the control, which is how the Japanese names are recovered —
+    this site labels by proximity, not `for=`. No `required` key, deliberately: the
+    live form marks nothing required. See `map_fields`.
     """
     forms = re.findall(r'(?is)<form\b([^>]*)>(.*?)</form>', html or '')
     if not forms:
         return None, []
 
     def score(attrs_blob, body):
-        a = _attrs(attrs_blob)
-        act = a.get('action', '')
+        act = _attrs(attrs_blob).get('action', '')
         s = len(re.findall(r'<(input|select|textarea)\b', body, re.I))
-        if prefer_action and prefer_action in act:
-            s += 100
         if re.search(r'apply|regist|entry|confirm', act, re.I):
             s += 10
         return s
@@ -265,13 +296,10 @@ def parse_form(html, prefer_action=None):
     return action, fields
 
 
-# Field names, and the Japanese labels beside them, as captured live from
-# /apply/new on 2026-08-19. Ordered most specific first: `kana_name` must win
-# before the split `kana_sei`, and 番号 must not be claimed by 記号.
-#
-# The birth date arrives as three separate selects whose *labels* are useless —
-# `apply[month]`'s preceding text is the tail of the year dropdown's options — so
-# those three are matched on field name only.
+# Field names and the labels beside them, captured live from /apply/new on
+# 2026-08-19. Most specific first: `kana_name` must win over the split `kana_sei`, and
+# 番号 must not be claimed by 記号. The three birth selects are matched on name only —
+# `apply[month]`'s label is the tail of the year dropdown's options.
 _MAP_RULES = (
     ('kigou', (r'sign_no|kigou|kigo|\bsymbol\b', r'記号')),
     ('bangou', (r'insured_no|bangou|bango|member_?no', r'(?<!電話)番号')),
@@ -297,12 +325,9 @@ _MAP_RULES = (
 
 
 def applicant_values(email_address=None):
-    """`config.APPLICANT` plus the forms the live page actually asks for.
-
-    The captured form wants one combined カナ氏名 box rather than separate 姓/名,
-    and the birth date as three dropdowns. Deriving those here keeps `.env` as the
-    plain facts off the insurance card.
-    """
+    """`config.APPLICANT` plus the shapes the live page asks for: one combined カナ氏名
+    box and the birth date as three dropdowns. Deriving them here keeps `.env` as the
+    plain facts off the insurance card."""
     a = dict(APPLICANT)
     if email_address:
         a.setdefault('email', email_address)
@@ -322,11 +347,9 @@ def applicant_values(email_address=None):
 
 
 def _match_option(options, wanted):
-    """The option value whose label or value matches `wanted`.
-
-    Exact first, then substring, because the live選択肢 are `man`/`男性` and
-    `myself`/`本人（被保険者）` — a plain equality test matches neither 男 nor 本人.
-    """
+    """The option value whose label or value matches `wanted`. Exact first, then
+    substring: the live options are `man`/`男性` and `myself`/`本人（被保険者）`, so plain
+    equality matches neither 男 nor 本人."""
     if not options or not wanted:
         return None
     for value, label in options:
@@ -341,15 +364,11 @@ def _match_option(options, wanted):
 def _match_rule(name, label, values):
     """Which `_MAP_RULES` key fills the control called `name`, or None.
 
-    **Field name first, label only as a fallback.** The site labels by proximity and
-    never with `for=`, so `label` is just the 400 characters before the control —
-    `apply[month]`'s is the tail of the year dropdown's options, `apply[state]`'s is
-    the 〒 field's markup. A label can contain another field's Japanese label.
-
-    A name is structural, so a name match wins even with no value configured: the
-    field is reported unmapped and a human finishes it. Otherwise `apply[address]`
-    with `ITS_ADDR` unset falls through to the label pass, matches the 〒 a few
-    characters before it, and submits the *postcode* as the street address.
+    **Field name first, label only as a fallback**, because `label` is just the 400
+    characters before the control and can contain another field's Japanese label. A
+    name is structural, so a name match wins even with no value configured — otherwise
+    `apply[address]` with `ITS_ADDR` unset matches the 〒 before it and submits the
+    postcode as the street address.
     """
     for candidate, (name_pat, _label_pat) in _MAP_RULES:
         if re.search(name_pat, name, re.I):
@@ -363,15 +382,12 @@ def _match_rule(name, label, values):
 def map_fields(fields, email_address=None):
     """`(post_data, unmapped)` — fill what we recognise, report what we do not.
 
-    **`required` cannot be trusted here**: the live form marks nothing required and
-    never says 「必須」, so a guard keyed on it reported "15 fields, 0 unmapped" for a
-    form with 事業所名, the birth month and day and the whole address blank.
-
-    The rule is the other way round: any visible control we could neither fill from
-    `APPLICANT` nor leave at a server-provided value is unmapped, and **a caller
-    finding `unmapped` non-empty must not submit.** These are 資格認証のキー, checked
-    against the insurance record, so a half-filled form is a rejected application and
-    a wasted hold, not a near miss.
+    **`required` cannot be trusted**: the live form marks nothing required and never
+    says 「必須」, so a guard keyed on it reported "0 unmapped" for a form with 事業所名,
+    the birth month and day and the whole address blank. The rule is the other way
+    round — any visible control we could neither fill nor leave at a server value is
+    unmapped, and **a caller finding `unmapped` non-empty must not submit.** These are
+    資格認証のキー: a half-filled form is a rejected application and a wasted hold.
     """
     a = applicant_values(email_address)
     post, unmapped = {}, []
@@ -380,7 +396,7 @@ def map_fields(fields, email_address=None):
         name, ftype = f['name'], f['type']
 
         if ftype == 'hidden':
-            # Includes Rails' `_method` and `authenticity_token`; echo verbatim.
+            # Includes `_method` and `authenticity_token`; echo verbatim.
             post[name] = f['value']
             continue
         key = _match_rule(name, f['label'], a)
@@ -393,9 +409,8 @@ def map_fields(fields, email_address=None):
 
         wanted = a.get(key) or ''
         if not wanted:
-            # The field is recognised but we were given nothing to put in it — an
-            # unset ITS_* variable. Unmapped, so the caller defers rather than
-            # submitting a blank 資格認証のキー.
+            # Recognised but unset (a missing ITS_* variable): unmapped, so the
+            # caller defers rather than submitting a blank 資格認証のキー.
             post[name] = f['value']
             unmapped.append(name)
             continue
@@ -422,38 +437,37 @@ def _save_reservation(target_date, hotel_name, receipt):
 
 _RECEIPT_RE = re.compile(r'申込受付番号[^0-9A-Za-z]{0,12}([0-9A-Za-z-]{4,})')
 
-# Replaceable so the tests can exercise the fallback without launching Chrome, the
-# same way `_mail_source` stands in for a mailbox. Signature matches `browser.submit`.
+# Replaceable so the tests can exercise the commit without launching Chrome, the same
+# way `_mail_source` stands in for a mailbox. Signature matches `browser.submit`.
 _browser_submit = None
 
 
-def _submit_in_browser(link, post, target_date, hotel_name, tag):
-    """Finish the application in real Chrome after curl's 申込する was refused.
+def _commit(link, post, target_date, hotel_name, tag):
+    """File the application in real Chrome. The only way that works.
 
-    Everything the curl path does past this point happens in the browser, so this
-    returns the final `(status, detail)` and records the reservation itself. The
-    hidden fields are dropped: `_method` and `authenticity_token` are already in the
-    DOM, and the scraped copies belong to a *different* page load.
+    curl is **not** tried. `POST /apply/confirm` answers 302 → /service_category/index
+    for curl whatever it sends — 0 for 3 in the logs, and refused across every variation
+    in the docs/SITE.md §5 bisect matrix — while Chrome is 2 for 2. Reading the form over
+    curl still works fine, so only the two committing POSTs moved.
+
+    Hidden fields are dropped: the DOM already has `_method` and `authenticity_token`,
+    and the scraped copies belong to a *different* page load.
     """
-    if not BROWSER_CONFIRM:
-        log(f"{tag}   {Y}BROWSER_CONFIRM is off, so 申込する ends here{X}")
-        return 'failed', 'apply post session rejected'
-
     submit = _browser_submit
     if submit is None:
         try:
             import browser
         except Exception as e:
-            # pydoll missing or broken. The hold and the mail still stand, so this
-            # is a degraded outcome, not a crash.
-            log(f"{tag}   {R}Cannot load browser ({e!r}); "
-                f"申込する cannot be retried in a browser{X}")
-            return 'failed', 'apply post session rejected (no browser available)'
+            # pydoll missing or broken. The hold and the mail still stand, so this is a
+            # degraded outcome, not a crash.
+            log(f"{tag}   {R}Cannot load browser ({e!r}); nothing can file this "
+                f"application{X}")
+            return 'failed', 'no browser available'
         submit = browser.submit
 
     values = {k: v for k, v in post.items()
               if k not in ('_method', 'authenticity_token')}
-    log(f"{tag}   {C}Retrying 申込する in real Chrome{X}")
+    log(f"{tag}   {C}Filing 申込する → 確認 in real Chrome{X}")
 
     status, detail = submit(
         link, values, log, tag,
@@ -461,7 +475,7 @@ def _submit_in_browser(link, post, target_date, hotel_name, tag):
         allow_commit=lambda: bh.confirm_allowed(target_date))
 
     if status == 'confirmed':
-        log(f"{tag}   {B}{G}RESERVED (browser): {hotel_name} on {target_date}"
+        log(f"{tag}   {B}{G}RESERVED: {hotel_name} on {target_date}"
             + (f' — 申込受付番号 {detail}' if detail else '') + X)
         _save_reservation(target_date, hotel_name, detail)
     return status, detail
@@ -470,43 +484,41 @@ def _submit_in_browser(link, post, target_date, hotel_name, tag):
 def parse_receipt(body):
     """The 申込受付番号 on 申込完了画面, or ''.
 
-    Searched against the **tag-stripped** text. The live page is
-    `<strong>申込受付番号：  10287126</strong>` — one tag around both — so a raw-markup
-    regex works by luck; one tag between them and `[0-9A-Za-z-]{4,}` captures
-    `strong`, writing a made-up number into the only record that a reservation exists.
+    Against the **tag-stripped** text. The live page is one tag around both label and
+    number, so a raw-markup regex works by luck; one tag between them and it captures
+    `strong`, writing a made-up number into the only record a reservation exists.
     """
     text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', body or ''))
     m = _RECEIPT_RE.search(text)
     return m.group(1) if m else ''
 
 
-def confirm_from_email(c, target_date, hotel_name, tag):
-    """Steps 7-9. Returns `(status, detail)`.
+def confirm_from_email(link, target_date, hotel_name, tag):
+    """The emailed leg, given an already-resolved application link.
 
-    status is one of:
-      'confirmed'  — 予約確定, `detail` is the 申込受付番号 (or '' if unparsed)
-      'deferred'   — deliberately left for a human; `detail` says why
-      'failed'     — could not get there; `detail` says how far it got
-
-    `c` is a `book_hotels.curl`-style callable bound to a cookie jar.
+    curl reads the applicant form and maps its fields; Chrome files it. Returns
+    `(status, detail)`: 'confirmed' (detail is the 申込受付番号), 'deferred' (left for a
+    human) or 'failed'. The read runs on its own cookie jar — the emailed link
+    establishes its own session, which is what lets this run on the worker.
     """
     label = f'{target_date}_{hotel_name}'
+    cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix='cookies_confirm_')
+    os.close(cookie_fd)
 
-    allowed, why = bh.confirm_allowed(target_date)
-    if not allowed:
-        log(f"{tag}   {Y}Not completing {hotel_name} for {target_date}: {why}{X}")
-        log(f"{tag}   {B}{Y}HUMAN NEEDED: the room is held and the email is sent. "
-            f"Open the link in the mail to {bh.EMAIL} and finish it now.{X}")
-        return 'deferred', why
+    def c(method, u, data=None, headers=None, retry=True):
+        return bh.curl(cookie_file, method, u, data, headers, retry)
 
-    log(f"{tag}   {C}Waiting for the confirmation mail{X}")
-    # 300s of slack on the IMAP SINCE floor absorbs clock skew between us and the
-    # mail server; the mail is dispatched seconds before this runs.
-    link = wait_for_apply_link(time.time() - 300)
-    if not link:
-        log(f"{tag}   {R}No confirmation mail within {CONFIRM_MAIL_TIMEOUT:.0f}s{X}")
-        return 'failed', 'mail not received'
-    log(f"{tag}   {C}Got the application link: {redact_url(link)}{X}")
+    try:
+        return _run_leg(c, link, target_date, hotel_name, tag, label)
+    finally:
+        try:
+            os.unlink(cookie_file)
+        except OSError:
+            pass
+
+
+def _run_leg(c, link, target_date, hotel_name, tag, label):
+    log(f"{tag}   {C}Application link: {redact_url(link)}{X}")
 
     s, body, loc = c('GET', link)
     if s == 302 and loc and not _rejected(s, body, loc):
@@ -535,80 +547,104 @@ def confirm_from_email(c, target_date, hotel_name, tag):
     log(f"{tag}   {C}Applicant form: {len(fields)} fields, "
         f"{len(unmapped)} unmapped{X}")
     if unmapped:
-        # Never submit a form we do not fully understand: these values are
-        # 資格認証のキー, validated against the insurance record.
+        # Never submit a form we do not fully understand.
         log(f"{tag}   {R}Unmapped required field(s): {', '.join(unmapped)}{X}")
         log(f"{tag}   {B}{Y}HUMAN NEEDED: form dumped to {bh.DEBUG_DIR}. The room "
             f"is held — finish from the mail now.{X}")
         bh._dump_debug(label, 'step10_unmapped_form', s, body, throttle=False)
         return 'deferred', f'unmapped: {", ".join(unmapped)}'
 
-    apply_url = urllib.parse.urljoin(link, action)
-
     allowed, why = bh.confirm_allowed(target_date)
     if not allowed:
         log(f"{tag}   {Y}Gate closed while reading the mail: {why}{X}")
         return 'deferred', why
 
-    # 申込する. Navigational in effect — it renders 申込内容確認画面 — so it stays
-    # retryable, but nothing past here may be repeated blindly.
-    s, body, loc = c('POST', apply_url, post, {'Referer': link})
-    if s == 302 and loc and not _rejected(s, body, loc):
-        s, body, loc = c('GET', loc)
-    if _rejected(s, body, loc):
-        # The 302 is served whatever we post — the site refuses the *client*, not
-        # the request. docs/SITE.md §5 has the bisect matrix and the open question of
-        # whether it reproduces off an intercepting HTTPS proxy.
-        log(f"{tag}   {R}申込する was rejected: the site dropped the session "
-            f"(Rails 302 to /service_category/index, independent of what we "
-            f"post — suspect the client/egress path, not the form){X}")
-        bh._dump_debug(label, 'step11_apply_rejected', s, body)
-        # Chrome is not refused where curl is, so hand this leg to a real browser
-        # rather than abandoning a held room. Only reached after curl was refused,
-        # so the day this stops happening the browser never launches.
-        return _submit_in_browser(link, post, target_date, hotel_name, tag)
-    if s != 200 or not body:
-        log(f"{tag}   {R}申込する returned {s}{X}")
-        bh._dump_debug(label, 'step11_apply_post', s, body)
-        return 'failed', f'apply post {s}'
-    if bh._NO_ROOMS_TEXT in body:
-        log(f"{tag}   {Y}Room gone before the application landed{X}")
-        return 'failed', 'room taken'
+    return _commit(link, post, target_date, hotel_name, tag)
 
-    action2, fields2 = parse_form(body, prefer_action='confirm')
-    if not action2:
-        log(f"{tag}   {R}No confirmation form on 申込内容確認画面{X}")
-        bh._dump_debug(label, 'step11_no_confirm_form', s, body)
-        return 'failed', 'no confirm form'
-    post2 = {f['name']: f['value'] for f in fields2
-             if f['type'] in ('hidden', 'text', 'select') and f['name']}
 
-    allowed, why = bh.confirm_allowed(target_date)
-    if not allowed:
-        log(f"{tag}   {Y}Gate closed before 確認: {why}{X}")
-        return 'deferred', why
+# ── the worker ───────────────────────────────────────────────────────
 
-    # 確認 — the point of no return. Not idempotent (it files the application and
-    # dispatches 申込完了メール) and `--max-time` can expire after the server has
-    # accepted it, so a repeat could file twice with no way to tell them apart.
-    log(f"{tag}   {B}確認: filing the application for {hotel_name} "
-        f"on {target_date}{X}")
-    s, body, loc = c('POST', urllib.parse.urljoin(apply_url, action2), post2,
-                     {'Referer': apply_url}, retry=False)
-    if s == 0:
-        log(f"{tag}   {R}確認 got no response: outcome unknown, NOT retrying. "
-            f"Check the mailbox for a 申込完了メール before trying again.{X}")
-        return 'failed', 'confirm outcome unknown'
-    if s == 302 and loc:
-        s, body, loc = c('GET', loc)
+def _drop(held_at, target_date, hotel_name, tag):
+    """Give up on a hold whose mail never arrived."""
+    log(f"{tag}   {R}No confirmation mail for {hotel_name} on {target_date} "
+        f"within {CONFIRM_MAIL_TIMEOUT:.0f}s{X}")
+    log(f"{tag}   {B}{Y}HUMAN NEEDED: the room is held and the mail was sent to "
+        f"{bh.EMAIL}. Open its link and finish now.{X}")
 
-    receipt = parse_receipt(body)
-    if receipt or '申込完了' in (body or ''):
-        log(f"{tag}   {B}{G}RESERVED: {hotel_name} on {target_date}"
-            + (f' — 申込受付番号 {receipt}' if receipt else '') + X)
-        _save_reservation(target_date, hotel_name, receipt)
-        return 'confirmed', receipt
 
-    log(f"{tag}   {R}確認 did not produce a completion page{X}")
-    bh._dump_debug(label, 'step12_confirm_result', s, body)
-    return 'failed', 'no completion page'
+def _process(hold, links):
+    """Run one hold's leg if a link is available. True when done with the hold, False
+    to leave it queued for a later poll."""
+    held_at, target_date, hotel_name = hold
+    tag = f'[MAIL {target_date[5:]}]'
+
+    link = _take_link(held_at, links)
+    if link is None:
+        if time.time() - held_at >= CONFIRM_MAIL_TIMEOUT:
+            _drop(held_at, target_date, hotel_name, tag)
+            return True
+        return False
+
+    try:
+        status, detail = confirm_from_email(link, target_date, hotel_name, tag)
+    except Exception as e:
+        # A hold plus a sent mail is worth keeping, so nothing here may kill the
+        # worker.
+        log(f"{tag}   {R}Confirmation raised {e!r}; the room is held and the mail "
+            f"is sent — finish it by hand{X}")
+        return True
+
+    if status == 'confirmed':
+        return True
+    log(f"{tag}   {Y}{hotel_name} on {target_date} not confirmed "
+        f"({status}: {detail}){X}")
+    # Every non-confirmed outcome leaves a held room and a sent mail a person can
+    # still finish. 'deferred' was assumed to announce itself, which was untrue of
+    # the browser path.
+    log(f"{tag}   {B}{Y}HUMAN NEEDED: {hotel_name} on {target_date} is held and the "
+        f"mail to {bh.EMAIL} is sent. Open its link and finish now.{X}")
+    return True
+
+
+def drain_once():
+    """One worker cycle: fetch mail once, then run each ready hold's leg serially.
+
+    Returns how many holds left the queue. Separate from `worker()` so the tests can
+    drive one cycle instead of racing a loop.
+    """
+    with _pending_lock:
+        queue = sorted(_pending)
+    if not queue:
+        return 0
+
+    links = _fetch_links(min(h[0] for h in queue) - _CLOCK_SLACK)
+    done = 0
+    for hold in queue:
+        if _process(hold, links):
+            done += 1
+            with _pending_lock:
+                if hold in _pending:
+                    _pending.remove(hold)
+    return done
+
+
+def worker(stop_event=None):
+    """Drain the pending-hold queue, serially, forever.
+
+    Legs run one at a time, which is what makes `_take_link`'s claiming sufficient: no
+    two are ever mid-flight competing for the same mail. The loop body is guarded —
+    this is the only thing that completes an application and main() never joins it, so
+    an escaping exception would strand every future hold silently.
+    """
+    def nap(seconds):
+        if stop_event is not None:
+            stop_event.wait(seconds)
+        else:
+            time.sleep(seconds)
+
+    while not (stop_event is not None and stop_event.is_set()):
+        try:
+            drain_once()
+        except Exception as e:
+            log(f"{R}Confirm worker error: {e!r}{X}")
+        nap(CONFIRM_POLL_INTERVAL)

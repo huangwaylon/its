@@ -15,9 +15,8 @@ Verified live end to end on 2026-08-19: ブルーベリーヒル勝浦, 2026-09-
 
 ## 1. Published rules
 
-- **Two channels.** 抽選申込 (lottery) and 空き照会申込 (vacancy). Only the second is
-  automated — the lottery allocates 抽選により, by lot, so a fast client wins nothing. It caps
-  at five applications a month per insurance 記号番号, and a win is already 予約確定.
+- **Two channels.** Only 空き照会申込 is automated; 抽選申込 allocates by lot, so a fast client
+  wins nothing. Five applications a month per 記号番号, and a win is already 予約確定.
 - **Release instant.** Whatever the draw did not fill drops at **00:00 JST on the 照会開始日**.
   In FY2026 that is the 27th of M−2 in all twelve rows; FY2025 used the 25th, 26th or 27th
   depending on the month. **Per-year editorial — never hard-code it.**
@@ -49,32 +48,28 @@ Verified live end to end on 2026-08-19: ブルーベリーヒル勝浦, 2026-09-
 - **`PRIORITY_HOTELS = ['NAGU']` is NAGU勝浦, 夏季**: D−4, and never listed for stays past 9/30
   (「夏季保養施設の9/30～2泊…は選択いただけません」 — the season boundary itself is inferred).
 - **Month-end two-night stays** open only from the 照会開始日 of the month the *second* night
-  falls in. Applications are per the month the stay date falls in — which is why there is one
-  scanner thread per month.
+  falls in. Applications are per stay month, hence one scanner thread per month.
 - **Cancellation is the only supply after the release instant, and it is structured.** Web
-  self-service until **D−10** only; from D−9 it is 50% of the fee and telephone-only, Mon–Fri
-  09:00–17:00 JST excluding holidays; full price on the day. Nothing lapses on its own, and
-  reducing guests or nights counts as a cancellation. **No waitlist exists** — polling is the
-  only mechanism. So late releases can physically only appear on weekday afternoons.
+  self-service until **D−10**; from D−9 it is 50% and telephone-only, Mon–Fri 09:00–17:00 JST;
+  full price on the day. Nothing lapses on its own, and reducing guests or nights counts as a
+  cancellation. **No waitlist exists**, so polling is the only mechanism — and late releases
+  can physically only appear on weekday afternoons.
 - **Stay limits.** Max 2 nights per stay per facility; no overlapping applications at one
   facility; max 10 rooms per application per date.
 - **Only dates with vacancy are displayed**, and a displayed date can still yield no room
-  matching the guest/room count. The hotel list for a date is headed 「{date}に空きがある施設です」
-  and typically holds about three facilities, not the 24-facility roster.
-- **Vacancy search is suspended while a draw is processed** (a banner on the front page). Start
-  and end are unpublished and **unverified**; the bot polls straight through, so a suspension
-  looks like a quiet month.
+  matching the guest/room count. The list for a date is headed 「{date}に空きがある施設です」 and
+  typically holds about three facilities, not the whole roster.
+- **Vacancy search is suspended while a draw is processed** (front-page banner). Start and end
+  are **unverified**; the bot polls through it, so a suspension looks like a quiet month.
 
 ## 2. Measured
 
 - **A 503 carrying `<title>セキュリティアラート</title>` is a ~24-hour, IP-scoped ban, not site
-  load.** The body says so: アクセス過多 from this IP, access blocked 約**24時間**, use another
-  network. All 467 non-empty recovered dumps are that page, across three episodes (2026-04-07,
-  2026-04-12, 2026-08-17) over three egress IPs, every one served on the scanner's
-  `calendar_get` — simply the most frequent request. **Request volume is therefore the dominant
-  operational constraint**: one ban costs a full day of every target date at once, so a faster
-  poll that earns a ban is strictly worse than a slower poll that does not. Budget freed by
-  `SCAN_REUSE_SESSION` should be banked, not respent.
+  load.** The body says so: アクセス過多 from this IP, blocked 約**24時間**. All 467 non-empty
+  recovered dumps are that page, across three episodes (2026-04-07, 2026-04-12, 2026-08-17)
+  over three egress IPs, every one on the scanner's `calendar_get` — the most frequent request.
+  **So request volume is the dominant operational constraint**: one ban costs a full day of
+  every target date at once, and budget freed by `SCAN_REUSE_SESSION` should be banked.
 - **The dump corpus is not a census.** `DEBUG_DUMP_KEEP` prunes oldest-first, so what survives
   is survivorship-biased. An earlier reading of the timestamps alone concluded these 503s were
   ordinary office-hours load; the bodies flatly contradict it. **Read the bodies.**
@@ -150,7 +145,9 @@ Markup-exact gotchas:
 
 The mail is from `noreply@mail.its-kenpo.or.jp`, subject 「{施設名}申込手続きのご案内」, with
 exactly one URL `/apply/new?c=<uuid4>`. **It names only the date it was sent**, never the stay
-date, so a stay-date filter can never match; arrival time is the only honest discriminator.
+date, and the subject names only the facility — so with two holds on one facility nothing in the
+mail distinguishes them. Arrival order is all there is, which is why the confirm worker pairs
+holds oldest-to-oldest and claims each link exactly once.
 
 `GET /apply/new?c=<uuid>` → one form to `/apply/confirm?c=<uuid>` with 15 controls, every one a trap:
 
@@ -172,13 +169,16 @@ inside *one* tag, so a raw-markup regex reads it correctly only by luck; one tag
 
 **When the hold lapses** the emailed link answers **200 with no form at all**:
 「30分が経過しましたので、ご利用のURLは無効となりました。」 Only that text tells it apart from the
-form's markup having changed under the parser.
+form's markup having changed under the parser — or from a link another hold already consumed.
 
-### `POST /apply/confirm` refuses curl and accepts Chrome — open question
+### `POST /apply/confirm` refuses curl and accepts Chrome — why Chrome commits
 
-Measured 2026-08-19 against a live hold, unresolved. The POST is answered `302 →
-/service_category/index`, empty body, `x-runtime ≈ 0.02` — a Rails `before_action`, bouncing
-before the body is read. Served identically for:
+Measured 2026-08-19 against a live hold, cause still unresolved. **curl is 0 for 3 and Chrome
+is 2 for 2** (申込受付番号 10287126 and 10287494), so the curl attempt has been deleted rather
+than kept as a dead first try; the GET and the form parse still run over curl, which works
+every time. The POST is answered `302 → /service_category/index`, empty body,
+`x-runtime ≈ 0.02` — a Rails `before_action`, bouncing before the body is read. Served
+identically for:
 
 - a valid `authenticity_token`, a corrupted one, and none at all; an empty body;
 - `+ utf8=✓`, `+ commit=申込する`, `+ c=` in the body, `_method` omitted;
@@ -187,25 +187,23 @@ before the body is read. Served identically for:
 - the form GET and the POST on **one** connection (`--next`).
 
 The same POST — same URL, same 15 fields, same cookies — **succeeds from real Chrome**, both as
-`form.submit()` and as an in-page `fetch()` with the identical body. `fetch()` sends none of the
-navigation headers and still works, so the difference is not the request: it is the **client**.
-What is left is curl's TLS fingerprint and the egress path.
+`form.submit()` and as an in-page `fetch()`. `fetch()` sends none of the navigation headers and
+still works, so the difference is the **client**, not the request: curl's TLS fingerprint and the
+egress path are what is left.
 
 **That measurement was taken inside a sandbox whose HTTPS proxy intercepts and may present a
 different source address per request.** A session pinned to `request.remote_ip` would behave
-exactly like this, including the GET always succeeding — the GET is what establishes the session.
-**Check whether it reproduces off a proxied network before changing anything about the request.**
-The 抽選処理 banner on these pages is site-wide layout (it appears on the 404 too), not evidence.
-
-This is why the browser fallback exists, and why curl stays the primary path: the browser fires
-only after curl was refused, so if the cause is environmental the fallback stops firing on its
-own with nothing to undo.
+exactly like this, including the GET always succeeding — the GET establishes the session.
+**Check whether it reproduces off a proxied network before restoring a curl commit path.** If
+it does not, curl would be the faster committer — the Chrome path costs ~20 s and a browser
+launch per reservation. The 抽選処理 banner is site-wide layout (it appears on the 404 too),
+not evidence.
 
 ## 6. Turnstile
 
 Turnstile rejects **headless** Chrome and detects **Playwright**'s bundled Chromium; pydoll
-driving real Chrome over CDP passes, and a **minimised** window still passes. The checkbox lives
-in a cross-origin iframe about **28 px in from the `.cf-turnstile` box's left edge**, vertically
-centred, reachable only by CDP mouse events — which cross the iframe boundary where a DOM click
-does not. Only the checkbox path works: an escalated interactive challenge simply never yields a
-token. `MAX_ATTEMPTS × TOKEN_TIMEOUT ≈ 105 s`, which must stay inside `CAPTCHA_TIMEOUT`.
+driving real Chrome over CDP passes, and a **minimised** window still passes. The checkbox is in
+a cross-origin iframe about **28 px in from the `.cf-turnstile` box's left edge**, vertically
+centred, reachable only by CDP mouse events — a DOM click does not cross the boundary. Only the
+checkbox path works; an escalated interactive challenge never yields a token.
+`MAX_ATTEMPTS × TOKEN_TIMEOUT ≈ 105 s` must stay inside `CAPTCHA_TIMEOUT`.

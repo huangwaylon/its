@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Cloudflare Turnstile solver — real Chrome over CDP, via pydoll.
 
-Playwright's bundled Chromium trips the bot detection; headless is rejected outright.
-See docs/SITE.md §6 for what the site does and why the click is where it is.
+Playwright's bundled Chromium trips the bot detection; headless is rejected. See
+docs/SITE.md §6 for the site's behaviour and why the click lands where it does.
 
-`_click_turnstile_checkbox` and `minimise` reach for CDP through the **private**
+`_click_turnstile_checkbox` and `minimise` reach CDP through the **private**
 `tab._connection_handler`, because mouse events must cross a cross-origin iframe
-boundary, which a DOM click cannot. A pydoll upgrade can break those two call sites.
+boundary where a DOM click cannot. A pydoll upgrade can break those two call sites.
 
-Usage:
     .venv/bin/python captcha_solver.py       # solve, cache the calendar URL
 """
 
@@ -48,11 +47,8 @@ def log(msg):
 
 
 async def _save_user_agent(tab):
-    """Record Chrome's user agent alongside the session token it minted.
-
-    book_hotels replays the token with curl; sending the UA of the browser that
-    actually solved the CAPTCHA keeps the two from disagreeing.
-    """
+    """Record Chrome's UA alongside the session token it minted, so curl's replays and
+    the browser that solved the CAPTCHA cannot disagree."""
     try:
         ua = _script_value(await tab.execute_script('return navigator.userAgent'))
         ua = (ua.splitlines() or [''])[0].strip()
@@ -86,9 +82,8 @@ async def _click_turnstile_checkbox(tab):
     log(f'Turnstile widget bounds: x={bounds["x"]:.0f} y={bounds["y"]:.0f} '
         f'w={bounds["width"]:.0f} h={bounds["height"]:.0f}')
 
-    # The checkbox is rendered inside a cross-origin iframe at ~28px from
-    # the left edge, vertically centered. CDP mouse events reach across
-    # iframe boundaries.
+    # The checkbox sits in a cross-origin iframe ~28px from the left edge,
+    # vertically centred. CDP mouse events cross iframe boundaries; clicks do not.
     checkbox_x = int(bounds['x'] + 28)
     checkbox_y = int(bounds['y'] + bounds['height'] / 2)
     log(f'Clicking Turnstile checkbox at ({checkbox_x}, {checkbox_y})...')
@@ -116,8 +111,7 @@ async def _click_turnstile_checkbox(tab):
         )
         token = _script_value(token_result)
         if token:
-            # Length only. This is Cloudflare's single-use response token; a
-            # 60-character prefix in the log was never diagnostic of anything.
+            # Length only: this is Cloudflare's single-use response token.
             log(f'Turnstile token obtained ({len(token)} chars)')
             return token
         elapsed = time.time() - (deadline - TOKEN_TIMEOUT)
@@ -153,11 +147,9 @@ async def solve_turnstile(tab):
 async def get_calendar_url():
     """Solve the CAPTCHA and cache a fresh calendar URL, under a hard deadline.
 
-    The solve occupies the one thread that can re-mint a session, so an untimed
-    Chrome hang would stop all booking behind a healthy-looking process. Serialised
-    against the application-filing browser — see `browser`.
-
-    Returns the URL string, or None on failure or timeout.
+    The solve occupies the one thread that can re-mint a session, so an untimed Chrome
+    hang would stop all booking behind a healthy-looking process. Serialised against
+    the application-filing browser. None on failure or timeout.
     """
     with browser.chrome() as owned:
         if not owned:
@@ -176,13 +168,10 @@ async def get_calendar_url():
 
 
 def _kill_stray_chrome():
-    """Kill Chrome processes left behind by an abandoned solve.
-
-    A cancelled `async with Chrome(...)` cannot always finish pydoll's teardown, and
-    each orphan keeps a profile directory and a few hundred MB of RSS. Only safe
-    under the `browser.chrome()` lock: the match is on pydoll's launch flags, which
-    an application-filing browser carries too.
-    """
+    """Kill Chrome processes left behind by an abandoned solve — a cancelled
+    `async with Chrome(...)` cannot always finish pydoll's teardown, and each orphan
+    keeps a profile and a few hundred MB. Only safe under `browser.chrome()`: the match
+    is on launch flags an application-filing browser carries too."""
     try:
         out = subprocess.run(['pgrep', '-f', 'remote-debugging-port'],
                              capture_output=True, text=True, timeout=10).stdout
@@ -243,9 +232,8 @@ async def _solve_and_cache():
         calendar_url = await tab.current_url
         log(f'Calendar URL obtained — {redact_url(calendar_url)}')
 
-        # Refuse to cache anything that is not a calendar session: a non-calendar
-        # URL still answers 200, so check_cached_url would call the session healthy
-        # and no re-solve would ever fire.
+        # A non-calendar URL still answers 200, so caching one makes the session
+        # look healthy forever and no re-solve ever fires.
         if 'calendar_select' not in (calendar_url or ''):
             log(f'FAILED: not a calendar URL, not caching: {redact_url(calendar_url)}')
             return None

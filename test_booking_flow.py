@@ -79,12 +79,11 @@ class FakeITS:
         self.blank_cached_nav = False
         self.completed = []           # (email, hotel) pairs that reached send_complete
         self.selected_hotel = {}      # cookie session -> hotel name, for step 5
-        # The emailed leg. 'ok' | 'expired' | 'reject_apply' | 'no_confirm_form'
-        self.applicant_mode = 'ok'
+        self.applicant_mode = 'ok'   # 'ok' | 'expired' | 'reject_apply'
         self.filed = []               # bodies that reached 申込する
         self.confirmed = []           # bodies that reached 確認
         self.browser_calls = []       # calls into the Chrome fallback
-        self.browser_result = ('failed', 'apply post session rejected')
+        self.browser_result = ('confirmed', '10287126')
 
     def nav_was_cached(self):
         """True when the nav POST just recorded had no calendar GET before it."""
@@ -385,11 +384,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, HOLD_EXPIRED_PAGE)
             return self._send(200, APPLICANT_FORM_PAGE)
 
+        # These two are **tripwires**, not the path under test. Chrome commits now, so
+        # nothing should ever reach them; if curl regresses into committing, `filed` /
+        # `confirmed` fill and test_curl_is_never_asked_to_commit fails loudly.
         if path.startswith('/apply/confirm') and 'c=' in path:
             if STATE.applicant_mode == 'reject_apply':
                 return self._session_dead()
-            if STATE.applicant_mode == 'no_confirm_form':
-                return self._send(200, '<html><body><p>なにもありません</p></body></html>')
             with STATE.lock:
                 STATE.filed.append(dict(form))
             return self._send(200, APPLY_CONFIRM_PAGE)
@@ -478,13 +478,12 @@ class Env:
     # confirm_booking's own module-level knobs, restored the same way.
     CB_ATTRS = ('_mail_source', 'CONFIRM_MAIL_TIMEOUT',
                 'RESERVATIONS_FILE', 'BASE', 'APPLICANT',
-                '_browser_submit', 'BROWSER_CONFIRM')
+                '_browser_submit')
 
     def __init__(self, port, skip=(), priority=('NAGU',), confirm=False,
-                 applicant=None, mail=True, browser_confirm=True):
+                 applicant=None, mail=True):
         self.port, self.skip, self.priority = port, list(skip), list(priority)
         self.confirm, self.applicant, self.mail = confirm, applicant, mail
-        self.browser_confirm = browser_confirm
 
     def __enter__(self):
         self.saved = {a: getattr(bh, a) for a in self.ATTRS}
@@ -526,13 +525,15 @@ class Env:
         STATE.applicant_mode = 'ok'
         STATE.filed.clear()
         STATE.confirmed.clear()
+        # Both are module-global and several tests share a link fixture, so a
+        # leftover claim would make the next test's hold find no mail.
+        cb._pending.clear()
+        cb._claimed.clear()
 
-        # The emailed leg reaches the network for real: confirm_from_email polls
-        # IMAP for up to CONFIRM_MAIL_TIMEOUT seconds. Left alone, every booking in
-        # this file blocked 180 s against the operator's actual Gmail — over an hour
-        # for the suite, with no output, and only if credentials happened to be
-        # present. So it is off by default and the tests that want it inject a mail
-        # source instead of a mailbox.
+        # The emailed leg reaches the network for real: the confirm worker polls
+        # IMAP. Left alone, every booking in this file would reach the operator's
+        # actual Gmail. So AUTO_CONFIRM is off by default and the tests that want
+        # the leg inject a mail source instead of a mailbox.
         cb.BASE = bh.BASE
         cb.RESERVATIONS_FILE = os.path.join(d, 'reservations.json')
         cb.CONFIRM_MAIL_TIMEOUT = 1.0
@@ -546,14 +547,11 @@ class Env:
         cb._mail_source = (lambda _since: [f'手続きのご案内\n{link}\n']) if self.mail \
             else (lambda _since: [])
 
-        # The browser fallback must never launch a real Chrome from a test. Left
-        # unstubbed, `test_confirm_rejected_apply_asks_for_a_human` would import
-        # browser.submit and open a window. The default stub returns exactly what the
-        # curl-only path used to, so the tests written before the fallback existed
-        # keep asserting what they meant.
-        cb.BROWSER_CONFIRM = self.browser_confirm
+        # The commit must never launch a real Chrome from a test. Chrome is now the
+        # only thing that can file an application, so every confirm test goes through
+        # this stub.
         STATE.browser_calls.clear()
-        STATE.browser_result = ('failed', 'apply post session rejected')
+        STATE.browser_result = ('confirmed', '10287126')
 
         def _browser_stub(link_, values, log_, tag_, allow_commit):
             STATE.browser_calls.append({
@@ -1499,13 +1497,14 @@ def _confirm(port, mode=None, setup=None, **kw):
             STATE.applicant_mode = mode
         if setup:
             setup()
-        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
-
-        def c(method, u, data=None, headers=None, retry=True):
-            return bh.curl(cookie, method, u, data, headers, retry)
-
         with CapturedLog() as logged:
-            status, detail = cb.confirm_from_email(c, TARGET, NAGU, '[TEST]')
+            links = cb._fetch_links(0)
+            link = cb._take_link(0, links) if links else None
+            if link is None:
+                status, detail = 'failed', 'mail not received'
+            else:
+                status, detail = cb.confirm_from_email(
+                    link, TARGET, NAGU, '[TEST]')
         captured = {'reservations': env.reservations(), 'dumps': env.dumps()}
         return status, detail, captured, logged
 
@@ -1515,18 +1514,17 @@ def test_confirm_files_the_application(port):
     status, detail, got, _log = _confirm(port)
     check('confirm: reports confirmed', status == 'confirmed', f'{status}: {detail}')
     check('confirm: parses the 申込受付番号', detail == '10287126', repr(detail))
-    check('confirm: 申込する reached the server', len(STATE.filed) == 1,
-          str(len(STATE.filed)))
-    check('confirm: 確認 reached the server', len(STATE.confirmed) == 1,
-          str(len(STATE.confirmed)))
+    check('confirm: the commit went to Chrome exactly once',
+          len(STATE.browser_calls) == 1, str(len(STATE.browser_calls)))
     check('confirm: reservation recorded with its receipt',
           got['reservations'] == {TARGET: [f'{NAGU}\t10287126']},
           str(got['reservations']))
-    # The browser is a fallback; it must never fire when curl gets through.
-    check('confirm: Chrome was never launched', STATE.browser_calls == [],
-          str(STATE.browser_calls))
+    # curl reads the form and stops. These only fill if it tried to commit.
+    check('confirm: curl never committed',
+          STATE.filed == [] and STATE.confirmed == [],
+          f'{STATE.filed} {STATE.confirmed}')
 
-    filed = STATE.filed[0] if STATE.filed else {}
+    filed = STATE.browser_calls[0]['values'] if STATE.browser_calls else {}
     # Every identity field, and the option *values* rather than the labels — the
     # form offers man/woman and myself/family, so matching 女 or 本人 literally
     # would have submitted an empty select.
@@ -1547,10 +1545,12 @@ def test_confirm_files_the_application(port):
           repr(filed.get('apply[relationship]')))
     check('confirm: 都道府県 sent as its code',
           filed.get('apply[state]') == '13', repr(filed.get('apply[state]')))
-    check('confirm: _method echoed verbatim', filed.get('_method') == 'true',
-          repr(filed.get('_method')))
-    check('confirm: authenticity_token echoed',
-          filed.get('authenticity_token') == 'AUTH-APPLICANT', repr(filed))
+    # The DOM already holds the live `_method` and `authenticity_token`; the scraped
+    # copies belong to a different page load, so handing them over would break the
+    # submit for a reason that looks like the bug this path works around.
+    check('confirm: hidden fields are not handed to Chrome',
+          '_method' not in filed and 'authenticity_token' not in filed,
+          str(sorted(filed)))
     # The 必須 markers are <img name="..._img"> elements. A parser that took every
     # named element for a control would add a dozen fields no browser submits.
     check('confirm: the 必須 marker images are not submitted',
@@ -1573,23 +1573,29 @@ def test_confirm_expired_hold_is_not_a_parse_failure(port):
     check('expired: nothing was filed', STATE.filed == [], str(STATE.filed))
 
 
-def test_confirm_rejected_apply_asks_for_a_human(port):
-    """申込する bounced to /service_category/index: dump it, and shout.
+def test_curl_is_never_asked_to_commit(port):
+    """curl reads the form; Chrome files it. curl must not POST /apply/confirm at all.
 
-    Reproduced live on 2026-08-19. `browser_confirm=False` so the outcome under test
-    is confirm_booking's own, not the browser stub's canned result.
+    It never once worked — 0 for 3 in the logs, refused across every variation in the
+    docs/SITE.md §5 matrix — so the attempt was deleted rather than left as a dead first
+    try. `applicant_mode='reject_apply'` makes the fake refuse a curl commit, and the
+    booking must succeed anyway because curl never tries.
     """
-    status, detail, got, logged = _confirm(port, mode='reject_apply',
-                                           browser_confirm=False)
-    check('rejected: failed with the session-rejected detail',
-          (status, detail) == ('failed', 'apply post session rejected'),
-          f'{status}: {detail}')
-    check('rejected: dumped for diagnosis',
-          any('step11_apply_rejected' in f for f in got['dumps']), str(got['dumps']))
-    check('rejected: 確認 was never reached', STATE.confirmed == [],
-          str(STATE.confirmed))
-    check('rejected: the operator is told it is the client, not the form',
-          logged.saw('independent of what we'), str(logged.lines))
+    status, detail, got, logged = _confirm(port, mode='reject_apply')
+    check('read-only: confirmed anyway, because curl never tried',
+          (status, detail) == ('confirmed', '10287126'), f'{status}: {detail}')
+    check('read-only: curl never POSTed the apply form',
+          STATE.count('POST /apply/confirm') == 0,
+          str(STATE.count('POST /apply/confirm')))
+    check('read-only: curl never POSTed the completion form',
+          STATE.count('POST /apply/complete') == 0,
+          str(STATE.count('POST /apply/complete')))
+    check('read-only: curl did still read the applicant form',
+          STATE.count('GET /apply/new') >= 1, str(STATE.count('GET /apply/new')))
+    check('read-only: no rejection dump, because nothing was rejected',
+          not any('apply_rejected' in f for f in got['dumps']), str(got['dumps']))
+    check('read-only: says it is filing in Chrome',
+          logged.saw('Filing 申込する'), str(logged.lines))
 
 
 def test_confirm_never_submits_a_form_it_cannot_fill(port):
@@ -1600,13 +1606,9 @@ def test_confirm_never_submits_a_form_it_cannot_fill(port):
     """
     with Env(port, confirm=True,
              applicant=dict(APPLICANT_FIXTURE, tel='', addr='')) as env:
-        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
-
-        def c(m, u, d=None, h=None, retry=True):
-            return bh.curl(cookie, m, u, d, h, retry)
-
         with CapturedLog() as logged:
-            status, detail = cb.confirm_from_email(c, TARGET, NAGU, '[TEST]')
+            link = cb._take_link(0, cb._fetch_links(0))
+            status, detail = cb.confirm_from_email(link, TARGET, NAGU, '[TEST]')
         check('unmapped: deferred, not submitted', status == 'deferred',
               f'{status}: {detail}')
         check('unmapped: names the fields it could not fill',
@@ -1619,40 +1621,110 @@ def test_confirm_never_submits_a_form_it_cannot_fill(port):
               str(logged.lines))
 
 
-def test_confirm_final_post_is_never_retried(port):
-    """確認 files the application; a lost response must not be repeated."""
-    def arrange():
-        bh.CURL_MAX_ATTEMPTS = 3
-        STATE.fail_once['/apply/complete'] = [HANGUP]
-
-    status, detail, _got, logged = _confirm(port, setup=arrange)
-    check('confirm-retry: outcome reported as unknown',
-          (status, detail) == ('failed', 'confirm outcome unknown'),
-          f'{status}: {detail}')
-    check('confirm-retry: 確認 was sent exactly once',
-          STATE.count('POST /apply/complete') == 1,
-          str(STATE.count('POST /apply/complete')))
-    check('confirm-retry: says to check the mailbox before retrying',
-          logged.saw('申込完了メール'), str(logged.lines))
+def test_worker_gives_up_when_no_mail_arrives(port):
+    """A hold whose mail never lands is dropped with HUMAN NEEDED, not retried forever."""
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE), mail=False):
+        # Held longer ago than the mail budget, so this cycle is its last.
+        cb.enqueue(TARGET, NAGU, held_at=time.time() - 10)
+        check('no-mail: queued', cb.pending_count() == 1, str(cb.pending_count()))
+        with CapturedLog() as logged:
+            done = cb.drain_once()
+        check('no-mail: dropped from the queue', done == 1 and cb.pending_count() == 0,
+              f'done={done} pending={cb.pending_count()}')
+        check('no-mail: nothing filed', STATE.filed == [], str(STATE.filed))
+        check('no-mail: HUMAN NEEDED logged', logged.saw('HUMAN NEEDED'),
+              str(logged.lines))
 
 
-def test_confirm_no_mail_gives_up_without_filing(port):
-    """No confirmation mail inside the budget: report it, file nothing."""
-    status, detail, _got, _log = _confirm(port, mail=False)
-    check('no-mail: reported', (status, detail) == ('failed', 'mail not received'),
-          f'{status}: {detail}')
-    check('no-mail: nothing filed', STATE.filed == [], str(STATE.filed))
+def test_worker_keeps_a_hold_queued_until_its_mail_arrives(port):
+    """A recent hold with no mail yet stays queued rather than being abandoned."""
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE), mail=False):
+        cb.CONFIRM_MAIL_TIMEOUT = 60
+        cb.enqueue(TARGET, NAGU)          # just now, so the budget has not expired
+        done = cb.drain_once()
+        check('patience: not dropped', done == 0 and cb.pending_count() == 1,
+              f'done={done} pending={cb.pending_count()}')
+        check('patience: nothing filed', STATE.filed == [], str(STATE.filed))
 
 
-def test_browser_fallback_files_what_curl_could_not(port):
-    """申込する refused over curl -> finish in Chrome, and record the reservation.
+def test_two_holds_never_share_one_application_link(port):
+    """The bug this restructure exists for.
 
-    The fallback exists because the live site answers curl's POST /apply/confirm with
-    a 302 to /service_category/index whatever it sends, while the identical POST from
-    Chrome succeeds. Chrome itself is stubbed here; what is under test is the wiring.
+    On 2026-08-19 two dates were held on the same facility in the same second. Each
+    booking thread ran its own emailed leg and the newest-mail-wins matcher handed
+    both the *same* `c=` UUID: one application was filed against an unknown date and
+    the other hold was wasted (its link had already been consumed, which surfaced as
+    "Browser filled 0/13 fields ... :missing").
+
+    The worker drains holds oldest-first and claims each link, so two holds can no
+    longer collide however close together they were taken.
+    """
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)) as env:
+        first = f'{bh.BASE}/apply/new?c=' + 'a' * 36
+        second = f'{bh.BASE}/apply/new?c=' + 'b' * 36
+        # Two mails, one per hold, both "arriving" with no Date header — the
+        # worst case for telling them apart.
+        cb._mail_source = lambda _since: [f'ご案内 {first} ', f'ご案内 {second} ']
+
+        now = time.time()
+        cb.enqueue('2026-09-01', NAGU, held_at=now)
+        cb.enqueue('2026-09-16', NAGU, held_at=now)     # same second, as observed
+        check('share: both queued', cb.pending_count() == 2, str(cb.pending_count()))
+
+        cb.drain_once()
+
+        check('share: both holds handled', cb.pending_count() == 0,
+              str(cb.pending_count()))
+        check('share: two distinct links were claimed', len(cb._claimed) == 2,
+              str(sorted(cb._claimed)))
+        # The whole point: two applications reached the server, not one twice.
+        check('share: two applications were filed, not one twice',
+              len(STATE.browser_calls) == 2, str(len(STATE.browser_calls)))
+        check('share: each got its own link',
+              len({c['link'] for c in STATE.browser_calls}) == 2,
+              str([c['link'] for c in STATE.browser_calls]))
+        reservations = env.reservations()
+        check('share: a reservation recorded for each date',
+              sorted(reservations) == ['2026-09-01', '2026-09-16'],
+              str(reservations))
+
+
+def test_a_claimed_link_is_never_handed_out_twice(port):
+    """`_take_link` is the guard; assert it directly, without the HTTP round trip."""
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)):
+        links = [(f'{bh.BASE}/apply/new?c=' + 'a' * 36, None)]
+        one = cb._take_link(0, links)
+        two = cb._take_link(0, links)
+        check('claim: first caller gets the link', one is not None, repr(one))
+        check('claim: second caller gets nothing', two is None, repr(two))
+
+
+def test_worker_survives_a_leg_that_raises(port):
+    """The worker is the only thing that completes an application; it may not die."""
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)):
+        saved = cb.confirm_from_email
+        try:
+            def boom(*_a, **_k):
+                raise RuntimeError('leg exploded')
+            cb.confirm_from_email = boom
+            cb.enqueue(TARGET, NAGU)
+            with CapturedLog() as logged:
+                done = cb.drain_once()
+            check('worker-raise: hold still cleared', done == 1, str(done))
+            check('worker-raise: reported for a human',
+                  logged.saw('finish it by hand'), str(logged.lines))
+        finally:
+            cb.confirm_from_email = saved
+
+
+def test_chrome_files_the_application(port):
+    """Chrome is the only committer: it gets the values, files, and is recorded.
+
+    Chrome itself is stubbed; what is under test is the wiring — which values reach it,
+    and that its receipt lands in reservations.json.
     """
     status, detail, got, logged = _confirm(
-        port, mode='reject_apply',
+        port,
         setup=lambda: setattr(STATE, 'browser_result', ('confirmed', '10287126')))
 
     check('fallback: reports confirmed', (status, detail) == ('confirmed', '10287126'),
@@ -1662,10 +1734,9 @@ def test_browser_fallback_files_what_curl_could_not(port):
     check('fallback: reservation recorded from the browser path',
           got['reservations'] == {TARGET: [f'{NAGU}\t10287126']},
           str(got['reservations']))
-    check('fallback: says it went to the browser',
-          logged.saw('Retrying 申込する in real Chrome'), str(logged.lines))
-    check('fallback: reports RESERVED', logged.saw('RESERVED (browser)'),
-          str(logged.lines))
+    check('fallback: says it is filing in the browser',
+          logged.saw('Filing 申込する → 確認 in real Chrome'), str(logged.lines))
+    check('fallback: reports RESERVED', logged.saw('RESERVED'), str(logged.lines))
 
     call = STATE.browser_calls[0] if STATE.browser_calls else {}
     values = call.get('values', {})
@@ -1703,46 +1774,43 @@ def test_browser_fallback_rechecks_the_gate_live(port):
         return 'deferred', seen['allowed'][1]
 
     status, detail, _got, _log = _confirm(
-        port, mode='reject_apply',
-        setup=lambda: setattr(STATE, 'browser_result', late_gate))
+        port, setup=lambda: setattr(STATE, 'browser_result', late_gate))
     check('gate-live: allow_commit is callable and live',
           seen.get('allowed', (None,))[0] is False, str(seen))
     check('gate-live: a closed gate defers rather than filing',
           status == 'deferred', f'{status}: {detail}')
-    check('gate-live: nothing was confirmed', STATE.confirmed == [],
+    check('gate-live: nothing was filed', STATE.confirmed == [],
           str(STATE.confirmed))
 
 
-def test_browser_fallback_can_be_turned_off(port):
-    """BROWSER_CONFIRM=False keeps the pre-fallback behaviour exactly."""
-    status, detail, _got, logged = _confirm(port, mode='reject_apply',
-                                            browser_confirm=False)
-    check('off: fails as it did before the fallback existed',
-          (status, detail) == ('failed', 'apply post session rejected'),
-          f'{status}: {detail}')
-    check('off: Chrome not launched', STATE.browser_calls == [],
-          str(STATE.browser_calls))
-    check('off: says why', logged.saw('BROWSER_CONFIRM is off'), str(logged.lines))
-
-
 def test_browser_fallback_failure_still_asks_for_a_human(port):
-    """If Chrome cannot finish it either, the room is still held — say so."""
+    """If Chrome cannot finish it either, the room is still held — say so.
+
+    Booking only queues now, so this drives the worker: the hold must survive the
+    booking pass, and the worker must report it for a person. That HUMAN NEEDED line
+    is the one the old code omitted for a browser 'deferred'/'failed'.
+    """
     with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)):
-        STATE.applicant_mode = 'reject_apply'
         STATE.browser_result = ('failed', 'browser submit outcome unknown')
-        with CapturedLog() as logged:
+        with CapturedLog() as booking_log:
             _d, booked = bh.book_all_hotels_for_date(TARGET, 'TEST')
         check('fallback-fail: the hold is still recorded', NAGU in booked, str(booked))
+        check('fallback-fail: booking only queued, it did not run the leg',
+              STATE.browser_calls == [], str(STATE.browser_calls))
+        check('fallback-fail: queued for the worker', cb.pending_count() == 3,
+              str(cb.pending_count()))
+        check('fallback-fail: booking said so', booking_log.saw('Queued for confirmation'),
+              str(booking_log.lines))
+
+        with CapturedLog() as logged:
+            cb.drain_once()
+        check('fallback-fail: the browser was tried', len(STATE.browser_calls) >= 1,
+              str(len(STATE.browser_calls)))
         check('fallback-fail: HUMAN NEEDED reaches the operator',
               logged.saw('HUMAN NEEDED'), str(logged.lines))
         check('fallback-fail: it says where to finish and that mail was sent',
               all('the mail to' in l for l in logged.lines if 'HUMAN NEEDED' in l),
               str([l for l in logged.lines if 'HUMAN NEEDED' in l]))
-        # One per hotel the date offered: each has its own hold and its own mail, so
-        # each gets its own attempt. The guard serialises the browsers, and each
-        # attempt's budget is capped by that hotel's remaining hold.
-        check('fallback-fail: tried once per held hotel',
-              len(STATE.browser_calls) == 3, str(len(STATE.browser_calls)))
 
 
 def test_chrome_is_never_driven_twice_at_once():

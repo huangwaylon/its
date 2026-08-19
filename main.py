@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Entry point — one scanner thread per target month, plus a URL monitor.
+"""Entry point — one scanner per target month, a URL monitor, a confirm worker.
 
-Scanners only book; they never trigger a CAPTCHA. The URL monitor is the only thing
-that can re-mint a session, and it solves synchronously in its own thread, which is
-what prevents overlapping solves without a lock. A watchdog restarts either.
+Scanners only take holds; they never trigger a CAPTCHA. The URL monitor is the only
+thing that can re-mint a session and solves synchronously in its own thread, which is
+what prevents overlapping solves without a lock. A watchdog restarts any of them.
 
-Usage:
     uv run main.py
 """
 import asyncio
@@ -24,6 +23,7 @@ from config import (
     LOG_MAX_BYTES, LOG_BACKUPS, TARGET_DATES, EMAIL, PRIORITY_HOTELS,
 )
 import book_hotels
+import confirm_booking
 from book_hotels import R, G, Y, C, B, X
 from book_hotels import log as url_log
 
@@ -46,13 +46,9 @@ def group_dates_by_month(dates):
 
 
 def check_cached_url():
-    """Test whether the cached calendar URL is still valid (HTTP 200).
-
-    Returns (url, confirmed_valid):
-      - (url, True)  — 200, session confirmed active
-      - (url, False) — 5xx or connection failure; session assumed valid
-      - (None, False) — no cached URL, or session expired (302, 4xx, etc.)
-    """
+    """`(url, confirmed_valid)`: `(url, True)` on 200; `(url, False)` on 5xx or a
+    connection failure, where the session is assumed still valid; `(None, False)` when
+    there is no cached URL or the session expired."""
     url = book_hotels._read_cached_url()
     if not url:
         return None, False
@@ -64,9 +60,8 @@ def check_cached_url():
         )
         status = r.stdout.strip()
     except Exception as e:
-        # A server-side blip, not an expired session: a local failure to run curl
-        # says nothing about the token, and discarding a working URL over it would
-        # force a needless CAPTCHA solve.
+        # A local failure to run curl says nothing about the token, and discarding a
+        # working URL over it would force a needless solve.
         url_log(f"{Y}URL check: could not run curl ({e!r}), will retry{X}")
         return url, False
     if status == '200':
@@ -80,12 +75,9 @@ def check_cached_url():
 
 
 def url_monitor():
-    """Monitor the calendar URL cache and solve the CAPTCHA when needed.
-
-    Runs forever. Proactively re-solves every URL_REFRESH_INTERVAL even when the
-    current URL still works. The solve is synchronous, which is what blocks a second
-    one from starting without needing a lock.
-    """
+    """Monitor the calendar URL cache and solve the CAPTCHA when needed. Runs forever,
+    re-solving proactively every URL_REFRESH_INTERVAL even when the URL still works;
+    the solve is synchronous, which is what blocks a second one without a lock."""
     last_solve = time.time()
     while True:
         try:
@@ -97,9 +89,8 @@ def url_monitor():
                 continue
 
             if url:
-                # A proactive refresh replaces a token that still works, and a
-                # booking holds the old one across a ~10-request chain. A repair
-                # (url is None) is never deferred — nothing is left to protect.
+                # A proactive refresh replaces a working token, and a booking carries
+                # the old one across a ~10-request chain. A repair is never deferred.
                 active = book_hotels.active_bookings()
                 if active:
                     url_log(f"{Y}Proactive refresh deferred "
@@ -115,8 +106,7 @@ def url_monitor():
                 new_url = asyncio.run(get_calendar_url())
                 if new_url:
                     last_solve = time.time()
-                    # The path, not the token: the URL is a bearer credential
-                    # and the log is not the place for it.
+                    # The path, not the token: the URL is a bearer credential.
                     url_log(f"{G}New URL saved — "
                             f"{book_hotels.redact_url(new_url)}{X}")
                     continue
@@ -127,19 +117,16 @@ def url_monitor():
                 last_solve = time.time()
 
         except Exception as e:
-            # The only thread that can re-solve the CAPTCHA. If it dies, booking
-            # stops forever while the process still looks healthy; the watchdog
-            # would restart it, but not losing it is cheaper.
+            # The only thread that can re-solve the CAPTCHA; the watchdog would
+            # restart it, but not losing it is cheaper.
             url_log(f"{R}URL monitor error: {e!r}{X}")
 
         time.sleep(URL_CHECK_INTERVAL)
 
 
 def _rotate_log():
-    """Roll LOG_FILE over once it passes LOG_MAX_BYTES, keeping LOG_BACKUPS.
-
-    At startup rather than mid-write, so no log handler needs a lock.
-    """
+    """Roll LOG_FILE over past LOG_MAX_BYTES, keeping LOG_BACKUPS. At startup rather
+    than mid-write, so no log handler needs a lock."""
     try:
         if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) < LOG_MAX_BYTES:
             return
@@ -153,13 +140,9 @@ def _rotate_log():
 
 
 class _Worker:
-    """A named restartable daemon thread.
-
-    Every worker is a daemon and main() never joins any of them, so a thread that
-    dies leaves the process running with one fewer month scanned — or, for the URL
-    monitor, with nothing left that can re-mint a session. Both are invisible
-    without a watchdog.
-    """
+    """A named restartable daemon thread. main() never joins any of them, so a thread
+    that dies leaves the process short one scanner — or with nothing that can re-mint a
+    session, or nothing that confirms a hold. All invisible without a watchdog."""
 
     def __init__(self, name, target, args=()):
         self.name, self.target, self.args = name, target, args
@@ -217,7 +200,10 @@ def main():
     url_log("=" * 60)
 
     months = group_dates_by_month(TARGET_DATES)
-    workers = [_Worker('url-monitor', url_monitor)]
+    # The confirm worker owns every emailed leg, serially. Under the watchdog because
+    # it is the only thing that turns a hold into a reservation.
+    workers = [_Worker('url-monitor', url_monitor),
+               _Worker('confirm', confirm_booking.worker)]
     for month_str, dates in months.items():
         label = MONTH_ABBR[int(month_str[5:7])]
         workers.append(_Worker(f'scan-{label}', book_hotels.scan_and_book_month,

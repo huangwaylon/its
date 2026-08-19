@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
 """The one Chrome this program drives, and the leg that needs it.
 
-Two users, one browser. `captcha_solver` mints session tokens; `submit()` below
-files the applicant form when curl cannot. They are serialised by `chrome()`
-because `captcha_solver._kill_stray_chrome()` reaps by
-`pgrep -f remote-debugging-port`, which matches an application-filing browser as
-readily as a solving one: a solve that timed out mid-application would SIGKILL it
-somewhere between 申込する and 確認, with no way to learn which side of the commit it
-died on. Under the lock, the reaper only runs when nothing else of ours holds a
-Chrome, so anything `pgrep` finds really is an orphan.
+Two users, one browser, serialised by `chrome()`: `captcha_solver._kill_stray_chrome()`
+reaps by `pgrep -f remote-debugging-port`, which matches an application-filing browser
+as readily as a solving one, so a timed-out solve would SIGKILL it between 申込する and
+確認 with no way to learn which side of the commit it died on. Under the lock, anything
+`pgrep` finds really is an orphan.
 
-`submit()` is the 申込する/確認 leg, reached only after curl's POST was refused —
-see docs/SITE.md §5. **It presses 確認**, past which a real reservation exists with a
-real cancellation liability, so three things guard it:
+`submit()` is the 申込する/確認 leg, reached only after curl's POST was refused
+(docs/SITE.md §5). **It presses 確認**, past which a real reservation exists, so:
 
-  - `allow_commit` is a **callable**, re-consulted immediately before the commit:
-    filling a form takes tens of seconds and the free-cancellation gate can close
-    inside that window;
-  - every field is written back and *read back*. A `<select>` handed a value that is
-    not among its options keeps its old one silently, so an unverified mismatch would
-    file a blank 都道府県 or 生年月日 against somebody's insurance record. One value
-    the page did not accept aborts before 申込する;
-  - 申込内容確認画面 must actually be on screen before 確認 is looked for.
+  - `allow_commit` is a **callable**, re-consulted immediately before the commit —
+    filling a form takes tens of seconds and the gate can close inside that window;
+  - every field is written back and *read back*. A `<select>` given a value not among
+    its options keeps its old one silently, so an unverified mismatch would file a
+    blank 都道府県 or 生年月日 against somebody's insurance record;
+  - 申込内容確認画面 must be on screen before 確認 is looked for.
 
-A timeout does **not** reap the browser: it may have landed after 確認 was accepted,
-and SIGKILL cannot un-file an application, so the outcome is reported unknown and the
-mailbox is the authority. Field values are never logged — they are 資格認証のキー.
+A timeout does **not** reap the browser — it may have landed after 確認 was accepted,
+and SIGKILL cannot un-file an application, so the outcome is unknown and the mailbox is
+the authority. Field values are never logged; they are 資格認証のキー.
 """
 import asyncio
 import contextlib
@@ -38,8 +32,8 @@ import book_hotels as bh
 _CONFIRM_TEXT = '申込内容確認'
 
 # ── one Chrome at a time ─────────────────────────────────────────────
-# Long enough to sit through a CAPTCHA solve (CAPTCHA_TIMEOUT, 180s) plus teardown,
-# short enough that a wedged holder cannot cost a whole booking.
+# Long enough to sit through a solve plus teardown, short enough that a wedged holder
+# cannot cost a whole booking.
 DEFAULT_WAIT = 210
 
 _lock = threading.Lock()
@@ -49,12 +43,9 @@ _lock = threading.Lock()
 def chrome(timeout=None):
     """Own the browser for the duration of the block.
 
-    Yields True when the lock was taken and False when it was not — callers decide,
-    because the right answer differs: a CAPTCHA solve can wait for the next cycle,
-    while a booking sitting on a hold may have seconds left.
-
-    `timeout=None` means `DEFAULT_WAIT`, read at call time rather than bound as a
-    default argument, so a test can shorten it.
+    Yields True when the lock was taken, False when not — callers decide, because a
+    solve can wait for the next cycle while a booking on a hold may have seconds.
+    `timeout=None` reads `DEFAULT_WAIT` at call time, so a test can shorten it.
     """
     wait = DEFAULT_WAIT if timeout is None else timeout
     acquired = _lock.acquire(timeout=wait)
@@ -75,10 +66,10 @@ def value(result):
 
 
 def launch():
-    """A real, non-headless Chrome. Turnstile rejects headless, and so may /apply.
+    """A real, non-headless Chrome — Turnstile rejects headless, and so may /apply.
 
-    pydoll is imported here, not at module scope: it is an optional dependency and a
-    booking that already has a hold and a sent mail must not be lost to its absence.
+    pydoll is imported here, not at module scope: it is optional, and a booking with a
+    hold and a sent mail must not be lost to its absence.
     """
     from pydoll.browser.chromium.chrome import Chrome
     from pydoll.browser.options import ChromiumOptions
@@ -116,13 +107,11 @@ async def html(tab):
 def submit(link, values, log, tag, allow_commit):
     """Fill the emailed applicant form, press 申込する, then 確認.
 
-    `values` is `confirm_booking.map_fields`' post body with the hidden fields
-    removed — the DOM already carries `_method` and `authenticity_token`, and
-    overwriting them with copies scraped from a different page load is how a browser
-    submit fails for a reason that looks like the bug it is working around.
-
-    Returns `(status, detail)` in `confirm_booking.confirm_from_email`'s vocabulary:
-    'confirmed' / 'deferred' / 'failed'.
+    `values` is `map_fields`' post body without the hidden fields — the DOM already has
+    `_method` and `authenticity_token`, and overwriting them with copies from a
+    different page load is how a browser submit fails for a reason that looks like the
+    bug it works around. Returns `(status, detail)` in `confirm_from_email`'s
+    vocabulary.
     """
     budget = BROWSER_CONFIRM_TIMEOUT
 
@@ -182,6 +171,14 @@ async def _run(link, values, log, tag, allow_commit):
             except ValueError:
                 filled = {}
             bad = filled.get('bad') or []
+            # Every field missing means this is not the applicant form at all — a
+            # consumed link renders something else, and calling that "could not fill"
+            # sends the operator hunting for a form-mapping bug that is not there.
+            if values and all(b.endswith(':missing') for b in bad) \
+                    and len(bad) == len(values):
+                log(f'{tag}   The emailed link no longer shows the applicant form '
+                    f'(no such fields on the page) — it was probably already used')
+                return 'failed', 'link no longer shows the applicant form'
             # Field *names* only. The values are 資格認証のキー.
             log(f'{tag}   Browser filled {filled.get("ok", 0)}/{len(values)} fields'
                 + (f', not accepted: {", ".join(bad)}' if bad else ''))
