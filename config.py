@@ -124,17 +124,21 @@ SCAN_JITTER = 5
 # healthy.
 CAPTCHA_TIMEOUT = 180
 
-# ── Repeat-attempt cooldowns ─────────────────────────────────────────
-# The real request tail is repetition, not breadth. `attempted` lives only for
-# one book_all_hotels_for_date call, so a date that stays available for half an
-# hour with two hotels that always fail was re-attempted every scan cycle: ~80
-# cycles at ~24 requests each, about 1,960 requests in 30 minutes. A per-(date,
-# hotel) cooldown claimed on entry to book_one_hotel is what bounds that.
+# There is deliberately no per-hotel retry cooldown. One existed, on the theory
+# that a date staying available for half an hour with a hotel that always fails
+# would be re-attempted every scan cycle — nominally ~2,000 requests in 30
+# minutes. The logs do not bear that out: the longest observed run is **three**
+# consecutive cycles (2026-08-22, 「No services for」 on 鳴子温泉 湯元 吉祥, NAGU 勝浦
+# and トスラブ箱根ビオーレ, ~20 s apart), after which the date stopped being listed.
+# Under 20 requests, not 2,000, and the cooldown itself fired exactly once in
+# 153k log lines — after a *success*, not a failure loop.
 #
-# One length is enough. The site refuses a second application at a facility we
-# already hold — the room search answers 空き部屋がございません — so a taken hold
-# needs no accounting here; it removes itself from what we are offered.
-HOTEL_RETRY_COOLDOWN = 300
+# Repetition is bounded by what actually does the work: SKIP_HOTELS, the
+# already-booked filter reading holds.json, the per-call `attempted` set, and the
+# site refusing a second application at a facility we already hold (the room
+# search answers 空き部屋がございません). Note also that all three recorded IP bans
+# were served on the scanner's calendar_get — the poll cadence, not this path —
+# so volume risk lives in RETRY_DELAY, not in hotel re-attempts.
 
 # ── Emailed confirmation ─────────────────────────────────────────────
 # `send_complete` only dispatches the confirmation email. The reservation exists

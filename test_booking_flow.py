@@ -471,9 +471,7 @@ class Env:
              'EMAIL', 'NUM_GUESTS', 'BOOK_MAX_ATTEMPTS', 'BOOK_RETRY_DELAY',
              'CURL_RETRY_BACKOFF', 'CURL_MAX_ATTEMPTS', 'RETRY_DELAY',
              'SCAN_JITTER', 'SCAN_BACKOFF_MAX', 'IDLE_LOG_INTERVAL',
-             'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES',
-             'HOTEL_RETRY_COOLDOWN',
-             'SCAN_REUSE_SESSION',
+             'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES', 'SCAN_REUSE_SESSION',
              'SCAN_REUSE_MAX_FAILURES', 'AUTO_CONFIRM', 'AUTO_CONFIRM_MIN_DAYS',
              'APPLICANT')
 
@@ -515,11 +513,6 @@ class Env:
         bh.IDLE_LOG_INTERVAL = 0
         bh.DEBUG_DUMP_INTERVAL = 0    # no throttling, so dumps are countable
         bh.SKIP_PAST_DATES = True
-        # Cooldowns and the per-date cap are off unless a test opts in, so the
-        # suites that assert the retry and ordering behaviour keep testing it.
-        # The registry is module-global and several tests share TARGET, so
-        # clearing it is what stops one test's holds suppressing the next's.
-        bh.HOTEL_RETRY_COOLDOWN = 0
         bh.SCAN_REUSE_SESSION = True
         bh.SCAN_REUSE_MAX_FAILURES = 3
         STATE.hits.clear()
@@ -573,7 +566,6 @@ class Env:
         cb._browser_submit = _browser_stub
 
         bh._dump_last.clear()
-        bh._cooldowns.clear()
         return self
 
     def __exit__(self, *exc):
@@ -581,7 +573,6 @@ class Env:
             setattr(bh, a, v)
         for a, v in self.saved_cb.items():
             setattr(cb, a, v)
-        bh._cooldowns.clear()
         self.tmp.cleanup()
         return False
 
@@ -970,38 +961,6 @@ def test_scan_gives_up_on_reuse_after_repeated_rejection(port):
             finally:
                 stop.set()
                 t.join(timeout=10)
-
-
-def test_failing_hotel_is_not_retried_until_its_cooldown_expires(port):
-    """The real request tail is repetition, not breadth.
-
-    `attempted` only lives for one book_all_hotels_for_date call, so without a
-    cooldown a date that stays available re-attempts the same failing hotels on
-    every scan cycle for as long as it is open.
-    """
-    with Env(port) as env:
-        bh.HOTEL_RETRY_COOLDOWN = 60
-        STATE.no_rooms.update({NAGU, RESOL, NIKKO})   # every hotel fails at step 5
-
-        _, booked = bh.book_all_hotels_for_date(TARGET, 'COOL')
-        check('cooldown: first pass booked nothing', booked == [], str(booked))
-        first = len(STATE.hits)
-        check('cooldown: first pass did try the hotels', first > 0, str(first))
-        check('cooldown: all three are now cooling off',
-              all(bh.in_cooldown(TARGET, h) for h in (NAGU, RESOL, NIKKO)))
-
-        _, booked2 = bh.book_all_hotels_for_date(TARGET, 'COOL')
-        check('cooldown: second pass booked nothing', booked2 == [], str(booked2))
-        check('cooldown: second pass made no requests at all',
-              len(STATE.hits) == first, f'{len(STATE.hits) - first} extra requests')
-
-        # A different date is unaffected — the cooldown is per (date, hotel).
-        check('cooldown: another date is not suppressed',
-              not bh.in_cooldown(TARGET_LIMITED, NAGU))
-
-        # And it lapses.
-        bh.set_cooldown(TARGET, NAGU, 0)
-        check('cooldown: expires', not bh.in_cooldown(TARGET, NAGU))
 
 
 def test_scanner_books_and_survives_errors(port):

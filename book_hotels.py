@@ -21,7 +21,6 @@ from config import (
     BOOK_MAX_ATTEMPTS, BOOK_RETRY_DELAY,
     SCAN_BACKOFF_MAX, SCAN_JITTER,
     SCAN_REUSE_SESSION, SCAN_REUSE_MAX_FAILURES,
-    HOTEL_RETRY_COOLDOWN,
     AUTO_CONFIRM, AUTO_CONFIRM_MIN_DAYS,
     DEBUG_DUMP_INTERVAL, DEBUG_DUMP_KEEP, IDLE_LOG_INTERVAL, SKIP_PAST_DATES,
     APPLICANT,
@@ -164,47 +163,6 @@ def _write_bookings(bookings, path):
 def get_booked_hotels(date_str):
     with _bookings_lock:
         return _load_bookings(HOLDS_FILE)[0].get(date_str, [])
-
-
-# ── Per-(date, hotel) cooldowns ──────────────────────────────────────
-# `attempted` in book_all_hotels_for_date only lives for one call, so without this
-# a date that stays available keeps re-attempting the same failing hotels every
-# scan cycle. See HOTEL_RETRY_COOLDOWN in config.
-_cooldown_lock = threading.Lock()
-_cooldowns = {}   # (date_str, normalized hotel name) -> monotonic expiry
-
-
-def set_cooldown(date_str, hotel_name, seconds):
-    """Hold off on this (date, hotel) for `seconds`. Later calls win.
-
-    `hotel_name=None` cools off the whole date, so a date whose every hotel is
-    cooling off stops paying the setup requests just to rediscover that.
-    """
-    key = (date_str, _norm_hotel(hotel_name))
-    with _cooldown_lock:
-        _cooldowns[key] = time.monotonic() + seconds
-
-
-def in_cooldown(date_str, hotel_name):
-    """True while this (date, hotel) is still cooling off."""
-    key = (date_str, _norm_hotel(hotel_name))
-    now = time.monotonic()
-    with _cooldown_lock:
-        expiry = _cooldowns.get(key)
-        if expiry is None:
-            return False
-        if expiry <= now:
-            del _cooldowns[key]
-            return False
-        return True
-
-
-def cooldown_remaining(date_str, hotel_name):
-    """Seconds left on this (date, hotel)'s cooldown, 0 if none. For logging."""
-    key = (date_str, _norm_hotel(hotel_name))
-    with _cooldown_lock:
-        return max(0.0, _cooldowns.get(key, 0.0) - time.monotonic())
-
 
 
 class Response(str):
@@ -803,12 +761,7 @@ def _is_session_dead(status, location):
 
 
 def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
-    """Book a single hotel for a date. Steps 3-9. Returns True on success.
-
-    Claims this (date, hotel)'s cooldown on entry, so a hotel that keeps failing is
-    not re-attempted every scan cycle for as long as the date stays available.
-    """
-    set_cooldown(target_date, hotel_name, HOTEL_RETRY_COOLDOWN)
+    """Book a single hotel for a date. Steps 3-9. Returns True on success."""
     label = f"{target_date}_{hotel_name}"
 
     # STEP 3: Select hotel
@@ -1112,30 +1065,12 @@ def book_all_hotels_for_date(target_date, label):
     return target_date, booked
 
 
-def _cool_date_if_exhausted(target_date, names, tag):
-    """Cool the whole date while every hotel offered for it is cooling off, so the
-    date stops paying the setup requests just to rediscover that."""
-    waits = [cooldown_remaining(target_date, n) for n in names]
-    if not waits or not all(w > 0 for w in waits):
-        return
-    wait = min(waits)
-    set_cooldown(target_date, None, wait)
-    log(f"{tag} {Y}every hotel for {target_date} is cooling off; leaving the "
-        f"date alone for {wait / 60:.0f}m{X}")
-
-
 def _book_date_once(target_date, label, tag, booked, attempted):
     """One full pass over a date's hotels. Returns an outcome string.
 
     `booked` is appended to in place and `attempted` records hotels already
     tried, so a retry resumes rather than re-applying for what it already sent.
     """
-    # Checked before any request, since it needs none.
-    if in_cooldown(target_date, None):
-        log(f"{tag} {Y}{target_date} cooling off for another "
-            f"{cooldown_remaining(target_date, None) / 60:.0f}m, skipping{X}")
-        return 'done'
-
     url = _read_cached_url()
     if not url:
         return 'failed'
@@ -1171,18 +1106,12 @@ def _book_date_once(target_date, label, tag, booked, attempted):
                 filtered.append(f'{name} (skip list)')
             elif _norm_hotel(name) in seen:
                 filtered.append(f'{name} (already booked/attempted)')
-            elif in_cooldown(target_date, name):
-                filtered.append(f'{name} (cooling off '
-                                f'{cooldown_remaining(target_date, name) / 60:.0f}m)')
             else:
                 hotels.append((gid, name))
         hotels = order_hotels(hotels)
 
         if not hotels:
             log(f"{tag} {Y}All hotels filtered out ({'; '.join(filtered)}){X}")
-            _cool_date_if_exhausted(
-                target_date, [n for _, n in all_hotels
-                              if in_cooldown(target_date, n)], tag)
             return 'done'
 
         log(f"{tag} {C}{len(hotels)} to book (priority first): "
@@ -1209,7 +1138,6 @@ def _book_date_once(target_date, label, tag, booked, attempted):
                 log(f"{tag} {B}{G}=== Total booked for {target_date}: "
                     f"{len(booked)} ({', '.join(booked)}){X}")
 
-        _cool_date_if_exhausted(target_date, [n for _, n in hotels], tag)
         return 'done'
 
     finally:

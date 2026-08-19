@@ -75,11 +75,9 @@ lockstep; the cookie jar is truncated only after a failure.
 
 **Per date** (`book_all_hotels_for_date` → `_book_date_once`) outcomes are `'done'`,
 `'retry'` (5xx, transport failure, dead session), `'unavailable'`, `'failed'`. Each pass
-opens a fresh session, lists the hotels, filters skipped/booked/attempted/cooling-off names,
+opens a fresh session, lists the hotels, drops skipped and already-booked/attempted names,
 puts `PRIORITY_HOTELS` first, then books them one at a time on a fresh session each; only
-setup requests are retried.
-
-Invariants that span call sites:
+setup requests are retried. Invariants that span call sites:
 
 - `is_available()` matches `empty` **and** `a_little`; `empty` alone silently skipped
   every limited-availability date.
@@ -99,29 +97,31 @@ Invariants that span call sites:
 **The hold.** `empty_create` is 「予約手続きに進む」: it takes the hold and is the point of
 no return, and it still goes out with curl's retry enabled, so a `--max-time` expiry there
 can take two holds. The email POST is the only request here sent with `retry=False`.
-**Nothing releases a hold**, so any failure past `empty_create` leaks a held room;
-re-attempts are bounded only by the per-(date, hotel) cooldown and the site's own refusal.
+**Nothing releases a hold**, so any failure past `empty_create` leaks a held room.
+Re-attempts are bounded by `SKIP_HOTELS`, the already-booked filter over `holds.json`, the
+per-call `attempted` set, and the site's own refusal of a second application at a facility
+we hold. **There is deliberately no retry cooldown** — read the note in `config.py` before
+adding one back.
 
-**Request volume is the dominant operational risk**, not a nuisance: the 503s are ~24-hour
-IP bans (docs/SITE.md §2), so trading load for detection latency is a bad bet, and budget
-freed by `SCAN_REUSE_SESSION` should be banked, not respent.
+**Request volume is the dominant operational risk**: the 503s are ~24-hour IP bans, and all
+three recorded bans hit the scanner's `calendar_get`, so the risk lives in the *poll*
+cadence, not in booking retries. Budget freed by `SCAN_REUSE_SESSION` is banked, not
+respent.
 
 **Debug dump redaction is a whitelist.** Anything unrecognised becomes
-`[len=N sha256=xxxxxxxx]`, so a future session-bearing header cannot leak by default, and
-the digest is stable so two dumps compare without holding a session id. It also covers
+`[len=N sha256=xxxxxxxx]`, so a future session-bearing header cannot leak by default, and the
+digest is stable so two dumps compare without holding a session id. It also covers
 `config.APPLICANT`, since 申込内容確認画面 echoes those values back.
 
-### The other modules
+### The other modules — their docstrings are the reference
 
-Each module's docstring is the reference; what matters from outside:
-
-- **`confirm_booking.py`** is called from `book_hotels._finish_from_email`, which imports
-  it lazily and swallows every failure: a hold plus a sent mail is worth keeping, and the
-  human fallback works from that state. `bh.confirm_allowed()` is consulted immediately
-  before **each** committing POST. **A caller finding `unmapped` non-empty must not
-  submit** — those are 資格認証のキー, and a half-filled form is a rejected application plus
-  a wasted hold. IMAP timeouts go to `IMAP4_SSL(...)`, never `socket.setdefaulttimeout()`,
-  which is process-wide and would retime pydoll's CDP websocket.
+- **`confirm_booking.py`** is called from `book_hotels._finish_from_email`, which imports it
+  lazily and swallows every failure: a hold plus a sent mail is worth keeping, and the human
+  fallback works from that state. `bh.confirm_allowed()` is consulted immediately before
+  **each** committing POST. **A caller finding `unmapped` non-empty must not submit** —
+  those are 資格認証のキー, and a half-filled form is a rejected application plus a wasted
+  hold. IMAP timeouts go to `IMAP4_SSL(...)`, never `socket.setdefaulttimeout()`, which is
+  process-wide and would retime pydoll's CDP websocket.
 - **`browser.py`** owns the process's one Chrome, serialised because
   `captcha_solver._kill_stray_chrome()` reaps by `pgrep -f remote-debugging-port`, which
   matches an application-filing browser as readily as a solving one — a timed-out solve
@@ -144,8 +144,8 @@ guarded internally. **Chrome is single-threaded across the process**, by `browse
 Shared state: `calendar_url_cache.txt` (written in the URL monitor thread, read everywhere —
 POSIX atomicity for a small file, and readers treat stale or empty data as "no URL");
 `holds.json` and `reservations.json` (only via `save_booking()` and `get_booked_hotels()`,
-under `_bookings_lock`, which `_load_bookings()` assumes is held); the `(date, hotel)`
-cooldown map under `_cooldown_lock`; one cookie-jar temp file per thread, never shared.
+under `_bookings_lock`, which `_load_bookings()` assumes is held); one cookie-jar temp file
+per thread, never shared.
 
 ## Data Files
 
@@ -163,10 +163,10 @@ cancellation liability.
 Both suites are stdlib-only against a throwaway localhost server; neither touches ITS. Pass
 a substring for a subset, `-v` for the flow's logging: `test_booking_flow.py -v test_503`.
 They bind `127.0.0.1`, which the Apple Claude Code sandbox denies, so
-`.claude/apple/tool_allowlist.csv` allowlists both by name. **Run each in its own Bash
-call** — the allowlist matches the whole command string, so chaining one behind `&&` falls
-through to the sandbox and fails with `PermissionError: [Errno 1]`. Both clear proxy
-settings for loopback, since a local proxy would rewrite responses.
+`.claude/apple/tool_allowlist.csv` allowlists both by name. **Run each in its own Bash call**
+— the allowlist matches the whole command string, so chaining one behind `&&` falls through
+to the sandbox and fails with `PermissionError: [Errno 1]`. Both clear proxy settings for
+loopback, since a local proxy would rewrite responses.
 
 - **`test_http_layer.py`** — header merging (a duplicate `-H` would let the server pick),
   UA newline injection, mobile-UA rejection, and redaction.
