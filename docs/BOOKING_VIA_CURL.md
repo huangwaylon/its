@@ -1,66 +1,96 @@
 # ITS Booking Flow via curl (HTTP-Only)
 
-**Status: VERIFIED** -- All 9 steps completed successfully on 2026-03-26,
-booking for ホテルハーヴェスト斑尾 on 2026-04-13.
-See `run_live.py` for the working reference implementation.
+**Status: VERIFIED** — steps 1–9 below ran live on 2026-03-26, taking a room
+hold for ホテルハーヴェスト斑尾 on 2026-04-13 and dispatching the confirmation
+email. `book_hotels.py` is the current implementation. The original one-shot
+script is out of the tree: `git show 9e644df:run_live.py`.
 
-This document describes the complete booking process for ITS Health Insurance
-facilities (`as.its-kenpo.or.jp`) using raw HTTP requests. Every interaction
-the browser automation performs was reverse-engineered and reproduced with
-`curl`.
+## What this flow does and does not do
+
+The official 空き照会申込手順
+(https://www.its-kenpo.or.jp/shisetsu/moushikomi.html) has **nine steps**; this
+curl flow implements **six**. It ends at a 30-minute room hold plus an email —
+it does not file an application.
+
+> 「予約手続きに進む」ボタンを押して以降、**30分以内**に申込手続きを完了して
+> ください。完了しない場合、選択した部屋は無効となります。
+
+> 申込完了画面に遷移し申込受付番号が表示され、申込完了メールが自動送信されます。
+> **この時点で申込手続き完了及び予約確定となります。**
+
+- **Step 7** (`/apply/empty_create`) is 「予約手続きに進む」: it takes the
+  30-minute hold and is the point of no return.
+- **Step 9** (`send_complete`) only dispatches an email.
+- The three remaining steps are manual and automated nowhere in this repo: open
+  the URL in the emailed message, fill the applicant form, press 申込する, then
+  確認. Only that yields a 申込受付番号 and 予約確定.
+- So `bookings.json` records **holds**, not reservations — each entry expired 30
+  minutes later unless a human clicked the emailed link.
+- Nothing here ever **releases** a hold. Any failure after step 7 abandons a
+  held room, and since the hotel is retried next scan cycle, holds stack: the
+  bot then reads its own holds back as the 「空き部屋がございません」 page at
+  step 5.
 
 ---
 
 ## High-Level Architecture
 
-The site is a **Ruby on Rails** application behind an **AWS ALB** (Application
-Load Balancer). Key traits:
-
 | Aspect | Detail |
 |--------|--------|
 | Framework | Rails (Phusion Passenger 6.0.13 / Apache) |
-| CSRF | Per-page `authenticity_token` in hidden form fields AND `<meta name="csrf-token">` tag |
+| CSRF | `authenticity_token` in hidden fields AND `<meta name="csrf-token">`; lifetimes in Finding 1 |
 | Session | `_src_session` cookie (HttpOnly, Secure) |
-| Load Balancer | AWS ALB with `AWSALB` / `AWSALBTG` sticky-session cookies |
-| AJAX pattern | Rails UJS (`dataType: 'script'`) -- AJAX responses are executable JavaScript that mutates the DOM |
-| Auth gate | Google reCAPTCHA v2 (sitekey `6LftanIUAAAAAHclwcrVt3KUiq-W2pqRxF6RGycz`) |
+| Load balancer | AWS ALB, `AWSALB` / `AWSALBTG` sticky-session cookies |
+| AJAX pattern | Rails UJS (`dataType: 'script'`) — responses are executable JavaScript that mutates the DOM |
+| Auth gate | **Cloudflare Turnstile** (`.cf-turnstile`, `input[name="cf-turnstile-response"]`), solved by `captcha_solver.py`. Was reCAPTCHA v2 (sitekey `6LftanIUAAAAAHclwcrVt3KUiq-W2pqRxF6RGycz`) when this document was written; `docs/CAPTCHA_SOLVER.md` predates the switch. |
 
-### The `s` Parameter
+### The `s` parameter
 
-Every URL carries an `s` query parameter that is a **server-side session
-token** (Base64-encoded, URL-encoded). Two different `s` values appear during
-the flow:
+Every URL carries an `s` query parameter — a server-side session token (Base64,
+URL-encoded). Two distinct values appear:
 
-1. **Calendar `s`** -- issued after passing reCAPTCHA, used for all
-   `/calendar_apply/*` endpoints.
-2. **Apply `s`** -- issued when transitioning from `/calendar_apply/` to
-   `/apply/`, embedded in the 302 redirect from `check_apply_service_coma`.
+| Token | Minted at | Used for |
+|-------|-----------|----------|
+| Calendar `s` | the CAPTCHA (step 0) | steps 1–4, `/calendar_apply/*` |
+| Apply `s` | the step 4 redirect | steps 5–9, `/apply/*` |
 
-These tokens expire after a period of inactivity (observed ~30 seconds between
-steps). The calendar `s` is cached in `calendar_url_cache.txt`.
+The calendar `s` is cached in `calendar_url_cache.txt` and serves **many
+complete booking flows**; each flow mints its own apply-side session at step 4.
+It expires on inactivity, not on use. The token is not opaque — it decodes to
+`service_category_id=1&verify_expires=<epoch>` with no signature, so read the
+`s=` token section of `CLAUDE.md` before logging any part of it.
 
 ---
 
 ## Prerequisites
 
-- `curl` with cookie-jar support (`-c` / `-b` flags)
-- A valid calendar `s` token (requires browser + reCAPTCHA; see "Step 0")
-- All subsequent steps (1--9) can be done with curl alone
+`curl` with cookie-jar support, plus a valid calendar `s` token (browser-only;
+Step 0). Steps 1–9 need curl alone. Every request `book_hotels.curl()` makes
+carries the same flags, abbreviated below as `$C`:
+
+```bash
+C='curl -s -c cookies.txt -b cookies.txt --max-redirs 0 -D hdrs.txt --max-time 30'
+```
+
+`--max-redirs 0` is **global**, not per-step: no redirect anywhere is
+auto-followed, each is re-issued by hand from the captured `Location`, and `-D`
+is the only way the status line and `Location` are read at all.
+
+`BROWSER_HEADERS` adds three more headers to every request, merged in Python so
+a per-call header replaces the default rather than duplicating it (curl emits
+every `-H` it is given). Send these too:
+
+```
+User-Agent: <UA of the Chrome that solved the CAPTCHA, from chrome_user_agent.txt>
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: ja-JP,ja;q=0.9
+```
 
 ---
 
 ## Step 0: Acquire Calendar URL (Browser Required)
 
-This is the **only step that requires a browser**. reCAPTCHA cannot be solved
-with curl.
-
-### 0a. Load the main page
-
-```
-GET https://as.its-kenpo.or.jp/
-```
-
-The response contains a link to the CAPTCHA page:
+The only step needing a browser. `GET /` returns the link to the CAPTCHA page:
 
 ```html
 <a href="/calendar_apply?s=PUVUUGtsMlg1SjNi...%3D">
@@ -69,90 +99,74 @@ The response contains a link to the CAPTCHA page:
 </a>
 ```
 
-### 0b. Load the CAPTCHA page
-
-```
-GET https://as.its-kenpo.or.jp/calendar_apply?s={MAIN_S}
-```
-
-The page contains a form that POSTs back to `/calendar_apply`:
+`GET /calendar_apply?s={MAIN_S}` contains a form that POSTs back to
+`/calendar_apply`:
 
 ```html
 <form action="/calendar_apply" method="post">
   <input type="hidden" name="authenticity_token" value="pzwI/Gnd..." />
   <input type="hidden" name="s" value="PUVUUGtsMlg1SjNi..." />
-  <div class="g-recaptcha" data-sitekey="6LftanIUAAAAAHclwcrVt3KUiq-W2pqRxF6RGycz"></div>
+  <div class="cf-turnstile" data-sitekey="..."></div>
   <input value="次へ" type="button" onclick="...this.form.submit();" />
 </form>
 ```
 
-### 0c. Solve reCAPTCHA and submit
-
-After solving the CAPTCHA, the form submits and the server responds with a
-**302 redirect** to the calendar page:
+`captcha_solver.py` clicks the Turnstile checkbox with CDP mouse events, polls
+`input[name="cf-turnstile-response"]` for the token, then re-enables and submits
+次へ. The server answers:
 
 ```
 302 -> https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s={CALENDAR_S}
 ```
 
-This `CALENDAR_S` is the token used for all subsequent steps. The existing
-browser automation (`main.py`) handles this and saves the URL to
-`calendar_url_cache.txt`.
+`CALENDAR_S` drives every later step. It is written to
+`calendar_url_cache.txt` only if the resulting URL contains `calendar_select`.
 
 ---
 
 ## Step 1: Load the Calendar Page
 
 ```bash
-curl -s \
-  -c cookies.txt -b /dev/null \
-  -o step1.html \
+$C -o step1.html \
   'https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s={CALENDAR_S}'
 ```
 
-**Response (200 OK):** Full HTML page showing the current month's calendar.
+**Response (200 OK):** full HTML page for the current month. Extract, exactly as
+`_open_calendar_session` does:
 
-### What to extract
-
-| Field | Regex | Example |
-|-------|-------|---------|
-| CSRF token (meta) | `csrf-token.*?content="(.*?)"` | `DA/5o4bPvvLeQ48K...` |
-| Auth token (form) | `name="authenticity_token" value="(.*?)"` | `O1T+wuzwvSMlbM...` |
-| `s` param | `name="s" id="s" value="(.*?)"` | `PWdETXhrRE94UXpO...` |
-| Current month | `<span class="month">(.*?)</span>` | `2026年03月` |
+| Field | Regex |
+|-------|-------|
+| CSRF token (meta) | `csrf-token.*?content="(.*?)"` |
+| Auth token (form) | `name="authenticity_token" value="(.*?)"` |
+| `s` param | `name="s" id="s" value="(.*?)"` |
 
 ### Calendar HTML structure
 
-Each date is a `<td>` cell with a `data-join-time` attribute:
+Each date is a `<td>` with a `data-join-time` attribute; the class carries the
+availability and `full`/`over` cells differ only in class and icon:
 
 ```html
-<!-- Available date (class="empty", icon ○) -->
+<!-- Available date (class="empty", icon ○; a full date is class="full", icon ☓) -->
 <td class="empty td-n" onclick="selectJoinTime(this);"
     data-night-count="1"
     data-join-time="2026-03-30" data-person="" data-service-catrgroy="1">
   <p>30</p>
   <span class="icon">○</span>
 </td>
-
-<!-- Full date (class="full", icon ☓) -->
-<td class="full td-n" onclick="selectJoinTime(this);"
-    data-night-count="1"
-    data-join-time="2026-03-01" data-person="" data-service-catrgroy="1">
-  <p>1</p>
-  <span class="icon">☓</span>
-</td>
 ```
 
-CSS class determines clickability:
-- `empty` = available (green background), clickable
-- `a_little` = limited availability (orange), clickable
-- `full` = no availability (red), JS blocks the click
-- `over` = past date, JS blocks the click
+- `empty` — available (green ○), clickable
+- `a_little` — limited availability (orange), clickable
+- `full` — no availability (red ☓), JS blocks the click
+- `over` — past date, JS blocks the click
+
+**Both `empty` and `a_little` can be applied for** (`is_available()`,
+`_AVAILABLE_CLASSES`). Matching only `empty` silently skips the dates closest to
+selling out.
 
 ### Hidden form for date selection
 
-At the bottom of the page there is a **hidden form** that the `selectJoinTime`
-JavaScript function populates and submits:
+Populated and submitted by `selectJoinTime`:
 
 ```html
 <div style="display: none">
@@ -166,9 +180,6 @@ JavaScript function populates and submits:
 </div>
 ```
 
-The JS sets `#join_time` to the clicked cell's `data-join-time`, then triggers
-the hidden submit button:
-
 ```javascript
 function selectJoinTime(self){
     if($(self).hasClass('full')) return;   // blocks full dates
@@ -180,14 +191,14 @@ function selectJoinTime(self){
 
 ---
 
-## Step 1b (Optional): Navigate to a Different Month
+## Step 1b: Navigate to a Different Month
 
-Month navigation is an **AJAX POST** that returns executable JavaScript.
+An **AJAX POST** returning executable JavaScript. Not optional in practice: the
+calendar opens on the current month, and this one POST returns availability for
+every date in the target month.
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
+$C -X POST \
   -H 'X-Requested-With: XMLHttpRequest' \
   -H 'X-CSRF-Token: {CSRF_TOKEN}' \
   -H 'Accept: text/javascript, application/javascript, */*; q=0.01' \
@@ -197,38 +208,36 @@ curl -s \
   'https://as.its-kenpo.or.jp/calendar_apply/calendar_select'
 ```
 
-**Parameters:**
-- `join_date` -- first day of the target month (e.g. `2026-04-01`)
-- `s` -- the calendar session token (unencoded)
+Two parameters only — `join_date` (first day of the target month) and `s`. No
+`utf8`, no `authenticity_token`; the CSRF value travels in `X-CSRF-Token`.
 
-**Response:** JavaScript that replaces the calendar HTML:
+**Response:** JavaScript replacing the calendar markup, with quotes
+backslash-escaped:
 
 ```javascript
 $(".tcas_1").html('<div class=\"month-navi\">...');
 loading(false);
 ```
 
-The `join_date` values for next/prev month are embedded in the button
-`onclick` handlers on the page:
+The date-cell extractor must match that escaped form (`_date_css_class`):
+
+```python
+rf'class=\\"([^"\\]*)\\\"[^>]*data-join-time=\\"{date}\\"'
+```
+
+Next/prev `join_date` values live in the button `onclick` handlers:
 
 ```html
 <input id="nextMonth" type="button" value="翌月＞"
   onclick="toNextMonth('2026-04-01','{CALENDAR_S_UNENCODED}');" />
 ```
 
-Parse the AJAX response the same way as the initial calendar page -- look for
-`data-join-time` attributes and `class="empty"` to find available dates.
-
 ---
 
 ## Step 2: Select a Date
 
-POST the hidden form to select an available date:
-
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
+$C -X POST \
   --data-urlencode 'utf8=✓' \
   --data-urlencode 'authenticity_token={AUTH_TOKEN}' \
   --data-urlencode 'join_time=2026-04-13' \
@@ -237,9 +246,8 @@ curl -s \
   'https://as.its-kenpo.or.jp/calendar_apply/service_group_select'
 ```
 
-**Response (200 OK):** Hotel selection page.
-
-### Hotel list HTML
+**Response (200 OK):** hotel selection page. This request is the single largest
+failure class on disk — Finding 5.
 
 ```html
 <h2>施設選択</h2>
@@ -251,11 +259,17 @@ curl -s \
 </ul>
 ```
 
-Extract hotel IDs with: `data-service-group-id="(\d+)".*?>(.*?)</a>`
+Extract with `data-service-group-id="(\d+)".*?>(.*?)</a>`, then
+`html.unescape()` each name: names arrive HTML-escaped and mix full-width
+(U+3000) with ordinary spaces, so raw equality against a skip list can miss.
+
+Per the header 「{date}に空きがある施設です」, **only facilities with vacancy
+are listed** — a date typically shows ~3, not the full 24-facility roster.
 
 ### Hidden form
 
-Same pattern -- a hidden form POSTs to the next endpoint:
+The click handler copies `data-service-group-id` into `#service_group_id` and
+submits:
 
 ```html
 <form action="/calendar_apply/apply_service_select" method="post">
@@ -267,23 +281,12 @@ Same pattern -- a hidden form POSTs to the next endpoint:
 </form>
 ```
 
-The click handler sets `service_group_id` from `data-service-group-id`:
-
-```javascript
-$(".select_service_group").click(function () {
-    $("#service_group_id").val($(this).data('service-group-id'));
-    $("#service_group_select").click();
-})
-```
-
 ---
 
 ## Step 3: Select a Hotel
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
+$C -X POST \
   --data-urlencode 'utf8=✓' \
   --data-urlencode 'authenticity_token={AUTH_TOKEN_2}' \
   --data-urlencode 'empty=' \
@@ -294,7 +297,7 @@ curl -s \
   'https://as.its-kenpo.or.jp/calendar_apply/apply_service_select'
 ```
 
-**Response (200 OK):** Service selection page.
+**Response (200 OK):** service selection page.
 
 ```html
 <h1>申込対象サービス</h1>
@@ -304,22 +307,18 @@ curl -s \
 </ul>
 ```
 
-Extract with: `data-apply-service-id="(\d+)".*?>(.*?)</a>`
-
-Hidden form POSTs to `/calendar_apply/check_apply_service_coma`.
+Extract with `data-apply-service-id="(\d+)".*?>(.*?)</a>`; the code takes the
+first service. Re-extract `authenticity_token` from this page as `AUTH_TOKEN_3`.
+The hidden form POSTs to `/calendar_apply/check_apply_service_coma`.
 
 ---
 
 ## Step 4: Select a Service (Critical Redirect)
 
-This step is a **domain transition** from `/calendar_apply/` to `/apply/`.
+A domain transition from `/calendar_apply/` to `/apply/`.
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
-  --max-redirs 0 \
-  -D headers.txt \
+$C -X POST \
   --data-urlencode 'utf8=✓' \
   --data-urlencode 'authenticity_token={AUTH_TOKEN_3}' \
   --data-urlencode 'join_time=2026-04-13' \
@@ -334,83 +333,67 @@ curl -s \
 Location: https://as.its-kenpo.or.jp/apply/empty_new?s={APPLY_S}
 ```
 
-**CRITICAL:** Do **not** use `-L` (auto-follow redirects) here. The redirect
-generates a new `s` token (`APPLY_S`) and sets new ALB sticky-session cookies.
-You must:
-
-1. Capture the `Location` header
-2. Let curl save the new cookies to the cookie jar
-3. Make a separate GET request to the redirect URL (Step 5)
-
-If you auto-follow, the request chain sometimes breaks because the server
-issues a second 302 to `/service_category/index` (a dead-end error page).
+The redirect mints `APPLY_S` and sets new ALB cookies. Capture `Location`, let
+curl save the cookies, then GET it yourself (step 5); the code treats a
+`Location` without `empty_new` as a failed step 4. Auto-following with `-L` is
+unsafe: the server sometimes issues a second 302 to `/service_category/index`,
+and curl lands on the dead end with the informative headers already discarded.
 
 ---
 
 ## Step 5: Load the Booking Form
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -o step5.html \
-  'https://as.its-kenpo.or.jp/apply/empty_new?s={APPLY_S}'
+$C -o step5.html 'https://as.its-kenpo.or.jp/apply/empty_new?s={APPLY_S}'
 ```
 
-**Response (200 OK):** Booking form page.
+**Response (200 OK):** booking form page.
 
-### What to extract
+| Field | Regex |
+|-------|-------|
+| CSRF (meta) | `csrf-token.*?content="(.*?)"` |
+| Auth token | `name="authenticity_token" value="(.*?)"` |
+| Form action | `action="(/apply/empty_create\?s=[^"]+)"` |
+| COMA search `s` | `coma_search\('([^']+)'\)` |
 
-| Field | Location | Example |
-|-------|----------|---------|
-| CSRF (meta) | `<meta name="csrf-token" content="...">` | `fbuOhjide...` |
-| Auth token | `<input ... name="authenticity_token" value="...">` | `oaertq3ol...` |
-| Form action | `<form ... action="/apply/empty_create?s={FORM_S}">` | `/apply/empty_create?s=PT1BY...` |
-| COMA search `s` | `coma_search('...')` in the onclick attribute | `PT1BYTB4V1lsa...` |
+### Two non-fatal pages that land here
 
-### Session timeout warning
-
-The page may contain:
 ```html
 <p align='center'>セッションがタイムアウトしました。最初からやり直してください。</p>
 ```
 
-This appears if there was too much delay between steps. Despite the warning,
-the form is still rendered and **can still work** if you proceed immediately.
+The form is still rendered under this warning and can still work if you proceed
+immediately.
+
+```
+空き部屋がございません
+```
+
+The site's "no vacant rooms at this facility" page. It has **no booking form**,
+so a missing `form_action` plus this string is an ordinary lost race, not a
+broken extractor — and it is often this bot reading back its own abandoned
+holds.
 
 ### Form fields
 
 ```html
 <form id="new_apply" action="/apply/empty_create?s={FORM_S}" method="post">
   <input name="authenticity_token" value="{AUTH_TOKEN_4}" />
-
-  <!-- Date selector (pre-selected to target date) -->
-  <select name="apply[join_time]">
+  <select name="apply[join_time]">          <!-- pre-selected to target date -->
     <option selected="selected" value="2026-04-13">2026年04月13日(月)</option>
-    ...
   </select>
-
-  <!-- Night count -->
   <select name="apply[night_count]">
     <option value="1">一泊</option>
     <option value="2">二泊</option>
   </select>
-
-  <!-- Guest count (text input) -->
-  <input name="apply[stay_persons]" />
-
-  <!-- Room count (select) -->
-  <select name="apply[hope_rooms]">
+  <input name="apply[stay_persons]" />      <!-- guest count, text input -->
+  <select name="apply[hope_rooms]">         <!-- room count -->
     <option value="1">1</option>
-    ...
   </select>
 </form>
 
-<!-- Search button triggers AJAX -->
-<input value="空き検索"
-  onclick="coma_search('{COMA_S}');" type="button" />
+<input value="空き検索" onclick="coma_search('{COMA_S}');" type="button" />
 ```
-
-The `coma_search` function serializes the form and sends it via AJAX:
 
 ```javascript
 function coma_search(params) {
@@ -422,14 +405,14 @@ function coma_search(params) {
 }
 ```
 
+`COMA_S` must be URL-encoded when spliced into the step 6 URL.
+
 ---
 
 ## Step 6: Search for Available Rooms (AJAX)
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
+$C -X POST \
   -H 'X-Requested-With: XMLHttpRequest' \
   -H 'X-CSRF-Token: {CSRF_TOKEN}' \
   -H 'Accept: text/javascript, application/javascript, */*; q=0.01' \
@@ -443,12 +426,11 @@ curl -s \
   'https://as.its-kenpo.or.jp/apply/empty_new?s={COMA_S}'
 ```
 
-**Required headers** (without these the server returns a session redirect):
-- `X-Requested-With: XMLHttpRequest`
-- `X-CSRF-Token: {CSRF_TOKEN}` (from the `<meta>` tag, NOT the form field)
-- `Accept: text/javascript, ...`
+All four headers are required; without them the server returns a session
+redirect. `X-CSRF-Token` is the `<meta>` value, not the form field, and
+`Referer` is the step 5 URL (`APPLY_S`, not `COMA_S`).
 
-**Response:** JavaScript that injects room data into `#coma`:
+**Response:** JavaScript injecting room data into `#coma`:
 
 ```javascript
 $('#coma').html("...");
@@ -456,9 +438,7 @@ $('.coma_title').show();
 $('.main_submit').show();
 ```
 
-### Room data structure
-
-Inside the injected HTML:
+The injected HTML (quotes escaped in transit):
 
 ```html
 <input type="hidden" name="apply_session_guid"
@@ -474,41 +454,35 @@ Inside the injected HTML:
     <td>2 ～ 5</td>                    <!-- guest capacity -->
     <td>空き</td>                      <!-- status -->
   </tr>
-  <tr>
-    <td><input type="checkbox" name="apply[coma[5176641]]"
-               value="5176641" /></td>
-    <td>10</td>
-    <td>2026年04月13日</td>
-    <td>洋室</td>
-    <td>2 ～ 4</td>
-    <td>空き</td>
-  </tr>
-  <!-- more rooms... -->
+  <!-- one <tr> per room -->
 </table>
 ```
 
-Extract with:
-- Session GUID: `apply_session_guid.*?value="([^"]+)"`
-- Room IDs: `name="apply\[coma\[(\d+)\]\]".*?value="(\d+)"`
+Extract against the escaped form, as `book_one_hotel` does:
 
-**If the session has expired**, the response will be:
+```python
+rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
+guid  = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
+```
+
+An expired session answers with:
+
 ```javascript
 parent.location.href='/service_category/index'
 ```
 
 ---
 
-## Step 7: Submit Room Selection
+## Step 7: Submit Room Selection — Takes the 30-Minute Hold
 
-POST the main booking form (`#new_apply`) with the selected room checkbox
-included:
+**The point of no return.** This is 「予約手続きに進む」: the room is held for 30
+minutes, and from here either the flow finishes or a room sits held and wasted.
+
+POST the main form (`#new_apply`) with the room checkbox included:
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
-  --max-redirs 0 \
-  -D headers.txt \
+$C -X POST \
+  -H 'Referer: https://as.its-kenpo.or.jp/apply/empty_new?s={APPLY_S}' \
   --data-urlencode 'utf8=✓' \
   --data-urlencode 'authenticity_token={AUTH_TOKEN_4}' \
   --data-urlencode 'apply[join_time]=2026-04-13' \
@@ -520,23 +494,19 @@ curl -s \
   'https://as.its-kenpo.or.jp/apply/empty_create?s={FORM_S}'
 ```
 
-**Expected response (302):** Redirect to `/apply/rule?s={RULE_S}`
+`AUTH_TOKEN_4` is the step 5 form token, reused unchanged from step 6 — see
+Finding 1.
 
-Follow the redirect manually:
-
-```bash
-curl -s -c cookies.txt -b cookies.txt -o step7.html '{REDIRECT_URL}'
-```
+**Expected response (302):** `Location: /apply/rule?s={RULE_S}`, followed by
+hand.
 
 ---
 
 ## Step 8: Agree to Rules
 
-The rules page (`/apply/rule`) displays terms and conditions with an "agree"
-button. The page title is
-`保養施設等の利用およびイベントにおける個人情報の取り扱いについて`.
-
-### Rules form HTML (captured live)
+`/apply/rule` is titled
+`保養施設等の利用およびイベントにおける個人情報の取り扱いについて`; the code
+recognises it by the string 同意 in the body.
 
 ```html
 <form action="/apply/email_input" accept-charset="UTF-8" method="post">
@@ -551,15 +521,17 @@ button. The page title is
 </form>
 ```
 
-**CRITICAL:** The form has a hidden `s` field that **must** be included in
-the POST. Without it the server redirects to `/service_category/index`
-(session lost). The "同意する" button is `type="button"` (not `type="submit"`),
-so its `value` is **not** sent as form data -- do not send a `commit` param.
+Extract the action with `<form[^>]*action="([^"]*)"[^>]*method="post"` and the
+token with `name="s"[^>]*value="([^"]*)"`.
+
+**The hidden `s` field is mandatory** — omit it and the server loses the session
+and redirects to `/service_category/index`. It is easy to miss because the form
+action carries no `s` query parameter; this was the hardest bug in the flow.
+**Send no `commit` param:** 同意する is `type="button"`, so its value is never
+submitted.
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
+$C -X POST \
   --data-urlencode 'utf8=✓' \
   --data-urlencode 'authenticity_token={AUTH_TOKEN_5}' \
   --data-urlencode 's={RULE_S}' \
@@ -567,18 +539,12 @@ curl -s \
   'https://as.its-kenpo.or.jp/apply/email_input'
 ```
 
-**Expected response (200 OK):** The email input page directly (no redirect).
-The form action is `/apply/email_input` and the response URL is also
-`/apply/email_input`. This is a direct POST-to-page, not a POST-redirect-GET.
+**Expected response (200 OK):** the email input page rendered directly. The code
+also follows a 302 here if one appears.
 
 ---
 
-## Step 9: Submit Email
-
-The email page (`Web申し込み`) has a form with one text field and a hidden
-double-submit-prevention token.
-
-### Email form HTML (captured live)
+## Step 9: Submit Email — Dispatches an Email, Nothing More
 
 ```html
 <form action="/apply/send_complete?s={SEND_S}" accept-charset="UTF-8" method="post">
@@ -595,14 +561,12 @@ double-submit-prevention token.
 </form>
 ```
 
-The `confirm_submit()` function shows a JavaScript `confirm()` dialog
-(`メールを送信します。よろしいですか？`). With curl, there is no dialog
-to handle -- the form just submits.
+`confirm_submit()` raises a JS `confirm()` dialog
+(`メールを送信します。よろしいですか？`); with curl there is no dialog. Extract
+the nonce with `name="__token__"[^>]*value="([^"]*)"`.
 
 ```bash
-curl -s \
-  -c cookies.txt -b cookies.txt \
-  -X POST \
+$C -X POST \
   --data-urlencode 'utf8=✓' \
   --data-urlencode 'authenticity_token={AUTH_TOKEN_6}' \
   --data-urlencode '__token__={DOUBLE_SUBMIT_TOKEN}' \
@@ -612,19 +576,17 @@ curl -s \
   'https://as.its-kenpo.or.jp/apply/send_complete?s={SEND_S}'
 ```
 
-**CRITICAL:** The `__token__` hidden field and `commit=送信` submit button
-value **must** be included. Without them the server returns the `send_complete`
-page but **does not actually send the email**. This was confirmed by testing:
-omitting these fields produced a success page with no email delivery;
-including them triggered immediate email delivery.
+**`__token__` and `commit=送信` must both be present.** Without them the server
+returns an identical `send_complete` page and **sends no email** — nothing in
+the HTTP response distinguishes the two. This is the most dangerous silent
+failure in the flow.
 
-**Expected response (200 OK):** The completion page directly (no redirect).
+**Never retry this request.** It is the one request `book_hotels.py` issues with
+`retry=False`: `--max-time` can expire after the server accepted the
+submission, and a repeat sends a second application for the same room. Status 0
+is logged as `outcome unknown` and the hotel abandoned.
 
----
-
-## Step 10: Booking Complete
-
-The response body from step 9 IS the completion page. Look for:
+**Expected response (200 OK):**
 
 ```html
 <h1>送信結果</h1>
@@ -632,119 +594,84 @@ The response body from step 9 IS the completion page. Look for:
 <strong>送信されたメールに記載のURLより手続きを進めてください。</strong>
 ```
 
-The JS on the page also pushes the URL state to `send_complete`:
-```javascript
-history.pushState(null, '施設予約システム', 'send_complete');
-```
+`book_hotels.py` treats `send_complete` in the body as `BOOKED` and calls
+`save_booking()`. Read that as *hold taken, email sent*.
 
-**What happens next:** A confirmation email is sent to the provided address
-with a URL to finalize the booking. The room is held for 30 minutes from
-step 7. If the email URL is not visited in time, the room is released.
+---
+
+## After Step 9: What Still Has To Happen
+
+Open the emailed URL, fill the applicant form, press 申込する, then 確認. That
+produces the 申込受付番号, and only that is 申込手続き完了及び予約確定. Nothing
+in this repo does any of it, and the clock started at step 7: **≤30 minutes**
+from the hold to 申込完了, and no request in this flow can cancel a hold early.
 
 ---
 
 ## Key Findings
 
-### 1. Every page issues a fresh CSRF token
+### 1. CSRF tokens are per-render, not single-use
 
-Each response contains a new `authenticity_token` in a hidden `<input>` field
-and a CSRF token in a `<meta>` tag. You must extract and use the token from the
-**most recent** response. Using a stale token causes a 422 or a redirect to the
-error page.
+Every response carries a fresh `authenticity_token` and a fresh
+`<meta name="csrf-token">`. The freshness is **BREACH mitigation**, not a
+one-shot: `form_authenticity_token` XORs a random one-time pad over the
+per-session secret, and `valid_authenticity_token?` is a stateless
+unmask-and-compare against `session[:_csrf_token]`. There is no nonce store,
+ledger, counter or expiry, so a Rails CSRF token **cannot** be single-use. The
+`<meta>` value is the global, action-agnostic token (`csrf_meta_tags` passes no
+`form_options`), so `per_form_csrf_tokens` does not apply to it either.
 
-### 2. The hidden-form pattern
+**A CSRF token's validity window is exactly the life of the session.** The
+verified 2026-03-26 booking extracted `auth` once and reused it unchanged on
+both the step 6 and step 7 POSTs; the same pattern still ships in
+`book_one_hotel` (`book_hotels.py:834/861/882` — extract at step 5, use at step
+6, use again at step 7, no reassignment); and 629 recovered debug dumps contain
+**zero** 422s and zero `InvalidAuthenticityToken`.
 
-The site uses a recurring pattern: clickable links (`href="javascript:;"`) with
-`data-*` attributes, and a **hidden `<div style="display: none">`** containing
-a `<form>`. The click handler copies the `data-*` value into a hidden input and
-triggers the form submit. In curl, you skip the JS and POST the form directly.
+An earlier version of this finding claimed a stale token caused "a 422 or a
+redirect to the error page". The redirect is real, but its cause is the session
+dying (Finding 5). The two findings described one redirect and gave it two
+causes; only Finding 5 has evidence.
 
-For example, on the hotel selection page:
+**Do not over-read this.** `__token__` on the email form is a *different*
+mechanism and is plausibly single-use — three fields, three lifetimes:
 
-```
-Visible:  <a data-service-group-id="7" href="javascript:;">Hotel Name</a>
-Hidden:   <form action="/calendar_apply/apply_service_select" method="post">
-            <input name="service_group_id" id="service_group_id" value="" />
-          </form>
-JS:       $("#service_group_id").val($(this).data('service-group-id'));
-          $("#service_group_select").click();
-curl:     POST with service_group_id=7
-```
+| Field | Where | Mechanism | Lifetime |
+|-------|-------|-----------|----------|
+| `authenticity_token` | every form | Rails CSRF, masked per render | the session |
+| `<meta name="csrf-token">` | every page, for `X-CSRF-Token` | Rails CSRF, global | the session |
+| `__token__` (40 hex) | email form only | application-level double-submit nonce | plausibly one use |
 
-### 3. AJAX calls require specific headers
+Omitting `__token__` returns an identical success page but sends no email — the
+signature of a consumable server-side nonce. The step 9 extractor
+(`book_hotels.py:919`) re-reads it from the email-page response every time,
+which is correct; conflating it with CSRF is the likely origin of the old
+single-use claim.
 
-For any AJAX endpoint (month navigation, room search), you must send:
+### 2. Two response families, two extractor dialects
 
-```
-X-Requested-With: XMLHttpRequest
-X-CSRF-Token: {value from <meta name="csrf-token">}
-Accept: text/javascript, application/javascript, */*; q=0.01
-```
+Navigation responses are HTML. AJAX responses (1b, 6) are Rails-UJS JavaScript
+in which the markup arrives with backslash-escaped quotes, so their extractors
+must match `\"`, not `"` — and the required AJAX headers are not optional:
+without `X-Requested-With` the server treats the request as a navigation and
+returns HTML or a redirect instead of JavaScript.
 
-Without `X-Requested-With`, the server treats it as a non-AJAX request and
-may return HTML or redirect instead of JavaScript.
+Steps 8 and 9 answer 200, not 302, rendering the next page directly; their JS
+fakes navigation with
+`history.pushState(null, '施設予約システム', 'email_input' | 'send_complete')`.
 
-### 4. The Step 4 redirect must not be auto-followed
+### 3. Following a redirect by hand is what makes failures readable
 
-`check_apply_service_coma` transitions from the `/calendar_apply/` domain to
-`/apply/`. It returns a 302 with:
-- A new `s` parameter in the Location URL
-- New ALB cookies
-
-If you auto-follow (`-L`), curl sometimes encounters a second 302 to
-`/service_category/index` (a 404 dead-end). The safe approach is:
+`--max-redirs 0` everywhere. It matters most at step 4 (which mints `APPLY_S`
+and new ALB cookies) and step 7: follow automatically and you end up holding the
+dead end's headers instead of the informative ones.
 
 ```bash
-# Don't follow
-curl --max-redirs 0 -D headers.txt ...
-
-# Extract Location header
-REDIRECT=$(grep -i 'location:' headers.txt | head -1 | tr -d '\r' | sed 's/location: //i')
-
-# Follow manually
+REDIRECT=$(grep -i 'location:' hdrs.txt | head -1 | tr -d '\r' | sed 's/location: //i')
 curl -c cookies.txt -b cookies.txt "$REDIRECT"
 ```
 
-### 5. Sessions expire quickly
-
-The server-side session expires after approximately **30 seconds** of
-inactivity. If you take too long between steps, the response will be one of:
-
-- A 302 redirect to `/service_category/index` (which returns 404)
-- The page loads but contains: `セッションがタイムアウトしました`
-- The AJAX response is: `parent.location.href='/service_category/index'`
-
-To avoid this, **execute all steps in rapid succession** without pauses. In
-testing, a Python script executing steps 1--6 back-to-back succeeded
-consistently.
-
-### 6. The `s` parameter has two distinct scopes
-
-| Token | Created at | Used for | Scope |
-|-------|-----------|----------|-------|
-| Calendar `s` | After reCAPTCHA (step 0) | Steps 1--4 (`/calendar_apply/*`) | All calendar + hotel + service selection |
-| Apply `s` | Step 4 redirect | Steps 5--10 (`/apply/*`) | Booking form, rules, email, completion |
-
-The Calendar `s` is reused across steps 1--4. The Apply `s` appears in the
-step 4 redirect URL and is used for all remaining steps.
-
-### 7. Room search returns JavaScript, not HTML
-
-The room availability search (step 6) returns raw JavaScript that jQuery
-executes to inject HTML into the page:
-
-```javascript
-$('#coma').html("...<table>...</table>...");
-$('.coma_title').show();
-$('.main_submit').show();
-```
-
-Parse the JavaScript string (with escaped quotes `\"`) to extract room
-checkbox `name`/`value` pairs and the `apply_session_guid`.
-
-### 8. Cookie management is essential
-
-You must persist cookies across all requests. The critical cookies are:
+### 4. Cookie management is essential
 
 | Cookie | Purpose | Flags |
 |--------|---------|-------|
@@ -754,124 +681,83 @@ You must persist cookies across all requests. The critical cookies are:
 | `AWSALBCORS` | ALB CORS sticky | SameSite=None, Secure |
 | `AWSALBTGCORS` | ALB target group CORS sticky | SameSite=None, Secure |
 
-Use `-c cookies.txt -b cookies.txt` on every curl call so that session and
-load-balancer affinity are maintained.
+`-c cookies.txt -b cookies.txt` on every call, so both the Rails session and ALB
+affinity survive. Each thread needs its own jar; the booking flow starts each
+hotel on a fresh one.
 
-### 9. Steps 8 and 9 return 200, not 302
+### 5. Sessions expire in ~30s, and that is where the flow breaks
 
-Unlike earlier steps, the rules agreement (step 8) and email submission
-(step 9) return **200 OK** with the next page rendered directly. They do
-NOT return 302 redirects. The JavaScript on these pages uses
-`history.pushState()` to update the browser URL bar, simulating navigation:
+A dead session appears as a 302 to `/service_category/index` (which 404s),
+`セッションがタイムアウトしました` in a rendered page, or
+`parent.location.href='/service_category/index'` in an AJAX response. Roughly 30
+seconds of inactivity between steps is enough, so run steps 1–9 back-to-back
+with no pauses.
 
-```javascript
-history.pushState(null, '施設予約システム', 'email_input');  // step 8
-history.pushState(null, '施設予約システム', 'send_complete'); // step 9
-```
+From 629 debug dumps (2026-04-03 → 2026-08-18):
 
-### 10. The rules form `s` field is mandatory
+| Failure | Count |
+|---------|-------|
+| `service_group_select` 302 → `/service_category/index` (step 2) | 261 |
+| `calendar_get` 503 (step 1) | 172 |
+| `step3_service_select` 302 (step 3) | 111 |
+| `step5_booking_form` 200, no-rooms page (step 5) | 42 |
+| `calendar_get` 302 (step 1) | 35 |
+| other | 8 |
 
-The rules page form has a hidden `s` field. If you omit it, the server
-loses track of the session and redirects to `/service_category/index`.
-This was the single hardest bug to find during testing -- the `s` field
-is easy to miss because the form action (`/apply/email_input`) does not
-contain an `s` query parameter.
+Post-detection conversion is **~8.5%** — of the dates the scanner sees as
+available, that fraction reach `send_complete`. **62% of failures are one code
+path:** the step 2 POST on a session that has already died.
 
-### 11. The calendar `s` token is reusable
-
-The calendar `s` token (from CAPTCHA) can be used for **multiple complete
-booking flows** in succession. Each booking creates a new apply-side
-session via the step 4 redirect. The calendar `s` only expires after
-extended inactivity, not after a single use.
-
-### 12. The email form silently fails without `__token__` and `commit`
-
-The `send_complete` endpoint returns an identical success page regardless
-of whether the email actually sends. The `__token__` (double-submit
-prevention) and `commit=送信` (submit button value) fields are both
-required for the server to actually dispatch the email. Without them the
-page says "メール送信を完了しました" but no email arrives. This is the
-most dangerous silent failure in the flow -- there is no way to
-distinguish success from failure by inspecting the HTTP response alone.
+**Every `calendar_get` 503 is an IP ban, not site load.** All 467 non-empty dumps
+in the corpus are one page, `<title>セキュリティアラート</title>`, whose body reads
+「ご利用のIPアドレス（…）から、アクセス過多を検知しました…**約24時間**、一時的に
+システムへのアクセスを遮断します」 — a roughly 24-hour, IP-scoped block, which is
+notice 144 being enforced. Three episodes on record (2026-04-07, 2026-04-12,
+2026-08-17) across three egress IPs, every one served on step 1 simply because it
+is the most frequent request. `DEBUG_DUMP_KEEP` prunes oldest-first, so the
+corpus is survivorship-biased; do not infer the cause from dump timestamps, read
+the bodies. See `docs/ITS_RULES.md`.
 
 ---
 
 ## Complete Flow Diagram
 
 ```
-Browser Required
-=================
-  Main Page (GET /)
-       |
-       v
-  CAPTCHA Page (GET /calendar_apply?s=MAIN_S)
-       |  [solve reCAPTCHA]
-       v
-  POST /calendar_apply  -->  302  -->  /calendar_apply/calendar_select?s=CALENDAR_S
-                                       (saved to calendar_url_cache.txt)
+Browser:  GET /  ->  GET /calendar_apply?s=MAIN_S  ->  [solve Turnstile]
+          ->  POST /calendar_apply  ->  302 /calendar_apply/calendar_select?s=CALENDAR_S
+                                        (saved to calendar_url_cache.txt)
+curl:
+  1   GET  /calendar_apply/calendar_select?s=CALENDAR_S   -> csrf, auth, s
+  1b  POST /calendar_apply/calendar_select   (AJAX)       -> month availability
+  2   POST /calendar_apply/service_group_select           -> hotel list
+  3   POST /calendar_apply/apply_service_select           -> service list
+  4   POST /calendar_apply/check_apply_service_coma       -> 302 /apply/empty_new?s=APPLY_S
+  5   GET  /apply/empty_new?s=APPLY_S                     -> auth, FORM_S, COMA_S
+  6   POST /apply/empty_new?s=COMA_S        (AJAX)        -> room ids, apply_session_guid
+  7   POST /apply/empty_create?s=FORM_S     *** 30-MIN HOLD ***  -> 302 /apply/rule?s=RULE_S
+  8   POST /apply/email_input                             -> 200 email page
+  9   POST /apply/send_complete?s=SEND_S    never retried -> 200 "メール送信を完了しました"
 
-curl Only
-==========
-  Step 1:  GET  /calendar_apply/calendar_select?s=CALENDAR_S
-                Extract: auth_token, s, month data
-       |
-  Step 1b: POST /calendar_apply/calendar_select  (AJAX, optional month nav)
-                Data: join_date, s
-       |
-       v
-  Step 2:  POST /calendar_apply/service_group_select
-                Data: join_time, s, auth_token
-                Response: hotel list with data-service-group-id
-       |
-       v
-  Step 3:  POST /calendar_apply/apply_service_select
-                Data: service_group_id, join_time, s, auth_token
-                Response: service list with data-apply-service-id
-       |
-       v
-  Step 4:  POST /calendar_apply/check_apply_service_coma
-                Data: apply_service_id, join_time, s, auth_token
-                Response: 302 -> /apply/empty_new?s=APPLY_S
-       |
-       v  (follow redirect manually)
-  Step 5:  GET  /apply/empty_new?s=APPLY_S
-                Extract: csrf, auth_token, form_action, coma_s
-       |
-       v
-  Step 6:  POST /apply/empty_new?s=COMA_S  (AJAX room search)
-                Data: join_time, night_count, stay_persons, hope_rooms
-                Headers: X-Requested-With, X-CSRF-Token
-                Response: JS with room checkboxes + apply_session_guid
-       |
-       v
-  Step 7:  POST /apply/empty_create?s=FORM_S
-                Data: join_time, night_count, stay_persons, hope_rooms,
-                      apply_session_guid, apply[coma[ROOM_ID]]
-                Response: 302 -> /apply/rule?s=...
-       |
-       v
-  Step 8:  POST /apply/email_input (agree to terms)
-                Data: s (hidden field), auth_token (NO commit param)
-                Response: 200 -> email input page rendered directly
-       |
-       v
-  Step 9:  POST /apply/send_complete?s=SEND_S (submit email)
-                Data: email, auth_token, __token__, commit=送信
-                Response: 200 -> completion page rendered directly (DONE)
+manual (not automated):
+      emailed URL -> applicant form -> 申込する -> 確認 -> 申込受付番号 -> 予約確定
 ```
 
 ---
 
 ## Reference Implementation
 
-`run_live.py` is the verified working script that completed a real booking.
-It executes steps 1--9 using `subprocess` calls to `curl`:
+`book_hotels.py`:
 
-```bash
-# 1. Get a fresh calendar URL (solve CAPTCHA in browser, save URL to cache)
-# 2. Run the curl-based booking
-python3 run_live.py
-```
+| Steps | Function |
+|-------|----------|
+| 1, 1b | `_open_calendar_session()` |
+| 2 | `_select_date()` |
+| 3–9 | `book_one_hotel()` |
 
-`curl_booking.py` is an expanded version with better error handling,
-configurable target date/guest count, and month navigation logic.
+`test_booking_flow.py` replays the markup above — including the escaped-quote
+AJAX responses — against a localhost `FakeITS` server and injects the failures
+in Finding 5. It is the fastest way to check a change to any extractor here.
+
+The original single-shot script is out of the tree: `git show
+9e644df:run_live.py`. (`curl_booking.py`, which earlier revisions of this
+document cited, never existed in this repository.)

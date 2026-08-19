@@ -166,3 +166,15 @@ debug_responses/
 *.log.*
 # Salvaged copies of an unparseable bookings.json.
 bookings.json.corrupt.*
+# Confirmed reservations, with their 申込受付番号 — and, unlike bookings.json, a
+# record that a real cancellation liability exists.
+reservations.json
+reservations.json.corrupt.*
+# Applicant identity (記号/番号/カナ氏名/生年月日) and the Gmail app password reach
+# the program only through the environment. `.env` is matched above, but only as an
+# exact name; anything of that shape must stay out too, because this repository's
+# history is on a public remote.
+.env
+.env.*
+*.env
+local_settings.py

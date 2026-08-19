@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import book_hotels as bh
@@ -66,8 +67,24 @@ class FakeITS:
         self.fail_once = {}           # path fragment -> [statuses to serve]
         self.hotels = [(7, NAGU), (8, RESOL), (9, NIKKO)]
         self.no_rooms = set()         # hotel names whose form page reports full
-        self.completed = []           # (date, hotel) pairs that reached send_complete
+        # Number of upcoming month-nav POSTs to answer 200 with a page that has
+        # no date cells in it. That is what Rails' `protect_from_forgery with:
+        # :null_session` does to a request whose CSRF token it rejects: not a
+        # 422, but a session-less 200. A scanner that trusted the status would
+        # read it as "no dates available" forever.
+        self.blank_nav = 0
+        # When set, a month-nav POST is blanked unless a calendar GET immediately
+        # preceded it — i.e. the cached token is rejected but a freshly minted one
+        # works. That is the shape of the failure the give-up logic exists for.
+        self.blank_cached_nav = False
+        self.completed = []           # (email, hotel) pairs that reached send_complete
         self.selected_hotel = {}      # cookie session -> hotel name, for step 5
+
+    def nav_was_cached(self):
+        """True when the nav POST just recorded had no calendar GET before it."""
+        with self.lock:
+            prior = self.hits[-2] if len(self.hits) >= 2 else ''
+        return 'GET /calendar_apply/calendar_select' not in prior
 
     def record(self, path):
         with self.lock:
@@ -138,6 +155,15 @@ def nav_response(month_first_day):
     days = (f'{month_first_day[:7]}-{d:02d}' for d in range(1, 29))
     cells = ''.join(_escaped_cell(day, _nav_class(day)) for day in days)
     return f'$(".tcas_1").html(\'<div class=\\"month-navi\\">{cells}</div>\');\nloading(false);\n'
+
+
+# A 200 that carries no date cells — see FakeITS.blank_nav. Deliberately shaped
+# like a plausible response rather than empty, so only a check for the cells
+# themselves can tell it apart from a real one.
+BLANK_NAV_RESPONSE = (
+    '$(".tcas_1").html(\'<div class=\\"month-navi\\">'
+    '<p>\\u30bb\\u30c3\\u30b7\\u30e7\\u30f3\\u304c\\u5207\\u308c\\u307e\\u3057\\u305f</p>'
+    '</div>\');\nloading(false);\n')
 
 
 def hotel_list_page(hotels):
@@ -260,6 +286,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, CALENDAR_PAGE)
 
         if '/calendar_apply/calendar_select' in path and method == 'POST':
+            with STATE.lock:
+                blank = STATE.blank_nav > 0
+                if blank:
+                    STATE.blank_nav -= 1
+            if blank or (STATE.blank_cached_nav and STATE.nav_was_cached()):
+                return self._send(200, BLANK_NAV_RESPONSE,
+                                  ctype='text/javascript; charset=utf-8')
             return self._send(200, nav_response(form.get('join_date', '')),
                               ctype='text/javascript; charset=utf-8')
 
@@ -321,7 +354,10 @@ class Env:
              'EMAIL', 'NUM_GUESTS', 'BOOK_MAX_ATTEMPTS', 'BOOK_RETRY_DELAY',
              'CURL_RETRY_BACKOFF', 'CURL_MAX_ATTEMPTS', 'RETRY_DELAY',
              'SCAN_JITTER', 'SCAN_BACKOFF_MAX', 'IDLE_LOG_INTERVAL',
-             'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES')
+             'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES',
+             'HOTEL_RETRY_COOLDOWN', 'HOTEL_HOLD_COOLDOWN',
+             'MAX_BOOKINGS_PER_DATE', 'SCAN_REUSE_SESSION',
+             'SCAN_REUSE_MAX_FAILURES')
 
     def __init__(self, port, skip=(), priority=('NAGU',)):
         self.port, self.skip, self.priority = port, list(skip), list(priority)
@@ -352,18 +388,31 @@ class Env:
         bh.IDLE_LOG_INTERVAL = 0
         bh.DEBUG_DUMP_INTERVAL = 0    # no throttling, so dumps are countable
         bh.SKIP_PAST_DATES = True
+        # Cooldowns and the per-date cap are off unless a test opts in, so the
+        # suites that assert the retry and ordering behaviour keep testing it.
+        # The registry is module-global and several tests share TARGET, so
+        # clearing it is what stops one test's holds suppressing the next's.
+        bh.HOTEL_RETRY_COOLDOWN = 0
+        bh.HOTEL_HOLD_COOLDOWN = 0
+        bh.MAX_BOOKINGS_PER_DATE = 0
+        bh.SCAN_REUSE_SESSION = True
+        bh.SCAN_REUSE_MAX_FAILURES = 3
         STATE.hits.clear()
         STATE.fail_once.clear()
         STATE.completed.clear()
         STATE.no_rooms.clear()
+        STATE.blank_nav = 0
+        STATE.blank_cached_nav = False
         STATE.selected_hotel.clear()
         STATE.hotels = [(7, NAGU), (8, RESOL), (9, NIKKO)]
         bh._dump_last.clear()
+        bh._cooldowns.clear()
         return self
 
     def __exit__(self, *exc):
         for a, v in self.saved.items():
             setattr(bh, a, v)
+        bh._cooldowns.clear()
         self.tmp.cleanup()
         return False
 
@@ -746,6 +795,183 @@ def _wait_for(predicate, timeout=25):
     return False
 
 
+def test_scan_reuses_the_session(port):
+    """Steady state must be one request per cycle, not two.
+
+    The calendar GET exists only to mint the csrf/s pair the month-nav POST
+    needs, and that pair stays valid for the life of the session, so a healthy
+    scanner should GET once and then POST for as long as the session lasts.
+    """
+    with Env(port) as env:
+        # A date the fake's calendar does not carry, so cycles stay idle and the
+        # request counts are only the scan's own.
+        t, stop = _run_scanner('2026-09', ['2026-09-15'], 'REUSE')
+        try:
+            grew = _wait_for(lambda: STATE.count('POST /calendar_apply/calendar_select') >= 5)
+            gets = STATE.count('GET /calendar_apply/calendar_select')
+            posts = STATE.count('POST /calendar_apply/calendar_select')
+            check('reuse: month-nav POSTs kept coming', grew, str(posts))
+            check('reuse: the calendar was fetched exactly once',
+                  gets == 1, f'{gets} GETs for {posts} POSTs')
+        finally:
+            stop.set()
+            t.join(timeout=10)
+
+
+def test_scan_remints_when_the_cached_session_is_rejected(port):
+    """A session-less 200 must be detected by shape and re-minted in the cycle.
+
+    This is the failure the status check could not see: had the scanner trusted
+    `status == 200`, it would have reported "no dates available" for as long as it
+    kept replaying the stale token, while looking perfectly healthy.
+    """
+    with Env(port) as env:
+        with CapturedLog() as logs:
+            t, stop = _run_scanner('2026-09', ['2026-09-15'], 'REMINT')
+            try:
+                # Let the first cycle mint and cache, then poison the next nav.
+                _wait_for(lambda: STATE.count('POST /calendar_apply/calendar_select') >= 1)
+                with STATE.lock:
+                    STATE.blank_nav = 1
+                remade = _wait_for(
+                    lambda: STATE.count('GET /calendar_apply/calendar_select') >= 2)
+                check('remint: re-fetched the calendar after the rejection', remade,
+                      str(STATE.count('GET /calendar_apply/calendar_select')))
+                check('remint: said so in the log', logs.saw('cached session rejected'))
+                # Recovered, and back to reusing: no further GETs.
+                before = STATE.count('GET /calendar_apply/calendar_select')
+                posts = STATE.count('POST /calendar_apply/calendar_select')
+                _wait_for(lambda: STATE.count(
+                    'POST /calendar_apply/calendar_select') >= posts + 3)
+                check('remint: went back to reusing the new session',
+                      STATE.count('GET /calendar_apply/calendar_select') == before,
+                      str(STATE.count('GET /calendar_apply/calendar_select')))
+                check('remint: thread still alive', t.is_alive())
+            finally:
+                stop.set()
+                t.join(timeout=10)
+
+
+def test_scan_gives_up_on_reuse_after_repeated_rejection(port):
+    """If token reuse simply does not work here, degrade to the old behaviour.
+
+    Not to a 300-second poll interval: a rejection must not drive the failure
+    backoff, and a standing stream of rejected POSTs is exactly the sort of
+    traffic the site says it blocks. After a few rejections, stop trying.
+    """
+    with Env(port) as env:
+        bh.SCAN_REUSE_MAX_FAILURES = 2
+        with CapturedLog() as logs:
+            # Only the *cached* navs are rejected; a freshly minted token works.
+            # So each cycle rejects once, re-mints, succeeds, caches, and is
+            # rejected again next cycle — consecutive rejections, which is what
+            # the give-up counter needs to see.
+            with STATE.lock:
+                STATE.blank_cached_nav = True
+            t, stop = _run_scanner('2026-09', ['2026-09-15'], 'GIVEUP')
+            try:
+                off = _wait_for(lambda: logs.saw('session reuse disabled'))
+                check('giveup: reuse switched off', off)
+                check('giveup: thread still alive', t.is_alive())
+                # With reuse off it re-mints every cycle, as it always did.
+                gets = STATE.count('GET /calendar_apply/calendar_select')
+                more = _wait_for(
+                    lambda: STATE.count('GET /calendar_apply/calendar_select') >= gets + 2)
+                check('giveup: back to a calendar GET per cycle', more,
+                      str(STATE.count('GET /calendar_apply/calendar_select')))
+                check('giveup: stopped being rejected once it re-mints every time',
+                      not logs.saw('month nav returned'))
+            finally:
+                stop.set()
+                t.join(timeout=10)
+
+
+def test_failing_hotel_is_not_retried_until_its_cooldown_expires(port):
+    """The real request tail is repetition, not breadth.
+
+    `attempted` only lives for one book_all_hotels_for_date call, so without a
+    cooldown a date that stays available re-attempts the same failing hotels on
+    every scan cycle for as long as it is open.
+    """
+    with Env(port) as env:
+        bh.HOTEL_RETRY_COOLDOWN = 60
+        STATE.no_rooms.update({NAGU, RESOL, NIKKO})   # every hotel fails at step 5
+
+        _, booked = bh.book_all_hotels_for_date(TARGET, 'COOL')
+        check('cooldown: first pass booked nothing', booked == [], str(booked))
+        first = len(STATE.hits)
+        check('cooldown: first pass did try the hotels', first > 0, str(first))
+        check('cooldown: all three are now cooling off',
+              all(bh.in_cooldown(TARGET, h) for h in (NAGU, RESOL, NIKKO)))
+
+        _, booked2 = bh.book_all_hotels_for_date(TARGET, 'COOL')
+        check('cooldown: second pass booked nothing', booked2 == [], str(booked2))
+        check('cooldown: second pass made no requests at all',
+              len(STATE.hits) == first, f'{len(STATE.hits) - first} extra requests')
+
+        # A different date is unaffected — the cooldown is per (date, hotel).
+        check('cooldown: another date is not suppressed',
+              not bh.in_cooldown(TARGET_LIMITED, NAGU))
+
+        # And it lapses.
+        bh.set_cooldown(TARGET, NAGU, 0)
+        check('cooldown: expires', not bh.in_cooldown(TARGET, NAGU))
+
+
+def test_reaching_the_room_hold_earns_the_long_cooldown(port):
+    """Step 7 takes a 30-minute hold and nothing here can release one.
+
+    So the cooldown claimed on entry has to be upgraded before that request, or a
+    re-attempt inside the hold window stacks a second hold on the same facility
+    and we end up reading our own holds back as 空き部屋がございません.
+    """
+    with Env(port) as env:
+        bh.HOTEL_RETRY_COOLDOWN = 60
+        bh.HOTEL_HOLD_COOLDOWN = 1800
+        _, booked = bh.book_all_hotels_for_date(TARGET, 'HOLD')
+        check('hold: booked', NAGU in booked, str(booked))
+        left = bh.cooldown_remaining(TARGET, NAGU)
+        check('hold: cooldown upgraded past the short one', left > 60, f'{left:.0f}s')
+        check('hold: cooldown covers the site\'s 30-minute hold',
+              left > 1700, f'{left:.0f}s')
+
+
+def test_max_bookings_per_date_stops_at_the_cap(port):
+    """The cap counts successes, and the priority hotel is the one that gets in."""
+    with Env(port) as env:
+        bh.MAX_BOOKINGS_PER_DATE = 1
+        _, booked = bh.book_all_hotels_for_date(TARGET, 'CAP')
+        check('cap: exactly one booking', booked == [NAGU], str(booked))
+        check('cap: only the one recorded', env.bookings() == {TARGET: [NAGU]},
+              str(env.bookings()))
+        completions = [c for c in STATE.completed if c[1] == NAGU]
+        check('cap: the site saw one completion', len(STATE.completed) == 1
+              and len(completions) == 1, str(STATE.completed))
+
+        # Already at the cap, so a later pass must not spend a single request.
+        hits = len(STATE.hits)
+        _, again = bh.book_all_hotels_for_date(TARGET, 'CAP')
+        check('cap: a capped date books nothing more', again == [], str(again))
+        check('cap: and makes no requests', len(STATE.hits) == hits,
+              f'{len(STATE.hits) - hits} extra requests')
+
+
+def test_cap_fails_closed_when_bookings_are_unreadable(port):
+    """A cap that silently became unlimited on a read error would file duplicates.
+
+    `get_booked_hotels` cannot tell "nothing booked" from "could not read", so the
+    cap has to consult a flag that can.
+    """
+    with Env(port) as env:
+        bh.MAX_BOOKINGS_PER_DATE = 1
+        os.mkdir(bh.BOOKINGS_FILE)        # a read of this raises OSError
+        hits = len(STATE.hits)
+        _, booked = bh.book_all_hotels_for_date(TARGET, 'CLOSED')
+        check('fail-closed: booked nothing', booked == [], str(booked))
+        check('fail-closed: made no requests', len(STATE.hits) == hits,
+              f'{len(STATE.hits) - hits} requests')
+
+
 def test_scanner_books_and_survives_errors(port):
     """The scan loop must book, and must never let an exception end the thread."""
     with Env(port) as env:
@@ -874,6 +1100,48 @@ def test_bookings_atomic_and_non_destructive():
             bh.BOOKINGS_FILE = saved
 
 
+def test_unreadable_bookings_file_is_never_clobbered():
+    """A read error is not corruption, and must not be treated as it.
+
+    An OSError used to share a branch with a parse failure, so one transient read
+    error was enough to rename a perfectly good file to `bookings.json.corrupt.*`
+    and replace it with a single entry — destroying the record for every other
+    date, which is the only thing preventing duplicate applications.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        saved = bh.BOOKINGS_FILE
+        bh.BOOKINGS_FILE = os.path.join(d, 'bookings.json')
+        try:
+            # A directory: present, so not the missing-file path, but any read of
+            # it raises OSError rather than producing unparseable bytes.
+            os.mkdir(bh.BOOKINGS_FILE)
+            with CapturedLog() as logs:
+                bh.save_booking('2026-09-05', NAGU)
+            check('unreadable: nothing salvaged aside',
+                  [f for f in os.listdir(d) if '.corrupt.' in f] == [],
+                  str(os.listdir(d)))
+            check('unreadable: the file itself is untouched',
+                  os.path.isdir(bh.BOOKINGS_FILE))
+            check('unreadable: refusal is reported', logs.saw('could not be read'))
+            check('unreadable: flagged unreadable but not corrupt',
+                  bh._bookings_unreadable and not bh._bookings_corrupt,
+                  f'{bh._bookings_unreadable=} {bh._bookings_corrupt=}')
+
+            # Unparseable bytes, by contrast, ARE corruption and get salvaged.
+            os.rmdir(bh.BOOKINGS_FILE)
+            with open(bh.BOOKINGS_FILE, 'w') as f:
+                f.write('{ not json')
+            bh.save_booking('2026-09-05', NAGU)
+            check('unreadable: a parse failure is still salvaged',
+                  len([f for f in os.listdir(d) if '.corrupt.' in f]) == 1,
+                  str(os.listdir(d)))
+            check('unreadable: and the booking is recorded',
+                  bh.get_booked_hotels('2026-09-05') == [NAGU],
+                  str(bh.get_booked_hotels('2026-09-05')))
+        finally:
+            bh.BOOKINGS_FILE = saved
+
+
 def test_bookings_concurrent_writes():
     """Twenty threads, no lost updates — the lock has to actually hold."""
     with tempfile.TemporaryDirectory() as d:
@@ -964,6 +1232,139 @@ def test_hotel_name_matching():
         check('order: empty list', bh.order_hotels([]) == [])
     finally:
         bh._PRIORITY_NORM = saved
+
+
+def test_dotenv_loader():
+    """`.env` carries the Gmail app password and the applicant's identity.
+
+    Precedence is the whole point here. An exported-but-empty variable must count
+    as unset: the shipped template is all empty assignments, so `setdefault`
+    semantics let one stale `export ITS_KIGOU=` in a shell profile shadow the file
+    permanently, and the only symptom is a booking that stalls at the email step
+    for a reason nothing in the log explains.
+    """
+    import config as cfg
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, '.env')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('# a comment\n'
+                    '\n'
+                    'export DOTENV_T_EXPORTED=exported\n'
+                    'DOTENV_T_PLAIN=plain\n'
+                    'DOTENV_T_QUOTED="has space"\n'
+                    "DOTENV_T_SINGLE='single'\n"
+                    'DOTENV_T_EMPTY=\n'
+                    'DOTENV_T_REALWINS=fromfile\n'
+                    'DOTENV_T_EMPTYWINS=fromfile\n'
+                    'DOTENV_T_HASH=val#notacomment\n'
+                    'DOTENV_T_SPACED =  spaced  \n'
+                    'DOTENV_T_NOEQUALS\n')
+
+        keys = [k for k in os.environ if k.startswith('DOTENV_T_')]
+        for k in keys:
+            del os.environ[k]
+        os.environ['DOTENV_T_REALWINS'] = 'fromenv'
+        os.environ['DOTENV_T_EMPTYWINS'] = ''        # a placeholder, not a decision
+        try:
+            cfg._load_dotenv(path)
+            e = os.environ
+            check('dotenv: export prefix stripped',
+                  e.get('DOTENV_T_EXPORTED') == 'exported', repr(e.get('DOTENV_T_EXPORTED')))
+            check('dotenv: plain assignment', e.get('DOTENV_T_PLAIN') == 'plain')
+            check('dotenv: double quotes stripped',
+                  e.get('DOTENV_T_QUOTED') == 'has space', repr(e.get('DOTENV_T_QUOTED')))
+            check('dotenv: single quotes stripped',
+                  e.get('DOTENV_T_SINGLE') == 'single', repr(e.get('DOTENV_T_SINGLE')))
+            check('dotenv: empty value stays empty', e.get('DOTENV_T_EMPTY') == '')
+            check('dotenv: a real env value wins over the file',
+                  e.get('DOTENV_T_REALWINS') == 'fromenv', repr(e.get('DOTENV_T_REALWINS')))
+            check('dotenv: an EMPTY env value does NOT shadow the file',
+                  e.get('DOTENV_T_EMPTYWINS') == 'fromfile',
+                  repr(e.get('DOTENV_T_EMPTYWINS')))
+            check('dotenv: # inside a value is not a comment',
+                  e.get('DOTENV_T_HASH') == 'val#notacomment', repr(e.get('DOTENV_T_HASH')))
+            check('dotenv: key and value trimmed',
+                  e.get('DOTENV_T_SPACED') == 'spaced', repr(e.get('DOTENV_T_SPACED')))
+            check('dotenv: comments and blank lines ignored',
+                  not any(k.startswith('#') for k in e))
+            check('dotenv: a line with no = is ignored',
+                  'DOTENV_T_NOEQUALS' not in e)
+        finally:
+            for k in [k for k in os.environ if k.startswith('DOTENV_T_')]:
+                del os.environ[k]
+
+    # A missing file must be silent, not fatal: not every install has one.
+    cfg._load_dotenv(os.path.join(d, 'gone.env'))
+    check('dotenv: missing file is not an error', True)
+
+
+def test_confirm_gate():
+    """The 10-day rule. This gate is the only thing standing between the bot and a
+    booking that cannot be cancelled, so it is tested for failing closed, not just
+    for the happy arithmetic."""
+    saved = (bh.AUTO_CONFIRM, bh.AUTO_CONFIRM_MIN_DAYS)
+    try:
+        bh.AUTO_CONFIRM = True
+        bh.AUTO_CONFIRM_MIN_DAYS = 11
+        today = date(2026, 9, 1)
+
+        # ── the boundary ──
+        cases = [
+            ('2026-09-30', 29, True),
+            ('2026-09-13', 12, True),
+            ('2026-09-12', 11, True),    # exactly the floor: allowed
+            ('2026-09-11', 10, False),   # D-10 is the last cancellable day: no
+            ('2026-09-10', 9, False),
+            ('2026-09-02', 1, False),
+            ('2026-09-01', 0, False),    # today
+            ('2026-08-31', -1, False),   # already past
+        ]
+        for target, expect_days, expect_ok in cases:
+            got_days = bh.days_until(target, today)
+            ok, why = bh.confirm_allowed(target, today)
+            check(f'gate: {target} is {expect_days} days out',
+                  got_days == expect_days, str(got_days))
+            check(f'gate: {target} ({expect_days}d) '
+                  f'{"allowed" if expect_ok else "blocked"}',
+                  ok is expect_ok, f'{ok} — {why}')
+
+        # A blocked date must say why, so the operator knows to step in.
+        ok, why = bh.confirm_allowed('2026-09-05', today)
+        check('gate: refusal explains itself', not ok and '4 day(s) away' in why, why)
+
+        # Fails closed. Note `20260905` and `2026-W36-6` are accepted by
+        # date.fromisoformat on 3.11+, so the gate pins the format itself.
+        for bad in (None, '', 'tomorrow', '2026-13-45', '20260905', '2026-W36-6',
+                    '2026-09-05 00:00', ' 2026-09-05', 12345, [], {}):
+            ok, why = bh.confirm_allowed(bad, today)
+            check(f'gate: unparseable date {bad!r} is refused', not ok, f'{ok} — {why}')
+            check(f'gate: days_until({bad!r}) is None',
+                  bh.days_until(bad, today) is None)
+
+        for bad in (None, '', 'eleven', float('nan')):
+            bh.AUTO_CONFIRM_MIN_DAYS = bad
+            ok, why = bh.confirm_allowed('2027-01-01', today)
+            check(f'gate: unusable floor {bad!r} is refused', not ok, f'{ok} — {why}')
+        bh.AUTO_CONFIRM_MIN_DAYS = -5
+        ok, why = bh.confirm_allowed('2027-01-01', today)
+        check('gate: negative floor is refused', not ok, f'{ok} — {why}')
+
+        # ── the master switch wins over everything ──
+        bh.AUTO_CONFIRM = False
+        bh.AUTO_CONFIRM_MIN_DAYS = 11
+        ok, why = bh.confirm_allowed('2027-01-01', today)
+        check('gate: AUTO_CONFIRM=False blocks even a distant date',
+              not ok and 'AUTO_CONFIRM is off' in why, f'{ok} — {why}')
+
+        # ── a date crossing the boundary while the process runs ──
+        bh.AUTO_CONFIRM = True
+        target = '2026-09-20'
+        allowed_on = [d for d in range(1, 21)
+                      if bh.confirm_allowed(target, date(2026, 9, d))[0]]
+        check('gate: re-evaluated per call, so a date closes as it approaches',
+              allowed_on == list(range(1, 10)), str(allowed_on))
+    finally:
+        bh.AUTO_CONFIRM, bh.AUTO_CONFIRM_MIN_DAYS = saved
 
 
 def test_future_dates():
@@ -1180,13 +1581,22 @@ SERVER_TESTS = (
     'test_scanner_survives_dead_url', 'test_scanner_skips_past_dates',
     'test_scanner_spots_a_limited_availability_date',
     'test_active_bookings_counter',
+    'test_scan_reuses_the_session',
+    'test_scan_remints_when_the_cached_session_is_rejected',
+    'test_scan_gives_up_on_reuse_after_repeated_rejection',
+    'test_failing_hotel_is_not_retried_until_its_cooldown_expires',
+    'test_reaching_the_room_hold_earns_the_long_cooldown',
+    'test_max_bookings_per_date_stops_at_the_cap',
+    'test_cap_fails_closed_when_bookings_are_unreadable',
 )
 
 STANDALONE_TESTS = (
     'test_bookings_atomic_and_non_destructive', 'test_bookings_concurrent_writes',
+    'test_unreadable_bookings_file_is_never_clobbered',
     'test_availability_classes', 'test_retry_classification', 'test_retry_after',
     'test_hotel_name_matching',
     'test_future_dates', 'test_dump_throttle_and_prune',
+    'test_confirm_gate', 'test_dotenv_loader',
     'test_read_cached_url_never_raises', 'test_watchdog_restarts_a_dead_worker',
     'test_group_dates_by_month', 'test_captcha_timeout_wrapper',
     'test_log_rotation', 'test_token_summary', 'test_relative_duration',

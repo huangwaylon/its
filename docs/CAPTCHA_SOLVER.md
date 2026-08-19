@@ -1,291 +1,182 @@
-# reCAPTCHA v2 Solver — Technical Writeup
+# CAPTCHA solver — Cloudflare Turnstile via pydoll
 
-## Overview
+`captcha_solver.py` mints a calendar session for `as.its-kenpo.or.jp`. That is
+the one step of the booking flow curl cannot do: the site gates
+`/calendar_apply` behind Cloudflare Turnstile, and passing it requires a real
+browser. Everything downstream (`docs/BOOKING_VIA_CURL.md`) is plain HTTP.
 
-`captcha_solver.py` is a fully automated Google reCAPTCHA v2 solver that combines **Playwright** browser automation with **ollama vision AI** (`qwen3-vl:8b`) to solve image challenges on Japanese websites. It integrates with the ITS Calendar Booker for the `as.its-kenpo.or.jp` facility booking system.
+The product is a URL of the form
+`https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s=…`, written to
+`config.CALENDAR_URL_CACHE`. `main.py`'s URL monitor thread calls
+`get_calendar_url()` whenever that cache is missing, stale or invalid; nothing
+else in the program ever solves a CAPTCHA.
 
-Tested against:
-- **Production:** `https://as.its-kenpo.or.jp/` (reCAPTCHA Enterprise, no billing)
-- **Demo:** `https://2captcha.com/ja/demo/recaptcha-v2-enterprise`
+> Historical note: the site previously used Google reCAPTCHA v2, and this
+> document previously described a Playwright + local vision-model solver for it.
+> That solver is gone. `docs/BOOKING_VIA_CURL.md` still says reCAPTCHA in
+> places; it is stale on that point.
 
-## Architecture
+## Why pydoll rather than Playwright
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  Playwright  │────▶│ captcha_     │────▶│ ollama          │
-│  (Chromium)  │◀────│ solver.py    │◀────│ qwen3-vl:8b     │
-│              │     │              │     │ (localhost:11434)│
-└─────────────┘     └──────────────┘     └─────────────────┘
-   Browser CDP         Orchestrator         Vision Model
-   via pipes           async Python         curl subprocess
-```
+pydoll drives an ordinary Chrome install over the DevTools Protocol. Playwright
+drives its own bundled Chromium with its own instrumentation, and Turnstile
+detects that — challenges that pass under pydoll fail under Playwright. Chrome
+being the same binary a person would use is the whole point.
 
-**Why Playwright over pydoll/selenium:**
-- Playwright communicates with Chromium via **pipes**, not WebSockets
-- This makes it immune to network sandbox restrictions (important for Apple Claude Code environments)
-- pydoll uses aiohttp (WebSocket) for Chrome DevTools Protocol, which was blocked by macOS sandbox
-- Playwright's `frame_locator()` API handles cross-origin reCAPTCHA iframes natively
+The cost is that pydoll is a thinner library: the flow reaches for CDP directly
+in three places (mouse dispatch, window bounds, `Runtime.evaluate`), and depends
+on the private `tab._connection_handler` to do it.
 
-**Why curl subprocess over httpx:**
-- ollama sends malformed HTTP responses with duplicate `Transfer-Encoding` headers under load
-- httpx/httpcore rejects these with `RemoteProtocolError: multiple Transfer-Encoding headers`
-- curl tolerates malformed headers and processes them fine
-- Payload is written to a temp file (`-d @/tmp/file.json`) to avoid stdin pipe truncation with large base64 images
+## Why the browser cannot be headless
 
-## ITS Site Integration
+Headless Chrome is rejected by Turnstile. The widget either never issues a token
+or issues one the site refuses, so `options.headless` is `False` and the window
+is real.
 
-The solver automates the full flow on `as.its-kenpo.or.jp`:
+To keep a visible window from being a nuisance on a machine running this for
+weeks, the window is **minimised via CDP** immediately after launch
+(`Browser.getWindowForTarget` then `Browser.setWindowBounds` with
+`windowState: minimized`). A minimised window still renders and still passes;
+`headless` does not. Failing to minimise is non-fatal and only logged.
 
-```
-Homepage → Click "カレンダーから探す" → Captcha page → Solve reCAPTCHA → Click "次へ" → Calendar page
-```
+For the same reason `_save_user_agent()` refuses to record a UA containing
+`Headless` — a headless UA in `chrome_user_agent.txt` would make every
+subsequent curl request advertise a browser the site rejects.
 
-### `get_calendar_url()` function
+## How Turnstile is solved
 
-1. Navigate to `https://as.its-kenpo.or.jp/`
-2. Click the "カレンダーから探す" link
-3. Wait for the captcha page (`/calendar_apply?s=...`)
-4. Call `solve_recaptcha(page)` to solve the reCAPTCHA
-5. Click the "次へ" (Next) button
-6. Extract the resulting calendar URL (`/calendar_apply/calendar_select?s=...`)
-7. Save to `calendar_url_cache.txt` for use by `main.py`
+Turnstile renders its checkbox inside a cross-origin iframe, so no amount of
+DOM querying from the host page reaches it. The trick is that CDP input events
+are dispatched at the browser level and cross iframe boundaries.
 
-### ITS-specific considerations
-- The captcha page has a simple layout: checkbox + "次へ" button
-- The "次へ" button selector: `input[value="次へ"], button:has-text("次へ"), a:has-text("次へ")`
-- The calendar URL contains a unique session token that changes each time
-- The reCAPTCHA is Enterprise (no billing), same challenge types as standard v2
-- **Session timeout:** The ITS captcha page expires after ~6-7 minutes. All solve attempts must complete within this window.
+`_click_turnstile_checkbox(tab)`:
 
-## reCAPTCHA v2 Challenge Types Handled
+1. Find the host page's `.cf-turnstile` container (10s timeout) and read its
+   bounding box with `get_bounds_using_js()`.
+2. Compute the checkbox position from that box: **28px in from the left edge,
+   vertically centred**. The checkbox is at a fixed offset inside the widget, so
+   the container's geometry is enough.
+3. Dispatch `Input.dispatchMouseEvent` `mousePressed`, sleep 100ms, then
+   `mouseReleased` at that point.
+4. Poll `input[name="cf-turnstile-response"]` on the host page every
+   `TOKEN_POLL_INTERVAL` (2s) for up to `TOKEN_TIMEOUT` (30s). A non-empty value
+   is the token.
 
-### 1. Checkbox-only solve
-Sometimes clicking the checkbox is sufficient. The solver detects this by checking for `.recaptcha-checkbox-checked` after clicking.
+`solve_turnstile()` wraps that in up to `MAX_ATTEMPTS` (3) tries, reloading the
+page and waiting 5s between them to get a fresh widget.
 
-### 2. Static image grid (3x3)
-Each tile is an independent photo. Select all tiles matching the prompt object.
-- Common prompts: バス (buses), 自転車 (bicycles), 信号機 (traffic lights), 自動車 (cars), 消火栓 (fire hydrants), 横断歩道 (crosswalks)
+Only the token's **length** is logged. It is Cloudflare's single-use response
+token; a prefix in the log was never diagnostic of anything.
 
-### 3. Dynamic replacement challenges (3x3)
-After selecting matching tiles, they fade to white and get replaced with new candidate images. Must keep selecting until no more matches remain, then click verify.
-- Detected by observing `.rc-imageselect-dynamic-selected` class (animating tiles) and `img.rc-image-tile-11` (replacement images)
+## The rest of the flow
 
-### 4. 4x4 grids (auto-skipped)
-4x4 challenges (16 tiles) are **automatically skipped** by clicking reload. They are too slow for the 8B model — classifying 16 tiles serially takes 90-200s, during which ollama degrades and drops connections. Reloading to get a 3x3 challenge is much faster.
+`_solve_and_cache()` launches Chrome (`--no-sandbox`, `--lang=ja-JP`,
+`--window-size=1280,1600`) and minimises it, navigates to
+`https://as.its-kenpo.or.jp/`, records the user agent to
+`config.USER_AGENT_CACHE`, then clicks the 「カレンダーから探す」 link by scanning
+`<a>` text content — the link has no stable selector. It checks the resulting URL
+contains `calendar_apply`, screenshotting `unexpected_url.png` if not but
+carrying on, since the solve may still work.
 
-### 5. "Select more" error recovery
-When the solver misses tiles and clicks verify, reCAPTCHA shows "please select all matching images" (一致する画像をすべて選択してください). The solver re-analyzes only unselected tiles and tries again.
+After Turnstile it submits the form. The 「次へ」 button is disabled until
+Turnstile completes, so the script clears `disabled` and calls
+`btn.form.submit()` directly. The cache write is a temp file plus `os.replace()`,
+so a reader never sees a half-written URL.
 
-## DOM Structure
+## Never cache a bad URL
 
-reCAPTCHA v2 uses two cross-origin iframes:
+If the post-submit URL does not contain `calendar_select`, `_solve_and_cache()`
+screenshots `not_calendar.png` and returns `None`, leaving the previous cache
+entry untouched.
 
-| Component | Selector | Purpose |
-|-----------|----------|---------|
-| Anchor iframe | `iframe[title="reCAPTCHA"]` | Contains the checkbox |
-| Challenge iframe | `iframe[src*="bframe"]` | Contains the image grid |
-| Checkbox | `.recaptcha-checkbox-border` | Click target |
-| Solved indicator | `.recaptcha-checkbox-checked` | Appears when solved |
-| Prompt text | `.rc-imageselect-desc` | Challenge description |
-| Image tiles | `td.rc-imageselect-tile` | Clickable grid cells |
-| Selected tiles | `td.rc-imageselect-tileselected` | Already-clicked cells |
-| 4x4 grid | `table.rc-imageselect-table-44` | Presence = 4x4 layout |
-| Verify button | `#recaptcha-verify-button` | Submit answer |
-| Reload button | `#recaptcha-reload-button` | Get new challenge |
-| Replacement image | `img.rc-image-tile-11` | New tile after dynamic fade |
-| Animating tile | `.rc-imageselect-dynamic-selected` | Tile currently fading |
-| Token | `textarea[name="g-recaptcha-response"]` | On host page (not iframe) |
+This matters more than it looks. Saving the URL unconditionally poisoned the
+cache: every scanner would then replay a non-calendar URL that still answers
+HTTP 200, so `main.check_cached_url()` judged the session healthy and no
+re-solve ever fired. The booker sat there polling a URL that could not possibly
+show availability. Returning `None` keeps the old (possibly still valid) URL and
+retries on the next monitor cycle.
 
-## Tile Classification Strategies
+## Hard deadline and stray Chrome
 
-### Strategy 1: Full Grid Screenshot (preferred, single attempt)
+`get_calendar_url()` is a thin wrapper: it runs `_solve_and_cache()` under
+`asyncio.wait_for(..., config.CAPTCHA_TIMEOUT)` (180s) and returns `None` on
+timeout or on any exception.
 
-Screenshots the `.rc-imageselect-challenge` area, **resizes to max 300px**, and converts to JPEG before sending to the vision model. The model sees all tiles simultaneously and returns a JSON array of matching tile numbers.
+The deadline is not optional. The solve runs synchronously inside `main.py`'s URL
+monitor thread, and that thread is the only thing in the program that re-mints a
+session. A pydoll or Chrome hang there stops all booking indefinitely while the
+process keeps refreshing its display and looks perfectly healthy.
 
-- **Speed:** ~11-13 seconds when it works (one API call)
-- **Resize to 300px:** Reduces visual tokens for ollama, lowering the chance of `curl exit 56` (connection dropped). At 300px, a 3x3 grid has ~100px tiles — still clear enough for classification.
-- **Single attempt only:** Retrying wastes 13-15s per retry. With ollama degrading over time, early retries have the best chance; later ones just burn the session timer.
-- **JPEG compression:** PNG→JPEG quality 85 via Pillow reduces payload from ~150-300KB to ~20-25KB base64.
-- **`/no_think`:** Disables qwen3's chain-of-thought mode which consumed all tokens on `<think>` tags.
+On timeout, `_kill_stray_chrome()` runs. A cancelled `async with Chrome(...)` is
+interrupted mid-await and pydoll cannot always finish its own teardown, so the
+Chrome it launched survives — each orphan holding a profile directory and a few
+hundred MB of RSS. Over weeks of solves that is how the machine runs out of
+memory. The reaper matches `pgrep -f remote-debugging-port` and sends `SIGKILL`,
+which is narrow enough that a Chrome the user is browsing in is never a
+candidate.
 
-```
-"There are two possible layouts:
-  A) Each tile is a separate independent photo.
-  B) One single large photo is divided across the grid cells.
-For (A), select tiles whose photo matches the object.
-For (B), select every cell that contains ANY part of the object,
-even if only a small portion is visible in that cell."
-```
+`browser.stop()` is also called in a `finally`, guarded — `async with
+Chrome(...)` stops the browser on exit too, so it is the second call, and a
+raise from a `finally` would replace a good return value with an exception.
 
-### Strategy 2: Individual Tile Classification (reliable fallback)
+The wrapper's three behaviours (timeout returns `None`, Chrome is reaped, an
+exception does not propagate) are covered by `test_captcha_timeout_wrapper` in
+`test_booking_flow.py`.
 
-Screenshots each tile individually and asks the model a binary yes/no question per tile. Used when Strategy 1 returns empty or fails.
+## Logging and debug output
 
-- **Speed:** ~22-27 seconds for 9 tiles (parallelized with semaphore=2)
-- **Reliability:** Near 100% — individual tiles are 4-5KB JPEG, which ollama handles consistently
-- **Parallelization:** All tiles screenshotted sequentially (Playwright requirement), then vision calls fired via `asyncio.gather()` with `Semaphore(2)`
+`log()` prefixes `[elapsed_seconds]`, measured from module import — deliberately
+different from `book_hotels.log()`'s wall clock, so a solve's internal timings
+read as durations. `_log_handler` is set by `main()` to route into the TUI's
+left panel; unset, it prints.
 
-### Dynamic Round Strategy
+Nothing here logs a URL or a token verbatim. `redact_url()` handles the
+pre-solve URL and `token_summary()` the resulting calendar URL, both imported
+from `book_hotels` so there is one implementation of "make this safe to write
+down" (`book_hotels` imports only `config`, so this is not a cycle). The line
+this replaced wrote the complete `s=` token to disk on all 647 solves in the
+previous log; see the `s=` token section of `CLAUDE.md` for why a decoded field
+is equivalent to the token itself.
 
-After initial tile selection, dynamic replacement rounds use **per-tile classification** for replacement tiles only. Full-grid re-screenshots were tested but proved unreliable (`curl exit 56` increases as ollama processes more images during a session).
-
-- Limited to **5 rounds** max
-- Only new replacement tiles (containing `img.rc-image-tile-11`) are classified — unchanged tiles are skipped
-- Each round takes ~5-10s for 2-4 replacement tiles
-
-## Performance Results
-
-### Successful solve on ITS site (attempt 4, "消火栓" / fire hydrants):
-
-| Phase | Duration |
-|-------|----------|
-| Browser launch + ITS navigation | 14s |
-| Checkbox click + challenge load | 6s |
-| Attempt 1 (横断歩道, 3x3 dynamic, failed) | 82s |
-| Attempts 2-3 (自転車, 4x4, auto-skipped) | 4s |
-| Attempt 4 Strategy 1 classification | **12s** |
-| Click 3 tiles | 1s |
-| Dynamic round 1 (per-tile, found [7]) | 8s |
-| Dynamic round 2 (per-tile, empty) | 6s |
-| Click verify + confirm | 4s |
-| Click 次へ + page load | 4s |
-| **Total session** | **~148s** |
-
-### Key timing observations:
-- Strategy 1 (full grid 300px, when it works): **~12s** per call
-- Strategy 2 (per-tile, 9 tiles, semaphore=2): **~22-27s**
-- Dynamic round (per-tile, 2-4 tiles): **~5-10s** per round
-- 4x4 skip + reload: **~2s** (vs 90-200s if attempted)
-- ollama per single tile: **~2-7s** when healthy
-- **Session budget:** ~6-7 minutes before ITS session expires
-
-### Why 4x4 challenges are skipped:
-- 16 tiles × ~7s average = 112s just for classification
-- ollama degrades under sustained load: tiles 10-16 can take 20-70s each due to `curl exit 56` retries
-- Total 4x4 attempt: 200-350s, exceeding the session timeout
-- Reloading to get a 3x3 costs only 2s
-
-## Key Technical Decisions
-
-### 1. curl subprocess over httpx
-ollama frequently sends malformed HTTP responses with duplicate `Transfer-Encoding` headers, especially under load. httpx/httpcore's strict HTTP parsing rejects these outright. Switching to `curl` subprocess (which tolerates malformed headers) eliminated the class of `RemoteProtocolError` failures. Payloads are written to temp files (`-d @/tmp/file.json`) rather than piped via stdin to avoid truncation with large base64 images.
-
-### 2. Image resize + JPEG compression
-Playwright screenshots are PNG (110-294KB for a challenge grid, 6-15KB for individual tiles). Two optimizations are applied:
-- **JPEG conversion** (quality 85): 5-10x size reduction
-- **Resize to 300px max dimension** (Strategy 1 only): Reduces ollama visual token count, improving stability
-
-Size comparison:
-| Image | PNG | JPEG 85 | Resized 300px + JPEG 85 |
-|-------|-----|---------|-------------------------|
-| Challenge grid (386×390) | 238KB | 41KB / 55KB b64 | 21KB / 28KB b64 |
-| Individual tile (130×130) | 26KB | 4KB / 6KB b64 | — |
-
-### 3. 30s per-call timeout
-Each curl call has `--max-time 30` plus a 35s `asyncio.wait_for` guard. This prevents a single degraded ollama call from blocking the session. If a call exceeds 30s, it's killed and treated as a failure.
-
-### 4. Auto-skip 4x4 challenges
-4x4 grids are detected via `table.rc-imageselect-table-44` and immediately reloaded. This saves 90-200s per 4x4 encounter at a cost of ~2s per reload + 1 attempt slot.
-
-### 5. `/no_think` for Strategy 1
-qwen3-vl:8b defaults to chain-of-thought mode. For complex prompts (full grid with layout instructions), the model spent all `num_predict` tokens on `<think>` reasoning and produced empty output. Appending `/no_think` disables this.
-
-### 6. Semaphore(2) for concurrency
-Two concurrent ollama requests balances throughput with stability. Higher concurrency (3-4) causes ollama to drop connections under load.
-
-### 7. Scroll-into-view before clicking
-After multiple challenge attempts, the captcha iframe can scroll out of the viewport (observed bounding box y=-9776). The solver scrolls the bframe iframe into view before clicking tiles.
-
-### 8. Session timeout handling
-All Playwright interactions (verify click, tile screenshots) are wrapped in try/except to gracefully handle ITS session expiry (`TargetClosedError`). The solver returns `None` instead of crashing.
-
-## Debug Output
-
-All runs produce:
-- Timestamped console logs with `[elapsed_seconds]` prefix
-- Per-tile YES/no classification results with raw model output
-- Screenshots in `/tmp/captcha_debug/`:
-  - `its_captcha_page.png` — ITS captcha page before solving
-  - `its_calendar_page.png` — calendar page after solving
-  - `challenge_N.png` — each challenge grid
-  - `after_click_N.png` — state after tile clicks
-  - `strategy1.png` — screenshot sent to Strategy 1
-  - `tile_N.png` — individual tile screenshots (Strategy 2)
-  - `dynamic_rN_tileN.png` — replacement tile screenshots during dynamic rounds
+Screenshots go to `DEBUG_DIR` and are written only on the three failure paths:
+`unexpected_url.png`, `turnstile_failed.png`, `not_calendar.png`.
 
 ## Configuration
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `OLLAMA_URL` | `http://localhost:11434` | ollama API endpoint |
-| `OLLAMA_MODEL` | `qwen3-vl:8b` | Vision model to use |
-| `DEBUG_DIR` | `/tmp/captcha_debug` | Screenshot output directory |
-| `max_attempts` | `8` | Max challenge retries before giving up |
-| Semaphore | `2` | Max concurrent ollama requests |
-| `num_predict` | `500` (no_think) / `2000` (thinking) | Token limit per vision call |
-| JPEG quality | `85` | Compression for ollama payloads |
-| Strategy 1 resize | `300px` max dimension | Reduces visual tokens for ollama |
-| curl `--max-time` | `30s` | Per-call timeout |
+| Name | Where | Default | Purpose |
+|---|---|---|---|
+| `MAX_ATTEMPTS` | `captcha_solver.py` | 3 | Turnstile retries before giving up |
+| `TOKEN_POLL_INTERVAL` | `captcha_solver.py` | 2s | Gap between token checks |
+| `TOKEN_TIMEOUT` | `captcha_solver.py` | 30s | Wait for a token after the click |
+| `DEBUG_DIR` | `captcha_solver.py` | `/tmp/captcha_debug` | Failure screenshots |
+| `CAPTCHA_TIMEOUT` | `config.py` | 180s | Hard ceiling on one whole solve |
 
-## Dependencies
+Worst case is `MAX_ATTEMPTS` × (`TOKEN_TIMEOUT` + 5s reload) ≈ 105s plus
+navigation, which fits inside `CAPTCHA_TIMEOUT` with room to spare. Raising
+`MAX_ATTEMPTS` or `TOKEN_TIMEOUT` without raising `CAPTCHA_TIMEOUT` makes the
+deadline, rather than the retry count, the thing that ends a solve.
 
-```
-playwright>=1.58.0    # Browser automation
-Pillow                # Image compression (PNG → JPEG)
-```
+## Running it
 
-Install:
-```bash
-uv pip install --python .venv/bin/python playwright Pillow
-.venv/bin/python -m playwright install chromium
-```
+Needs `pydoll-python` and a real Chrome install. Either solve once —
 
-## Usage
-
-### Solve ITS captcha (default)
 ```bash
 .venv/bin/python captcha_solver.py
 ```
 
-### Test against 2captcha demo
-```bash
-.venv/bin/python captcha_solver.py --demo
-```
+— or let `main.py` solve on demand, forever, with `uv run main.py`. As a module,
+`await get_calendar_url()` returns the URL string or `None`.
 
-### As a module
-```python
-from captcha_solver import get_calendar_url, solve_recaptcha
+## Known limitations
 
-# Full ITS flow: navigate + solve + save URL
-url = await get_calendar_url()
-
-# Or solve on any page with reCAPTCHA:
-from playwright.async_api import async_playwright
-async with async_playwright() as pw:
-    browser = await pw.chromium.launch(headless=False)
-    page = await browser.new_page()
-    await page.goto('https://example.com/page-with-recaptcha')
-    token = await solve_recaptcha(page)
-```
-
-## Known Issues
-
-### 1. Strategy 1 intermittent failures
-The full-grid screenshot (even at 300px JPEG) triggers `curl exit 56` (connection dropped) roughly 50% of the time. ollama appears to drop connections when processing images above ~20KB. When Strategy 1 fails, the solver falls back to the reliable per-tile Strategy 2, adding ~20-25s.
-
-### 2. ollama degradation under sustained load
-After processing ~15-20 images, ollama becomes progressively unstable — response times increase from 2-7s to 20-70s, and `curl exit 56` errors become more frequent. This is why 4x4 challenges (16 tiles) are skipped and the session timer is critical.
-
-### 3. Model accuracy (~80-90% per tile)
-The 8B vision model occasionally misidentifies tiles. This means some attempts fail and the solver needs 2-4 tries. Dynamic challenges (which require multiple correct classifications in sequence) are harder to pass.
-
-### 4. Headless mode
-reCAPTCHA is more likely to present harder challenges in headless mode. The solver uses `headless=False` by default.
-
-## Potential Improvements
-
-- **Larger vision model:** `qwen3-vl:32b` for better per-tile accuracy (fewer failed attempts)
-- **`OLLAMA_NUM_PARALLEL=4`:** Set this environment variable when running `ollama serve` to enable true server-side parallel inference
-- **Audio fallback:** If image challenges prove too difficult, switch to audio challenges via `#recaptcha-audio-button`
-- **ollama restart between attempts:** Kill and restart ollama when degradation is detected (response times >15s), to reset GPU state
-- **Prompt caching:** Cache vision results for common tile images to avoid redundant API calls
+- **Fixed sleeps.** The flow waits 3s after the homepage, 5s after the link
+  click and 5s after the form submit rather than waiting on a condition. On a
+  slow network a step can run against a page that has not finished loading; the
+  symptom is a `calendar_apply` or `calendar_select` check failing on a URL that
+  would have been correct a second later.
+- **Private pydoll internals**, and a **hard-coded 28px checkbox offset**. Either
+  can break on an upgrade or a widget redesign with no warning; a mis-aimed click
+  presents as three consecutive 30-second token timeouts.
+- **Only the checkbox path is handled.** If Cloudflare escalates to an
+  interactive challenge the token never appears and the solve fails cleanly
+  rather than being solved.

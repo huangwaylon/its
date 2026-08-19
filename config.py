@@ -1,8 +1,59 @@
 """User-configurable settings for the ITS Calendar Booker."""
 import os
+import re
 
 # ── Paths ────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_dotenv(path):
+    """Read `KEY=value` lines from `path` into the environment.
+
+    Loaded here rather than left to `source .env`, because forgetting to source it
+    does not fail loudly: `EMAIL` would quietly fall back to its default, the
+    site's confirmation mail would go to a mailbox we do not read, and every
+    booking would stall at the email step for a reason nothing in the log explains.
+
+    A real environment variable wins over the file, so an override on the command
+    line still works — but only a *non-empty* one. An exported-but-empty variable
+    counts as unset, because that is a placeholder rather than a decision, and
+    `setdefault` semantics would otherwise let one stale `export ITS_KIGOU=` in a
+    shell profile shadow the file permanently and silently.
+
+    `export ` prefixes, surrounding quotes, comments and blank lines are all
+    tolerated so the same file can also be sourced by a shell.
+    """
+    try:
+        with open(path, encoding='utf-8') as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip().lstrip('﻿')
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[len('export '):].lstrip()
+        key, sep, value = line.partition('=')
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        quoted = len(value) >= 2 and value[0] == value[-1] and value[0] in '"\''
+        if quoted:
+            value = value[1:-1]
+        else:
+            # Strip a trailing comment, but only one introduced by whitespace, so
+            # a value that legitimately contains '#' survives. Without this an
+            # annotated line like `ITS_ZIP=1420051   # 郵便番号` silently sets the
+            # postcode to "1420051   # 郵便番号", which the site then rejects.
+            value = re.split(r'\s#', value, maxsplit=1)[0].rstrip()
+        if not os.environ.get(key):
+            os.environ[key] = value
+
+
+_load_dotenv(os.path.join(_DIR, '.env'))
+
 CALENDAR_URL_CACHE = os.path.join(_DIR, 'calendar_url_cache.txt')
 BOOKINGS_FILE = os.path.join(_DIR, 'bookings.json')
 LOG_FILE = os.path.join(_DIR, 'its_booking.log')
@@ -11,14 +62,14 @@ USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
-    "2026-08-22",
-    "2026-08-29",
-    "2026-09-05",
-    "2026-09-19",
-    "2026-09-20",
-    "2026-09-21",
-    "2026-09-22",
-    "2026-09-26",
+        "2026-09-16",
+
+    # "2026-09-05",
+    # "2026-09-19",
+    # "2026-09-20",
+    # "2026-09-21",
+    # "2026-09-22",
+    # "2026-09-26",
 ]
 EMAIL = 'wwaylonhuang@gmail.com'
 NUM_GUESTS = '2'
@@ -47,6 +98,21 @@ CURL_TIMEOUT = 30
 BOOK_MAX_ATTEMPTS = 3
 BOOK_RETRY_DELAY = 2.0    # seconds before re-attempting a date
 
+# The scan cycle is one POST that carries availability for the whole month, plus
+# a calendar GET whose only purpose is to mint the csrf/s pair that POST needs. A
+# Rails authenticity_token is valid for the life of the session — validation is a
+# stateless unmask against session[:_csrf_token], with no nonce store — so the
+# GET is skippable while the session lasts, halving the steady-state scan to one
+# request. (docs/BOOKING_VIA_CURL.md used to claim tokens were effectively
+# single-use; that finding is refuted there now.)
+#
+# Reuse is self-limiting: a rejected token is detected by response *shape*, the
+# tokens are re-minted in the same cycle, and after this many consecutive
+# rejections reuse switches off for the rest of the process rather than emitting
+# a steady stream of rejected POSTs.
+SCAN_REUSE_SESSION = True
+SCAN_REUSE_MAX_FAILURES = 3
+
 # Consecutive scan failures multiply RETRY_DELAY up to this ceiling, so a site
 # outage is not met with the same request rate for hours.
 SCAN_BACKOFF_MAX = 300
@@ -59,6 +125,102 @@ SCAN_JITTER = 5
 # session. An untimed hang there stops all booking while the process still looks
 # healthy and the display keeps refreshing.
 CAPTCHA_TIMEOUT = 180
+
+# ── Repeat-attempt cooldowns ─────────────────────────────────────────
+# The real request tail is repetition, not breadth. `attempted` lives only for
+# one book_all_hotels_for_date call, so a date that stays available for half an
+# hour with two hotels that always fail was re-attempted every scan cycle: ~80
+# cycles at ~24 requests each, about 1,960 requests in 30 minutes. A per-(date,
+# hotel) cooldown is what bounds that.
+#
+# Two lengths, because the two failures mean different things:
+#   RETRY  — failed before the room hold. Usually a lost race or a dead session,
+#            worth another go soon.
+#   HOLD   — reached the /apply/empty_create POST, which takes a 30-minute hold
+#            on the room and is the point of no return. Nothing in this program
+#            releases a hold, so re-attempting inside that window stacks a second
+#            hold on the same facility and we end up reading our own holds back
+#            as 空き部屋がございません. Must not be shorter than the site's hold.
+HOTEL_RETRY_COOLDOWN = 300
+HOTEL_HOLD_COOLDOWN = 1800
+
+# Stop applying for a date once this many hotels are recorded for it. 0 = no cap.
+#
+# Off by default, deliberately. Capping at 1 would have discarded 16 of the 39
+# applications in this repo's history (41%). Because `send_complete` only sends
+# the confirmation email and the reservation is not confirmed until someone opens
+# the emailed link within 30 minutes, several applications per date are a hedge
+# against missing that window rather than waste. Set this only once the emailed
+# leg is automated.
+MAX_BOOKINGS_PER_DATE = 0
+
+# ── Emailed confirmation ─────────────────────────────────────────────
+# `send_complete` only dispatches the confirmation email. The reservation exists
+# only after the emailed link is opened, the applicant form submitted, and 確認
+# pressed — which yields a 申込受付番号 and 予約確定. That last POST is the first
+# irreversible, money-bearing action in this program.
+AUTO_CONFIRM = True
+
+# Never complete an application for a stay fewer than this many days away.
+#
+# Free cancellation is web-only and ends at D−10 (「利用日の10日前まではWEB上で
+# キャンセルが行えます」); from D−9 it costs 50% of the fee and must be arranged by
+# telephone during office hours, and the full amount on the day. So a booking
+# confirmed inside that window cannot be undone cheaply, or possibly at all.
+#
+# 11 rather than 10: at D−11 there is still a whole further day (D−10) in which to
+# cancel free, which is the margin for clock skew, a JST/local timezone edge, and
+# an application that fires just before midnight. Dates inside the window are NOT
+# abandoned — the hold is still taken and the email still sent, and a human
+# finishes within the site's 30-minute hold. See confirm_allowed().
+AUTO_CONFIRM_MIN_DAYS = 11
+
+# How long to wait for the site's confirmation email, and how much of the site's
+# 30-minute hold to leave for the remaining requests before giving up on it.
+CONFIRM_MAIL_TIMEOUT = 180     # seconds to poll IMAP for the message
+CONFIRM_HOLD_SECONDS = 1800    # the site's hold on the room, from step 7
+CONFIRM_HOLD_MARGIN = 300      # stop starting new work with less than this left
+
+# ── Secrets, from the environment only ───────────────────────────────
+# Never hard-coded and never written to a tracked file: this repository's history
+# is on a public remote. 記号/番号/カナ氏名/生年月日 are 資格認証のキー — identity
+# credentials for the insurance record — so they are also added to the debug-dump
+# redaction list, not merely kept out of git.
+IMAP_HOST = os.environ.get('ITS_IMAP_HOST', 'imap.gmail.com')
+IMAP_PORT = int(os.environ.get('ITS_IMAP_PORT', '993'))
+IMAP_USER = os.environ.get('ITS_IMAP_USER', '')
+# Google displays an app password as four groups of four. The spaces are purely
+# cosmetic and IMAP rejects them, so strip rather than make that a support call.
+IMAP_APP_PASSWORD = os.environ.get('ITS_IMAP_APP_PASSWORD', '').replace(' ', '')
+MAIL_FROM = os.environ.get('ITS_MAIL_FROM', 'noreply@mail.its-kenpo.or.jp')
+
+# The address submitted to the site must be the mailbox we read, or the
+# confirmation link is delivered somewhere we cannot see it.
+EMAIL = os.environ.get('ITS_EMAIL') or IMAP_USER or 'wwaylonhuang@gmail.com'
+
+APPLICANT = {
+    'kigou': os.environ.get('ITS_KIGOU', ''),
+    'bangou': os.environ.get('ITS_BANGOU', ''),
+    'kana_sei': os.environ.get('ITS_KANA_SEI', ''),
+    'kana_mei': os.environ.get('ITS_KANA_MEI', ''),
+    # The live form has ONE 「カナ氏名」 box, not separate 姓/名. Left blank here it
+    # is derived as "SEI　MEI" with a full-width space; set it to override.
+    'kana_name': os.environ.get('ITS_KANA_NAME', ''),
+    'name_sei': os.environ.get('ITS_NAME_SEI', ''),
+    'name_mei': os.environ.get('ITS_NAME_MEI', ''),
+    'birth': os.environ.get('ITS_BIRTH', ''),
+    'sex': os.environ.get('ITS_SEX', ''),
+    'zokugara': os.environ.get('ITS_ZOKUGARA', ''),
+    'tel': os.environ.get('ITS_TEL', ''),
+    # 事業所名 — asked for by name on the applicant form (apply[office_name]).
+    'office': os.environ.get('ITS_OFFICE_NAME', ''),
+    'zip': os.environ.get('ITS_ZIP', ''),
+    # 都道府県, matched against the form's dropdown by its label, e.g. 東京都.
+    'state': os.environ.get('ITS_STATE', ''),
+    'addr': os.environ.get('ITS_ADDR', ''),
+}
+
+RESERVATIONS_FILE = os.path.join(_DIR, 'reservations.json')
 
 # ── Debug dumps ──────────────────────────────────────────────────────
 # Dumps are throttled per (label, step) and the directory is pruned to a fixed
@@ -101,10 +263,11 @@ FALLBACK_USER_AGENT = (
 # any other non-skipped hotel. Matching is case-insensitive and ignores spacing,
 # so 'NAGU' catches "NAGU 勝浦".
 #
-# This is about the race, not about preference. Hotels are booked sequentially
-# and one hotel is ~7 requests, so in the site's own ordering a hotel listed
-# last is attempted tens of seconds after the slot was spotted — long enough to
-# lose it. Anything named here jumps the queue.
+# This is about the race, not about preference. Hotels are booked sequentially at
+# ~10 requests each, so a hotel the site lists last is attempted some seconds
+# after the slot was spotted. Anything named here jumps the queue. Note the list
+# a date offers holds only facilities with vacancy on it — 「{date}に空きがある
+# 施設です」 — so it is usually about three entries, not the whole roster.
 PRIORITY_HOTELS = [
     'NAGU',
 ]
@@ -113,7 +276,7 @@ PRIORITY_HOTELS = [
 # Matched after normalizing case, HTML entities, and full-width vs half-width
 # spaces, so an entry cannot silently miss on whitespace alone.
 SKIP_HOTELS = [
-    "ブルーベリーヒル勝浦",
+    # "ブルーベリーヒル勝浦",
     "ホテル日航プリンセス京都",
     "ホテルハーヴェスト南紀田辺",
     "草津温泉　ホテルヴィレッジ",

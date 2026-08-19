@@ -20,6 +20,9 @@ from config import (
     CURL_RETRY_BACKOFF, CURL_RETRY_BACKOFF_MAX, CURL_TIMEOUT,
     BOOK_MAX_ATTEMPTS, BOOK_RETRY_DELAY,
     SCAN_BACKOFF_MAX, SCAN_JITTER,
+    SCAN_REUSE_SESSION, SCAN_REUSE_MAX_FAILURES,
+    HOTEL_RETRY_COOLDOWN, HOTEL_HOLD_COOLDOWN, MAX_BOOKINGS_PER_DATE,
+    AUTO_CONFIRM, AUTO_CONFIRM_MIN_DAYS,
     DEBUG_DUMP_INTERVAL, DEBUG_DUMP_KEEP, IDLE_LOG_INTERVAL, SKIP_PAST_DATES,
 )
 
@@ -94,26 +97,49 @@ def _read_cached_url():
 # every prior booking. The last log has 5 bookings for 2026-08-22 that no longer
 # appear in bookings.json, which is exactly that failure having already happened.
 _bookings_unreadable = False
+_bookings_corrupt = False
 
 
 def _load_bookings():
-    global _bookings_unreadable
+    """Read the bookings file. Must only be called under `_bookings_lock`.
+
+    Sets two distinct flags, because the two failures call for opposite actions:
+
+      `_bookings_corrupt`   — the bytes are there but do not parse, or parse to
+                              something that is not an object. Salvaging the file
+                              aside and starting a new one loses nothing.
+      `_bookings_unreadable` — contents unknown. Set for either failure, and it
+                              is the flag callers must consult before treating an
+                              empty result as "nothing is booked".
+
+    An OSError is deliberately NOT treated as corruption. One transient read
+    error used to be enough to rename a perfectly good file to
+    `bookings.json.corrupt.*` and replace it with a single entry, destroying the
+    record for every other date — and that record is the only thing preventing
+    duplicate applications.
+    """
+    global _bookings_unreadable, _bookings_corrupt
     if not os.path.exists(BOOKINGS_FILE):
-        _bookings_unreadable = False
+        _bookings_unreadable = _bookings_corrupt = False
         return {}
     try:
         with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
             content = f.read().strip()
+    except OSError as e:
+        _bookings_unreadable, _bookings_corrupt = True, False
+        log(f"{R}Warning: could not read {BOOKINGS_FILE}: {e}{X}")
+        return {}
+    try:
         data = json.loads(content) if content else {}
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-        _bookings_unreadable = True
-        log(f"{R}Warning: failed to load {BOOKINGS_FILE}: {e}{X}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        _bookings_unreadable = _bookings_corrupt = True
+        log(f"{R}Warning: failed to parse {BOOKINGS_FILE}: {e}{X}")
         return {}
     if not isinstance(data, dict):
-        _bookings_unreadable = True
+        _bookings_unreadable = _bookings_corrupt = True
         log(f"{R}Warning: {BOOKINGS_FILE} is not an object, ignoring{X}")
         return {}
-    _bookings_unreadable = False
+    _bookings_unreadable = _bookings_corrupt = False
     return data
 
 
@@ -121,7 +147,15 @@ def save_booking(date_str, hotel_name):
     """Record a successful booking. Thread-safe, atomic, never destructive."""
     with _bookings_lock:
         bookings = _load_bookings()
-        if _bookings_unreadable:
+        if _bookings_unreadable and not _bookings_corrupt:
+            # Contents unknown rather than known-bad: writing now would replace
+            # the whole file with this one entry. Losing the record of one
+            # application only risks a duplicate attempt later; losing the file
+            # risks duplicating every application ever made.
+            log(f"{R}BOOKED {hotel_name} for {date_str} but {BOOKINGS_FILE} could "
+                f"not be read — not recording, refusing to overwrite it{X}")
+            return
+        if _bookings_corrupt:
             # Move the unreadable file aside instead of overwriting it, so the
             # bytes survive for inspection and this booking is still recorded.
             # The sequence number matters: two corruptions in the same second
@@ -173,6 +207,60 @@ def _write_bookings(bookings):
 def get_booked_hotels(date_str):
     with _bookings_lock:
         return _load_bookings().get(date_str, [])
+
+
+def booked_hotels_checked(date_str):
+    """`(hotels, readable)` for one date.
+
+    `get_booked_hotels` cannot distinguish "nothing booked" from "could not read
+    the file", and any policy that *stops* work once enough is booked has to tell
+    those apart or it fails open on a read error.
+    """
+    with _bookings_lock:
+        data = _load_bookings()
+        return data.get(date_str, []), not _bookings_unreadable
+
+
+# ── Per-(date, hotel) cooldowns ──────────────────────────────────────
+# `attempted` in book_all_hotels_for_date only lives for one call, so without
+# this a date that stays available keeps re-attempting the same failing hotels
+# every scan cycle. See HOTEL_RETRY_COOLDOWN / HOTEL_HOLD_COOLDOWN in config.
+_cooldown_lock = threading.Lock()
+_cooldowns = {}   # (date_str, normalized hotel name) -> monotonic expiry
+
+
+def set_cooldown(date_str, hotel_name, seconds):
+    """Hold off on this (date, hotel) for `seconds`. Later calls win.
+
+    `hotel_name=None` cools off the whole date. A per-hotel cooldown alone still
+    left the date paying the three setup requests every cycle just to rediscover
+    that every hotel on it is cooling off, which is most of what the cooldown was
+    supposed to save.
+    """
+    key = (date_str, _norm_hotel(hotel_name))
+    with _cooldown_lock:
+        _cooldowns[key] = time.monotonic() + seconds
+
+
+def in_cooldown(date_str, hotel_name):
+    """True while this (date, hotel) is still cooling off."""
+    key = (date_str, _norm_hotel(hotel_name))
+    now = time.monotonic()
+    with _cooldown_lock:
+        expiry = _cooldowns.get(key)
+        if expiry is None:
+            return False
+        if expiry <= now:
+            del _cooldowns[key]
+            return False
+        return True
+
+
+def cooldown_remaining(date_str, hotel_name):
+    """Seconds left on this (date, hotel)'s cooldown, 0 if none. For logging."""
+    key = (date_str, _norm_hotel(hotel_name))
+    with _cooldown_lock:
+        return max(0.0, _cooldowns.get(key, 0.0) - time.monotonic())
 
 
 
@@ -804,7 +892,16 @@ def _is_session_dead(status, location):
 
 
 def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
-    """Book a single hotel for a date. Steps 3-9. Returns True on success."""
+    """Book a single hotel for a date. Steps 3-9. Returns True on success.
+
+    Sets this (date, hotel)'s cooldown on the way through, so a hotel that keeps
+    failing is not re-attempted on every scan cycle for as long as the date stays
+    available. The short cooldown is claimed on entry and covers every failure
+    below; reaching step 7 upgrades it to the long one, because from that request
+    onwards we may be holding the room.
+    """
+    set_cooldown(target_date, hotel_name, HOTEL_RETRY_COOLDOWN)
+
     # STEP 3: Select hotel
     log(f"{tag} {C}Booking: {hotel_name}{X}")
     s, body, _ = c('POST', BASE + '/calendar_apply/apply_service_select',
@@ -875,8 +972,13 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         return False
     log(f"{tag}   {C}{len(rooms)} rooms -> selecting room{X}")
 
-    # STEP 7: Submit room
+    # STEP 7: Submit room. This POST takes a 30-minute hold on the room and is
+    # the point of no return: nothing in this program can release one, so the
+    # cooldown is claimed *before* the request rather than after its outcome is
+    # known. A lost response still means we may be holding it.
     room_id = rooms[0][0]
+    set_cooldown(target_date, hotel_name, HOTEL_HOLD_COOLDOWN)
+    held_at = time.time()   # the site's 30-minute hold starts with this request
     s, body, loc = c('POST', BASE + form_action,
         {'utf8': '\u2713', 'authenticity_token': auth,
          'apply[join_time]': target_date, 'apply[night_count]': '1',
@@ -928,13 +1030,11 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     }
     if token_field:
         post_data['__token__'] = token_field
-    # This POST *is* the application. curl's own retry must not touch it:
-    # `--max-time` can expire after the server accepted the submission and before
-    # the response arrived, and repeating it then files a second application for
-    # the same room. Nothing downstream could catch that: the booking is not
-    # recorded until a response confirms it, and losing one slot to a transport
-    # failure is much the cheaper mistake. Steps 3-8 only navigate, so they stay
-    # retryable.
+    # This POST only *dispatches the confirmation email* — the response page is
+    # 「メール送信を完了しました」, not a reservation. It still must never be
+    # repeated: it consumes `__token__` and sends mail, and `--max-time` can expire
+    # after the server accepted it, so a retry would submit twice with no way to
+    # tell. Steps 3-8 only navigate, so they stay retryable.
     s, body, loc = c('POST', email_url, post_data, retry=False)
     if s == 0:
         log(f"{tag}   {R}Email submit got no response: outcome unknown, not "
@@ -945,13 +1045,43 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         via, (s, body, _) = body, c('GET', loc)
 
     if 'send_complete' in body:
-        log(f"{tag}   {B}{G}BOOKED: {hotel_name}{X}")
+        # Not a reservation: this is 「メール送信を完了しました」. The room is held
+        # for 30 minutes from the step-7 POST and the site has emailed a link that
+        # still has to be followed. bookings.json records the *hold*.
+        log(f"{tag}   {B}{G}HELD + MAIL SENT: {hotel_name}{X}")
         save_booking(target_date, hotel_name)
+        _finish_from_email(c, target_date, hotel_name, tag, held_at)
         return True
 
     log(f"{tag}   {R}Final page not send_complete{X}")
     _dump_debug(f"{target_date}_{hotel_name}", 'step9_final', s, body, via)
     return False
+
+
+def _finish_from_email(c, target_date, hotel_name, tag, held_at):
+    """Run steps 7-9 off the emailed link, if that module is usable.
+
+    Imported here rather than at module scope: `confirm_booking` imports this
+    module, and it must never be able to stop a booking thread. A hold plus a sent
+    email is already worth keeping — the human fallback works from exactly that
+    state — so any failure in here is logged and swallowed.
+    """
+    try:
+        import confirm_booking
+    except Exception as e:
+        log(f"{tag}   {R}Cannot load confirm_booking ({e!r}); "
+            f"{hotel_name} needs a human to finish from the mail{X}")
+        return
+    try:
+        status, detail = confirm_booking.confirm_from_email(
+            c, target_date, hotel_name, tag, held_at=held_at)
+    except Exception as e:
+        log(f"{tag}   {R}Confirmation step raised {e!r}; the room is held and the "
+            f"mail is sent — finish it by hand{X}")
+        return
+    if status != 'confirmed':
+        log(f"{tag}   {Y}{hotel_name} on {target_date} not confirmed "
+            f"({status}: {detail}){X}")
 
 
 def _open_calendar_session(c, cookie_file, url, target_date, tag, label,
@@ -1070,12 +1200,66 @@ def book_all_hotels_for_date(target_date, label):
     return target_date, booked
 
 
+def _cool_date_if_exhausted(target_date, names, tag):
+    """Cool the whole date while every hotel offered for it is cooling off.
+
+    Set as soon as a pass runs out of candidates, not on the pass after. A
+    per-hotel cooldown alone still left the date paying `_open_calendar_session`
+    plus `_select_date` every cycle purely to rediscover there is nothing on it
+    worth trying, which is most of what the cooldown was meant to save.
+    """
+    waits = [cooldown_remaining(target_date, n) for n in names]
+    if not waits or not all(w > 0 for w in waits):
+        return
+    wait = min(waits)
+    set_cooldown(target_date, None, wait)
+    log(f"{tag} {Y}every hotel for {target_date} is cooling off; leaving the "
+        f"date alone for {wait / 60:.0f}m{X}")
+
+
+def _date_satisfied(target_date, booked=()):
+    """`(satisfied, readable)` against MAX_BOOKINGS_PER_DATE.
+
+    Counts normalized names from bookings.json unioned with this run's successes,
+    so a success that appears in both cannot be counted twice across
+    BOOK_MAX_ATTEMPTS retries.
+
+    `readable` is False when the bookings file could not be read. The caller must
+    not proceed in that case: a cap that quietly became unlimited on a transient
+    read error is exactly how duplicate applications get filed.
+    """
+    if not MAX_BOOKINGS_PER_DATE:
+        return False, True
+    recorded, readable = booked_hotels_checked(target_date)
+    if not readable:
+        return False, False
+    count = len({_norm_hotel(n) for n in recorded} |
+                {_norm_hotel(n) for n in booked})
+    return count >= MAX_BOOKINGS_PER_DATE, True
+
+
 def _book_date_once(target_date, label, tag, booked, attempted):
     """One full pass over a date's hotels. Returns an outcome string.
 
     `booked` is appended to in place and `attempted` records hotels already
     tried, so a retry resumes rather than re-applying for what it already sent.
     """
+    # Checked before any request, since neither needs one.
+    if in_cooldown(target_date, None):
+        log(f"{tag} {Y}{target_date} cooling off for another "
+            f"{cooldown_remaining(target_date, None) / 60:.0f}m, skipping{X}")
+        return 'done'
+
+    satisfied, readable = _date_satisfied(target_date, booked)
+    if not readable:
+        log(f"{tag} {R}bookings file unreadable — not applying for {target_date} "
+            f"while MAX_BOOKINGS_PER_DATE is set{X}")
+        return 'failed'
+    if satisfied:
+        log(f"{tag} {Y}{target_date} already has {MAX_BOOKINGS_PER_DATE} "
+            f"booking(s), leaving it alone{X}")
+        return 'done'
+
     url = _read_cached_url()
     if not url:
         return 'failed'
@@ -1102,13 +1286,20 @@ def _book_date_once(target_date, label, tag, booked, attempted):
             f"{', '.join(n for _, n in all_hotels)}{X}")
 
         already_booked = get_booked_hotels(target_date)
+        booked_norm = {_norm_hotel(n) for n in already_booked}
+        attempted_norm = {_norm_hotel(n) for n in attempted}
         skipped = [n for _, n in all_hotels if is_skipped(n)]
         already = [n for _, n in all_hotels
-                   if n in already_booked or n in attempted]
+                   if _norm_hotel(n) in booked_norm | attempted_norm]
+        cooling = [n for _, n in all_hotels if in_cooldown(target_date, n)]
+        # Normalized on both sides. Comparing raw names let one full-width space
+        # in bookings.json defeat the already-booked filter, which is a duplicate
+        # application; is_skipped() has always normalized, so the two disagreed.
         hotels = order_hotels([(gid, name) for gid, name in all_hotels
                                if not is_skipped(name)
-                               and name not in already_booked
-                               and name not in attempted])
+                               and _norm_hotel(name) not in booked_norm
+                               and _norm_hotel(name) not in attempted_norm
+                               and not in_cooldown(target_date, name)])
 
         if not hotels:
             reasons = []
@@ -1116,13 +1307,26 @@ def _book_date_once(target_date, label, tag, booked, attempted):
                 reasons.append(f"skip list: {', '.join(skipped)}")
             if already:
                 reasons.append(f"already booked/attempted: {', '.join(already)}")
+            if cooling:
+                reasons.append('cooling off: ' + ', '.join(
+                    f'{n} ({cooldown_remaining(target_date, n) / 60:.0f}m)'
+                    for n in cooling))
             log(f"{tag} {Y}All hotels filtered out ({'; '.join(reasons)}){X}")
+            _cool_date_if_exhausted(target_date, cooling, tag)
             return 'done'
 
         log(f"{tag} {C}{len(hotels)} to book (priority first): "
             f"{', '.join(n for _, n in hotels)}{X}")
 
         for i, (hotel_id, hotel_name) in enumerate(hotels):
+            # Re-checked per hotel, before the setup requests below, so the cap
+            # costs nothing once it is reached.
+            satisfied, _readable = _date_satisfied(target_date, booked)
+            if satisfied:
+                log(f"{tag} {G}{MAX_BOOKINGS_PER_DATE} booking(s) reached for "
+                    f"{target_date}, skipping the remaining "
+                    f"{len(hotels) - i} hotel(s){X}")
+                break
             if i > 0:
                 # Fresh session per hotel. A failure here is worth reporting up
                 # so the outer loop can retry the hotels not yet reached.
@@ -1143,6 +1347,7 @@ def _book_date_once(target_date, label, tag, booked, attempted):
                 log(f"{tag} {B}{G}=== Total booked for {target_date}: "
                     f"{len(booked)} ({', '.join(booked)}){X}")
 
+        _cool_date_if_exhausted(target_date, [n for _, n in hotels], tag)
         return 'done'
 
     finally:
@@ -1166,10 +1371,92 @@ def _future_dates(target_dates):
     return [d for d in target_dates if d >= today]
 
 
+_ISO_DATE = re.compile(r'\A\d{4}-\d{2}-\d{2}\Z')
+
+
+def days_until(target_date, today=None):
+    """Whole days from `today` to `target_date`, or None if it will not parse.
+
+    Strictly `YYYY-MM-DD`, which is the only form used anywhere in this program —
+    `TARGET_DATES`, `data-join-time` and the `bookings.json` keys are all that
+    shape. `date.fromisoformat` alone is far more liberal: since 3.11 it also
+    accepts `20260905` and week dates like `2026-W36-6`, and a safety gate should
+    not quietly widen because the standard library did. Anything else here means a
+    caller is passing something unexpected, which is exactly when to stop.
+
+    None rather than a raise or a guess: every caller treats an unknown distance as
+    "do not commit", and a silent 0 would read as "today", the most dangerous
+    possible interpretation.
+    """
+    if not isinstance(target_date, str) or not _ISO_DATE.match(target_date):
+        return None
+    try:
+        target = date.fromisoformat(target_date)
+    except ValueError:
+        return None
+    return (target - (today or date.today())).days
+
+
+def confirm_allowed(target_date, today=None):
+    """`(allowed, reason)` — may the application for this date be *completed*?
+
+    Completing an application means 予約確定: a real reservation carrying a real
+    cancellation liability. Free cancellation is web-only and ends at D−10; from
+    D−9 it costs 50% and has to be arranged by telephone in office hours, and the
+    full amount on the day of use. So anything inside that window must not be
+    committed without a person deciding to.
+
+    This gate governs the final POSTs only. It deliberately does not stop the room
+    hold or the confirmation email: those are free and reversible (the hold simply
+    lapses after 30 minutes), and having them in place is what lets a human finish
+    a near-date booking themselves if they want it.
+
+    Fails closed. An unparseable date, a missing config value or a clock we cannot
+    reason about all return False, because the cost of wrongly committing is a
+    non-refundable booking and the cost of wrongly refusing is one lost slot.
+    """
+    if not AUTO_CONFIRM:
+        return False, 'AUTO_CONFIRM is off'
+
+    left = days_until(target_date, today)
+    if left is None:
+        return False, f'cannot read a date out of {target_date!r}'
+
+    try:
+        minimum = int(AUTO_CONFIRM_MIN_DAYS)
+    except (TypeError, ValueError):
+        return False, f'AUTO_CONFIRM_MIN_DAYS is not a number: {AUTO_CONFIRM_MIN_DAYS!r}'
+    if minimum < 0:
+        return False, f'AUTO_CONFIRM_MIN_DAYS is negative: {minimum}'
+
+    if left < minimum:
+        return False, (f'{target_date} is {left} day(s) away, inside the '
+                       f'{minimum}-day floor — free cancellation ends at D-10, '
+                       f'so a person has to decide on this one')
+    return True, ''
+
+
+def _month_rendered(status, body):
+    """True when a month-nav response actually carries a calendar.
+
+    Status alone is not a sufficient test. If the site runs Rails'
+    `protect_from_forgery with: :null_session`, a request whose CSRF token is
+    rejected is not answered with 422 — it runs with an empty session and can
+    return 200 and a page with no date cells in it. A scanner that trusted the
+    status would then report "no dates available" for as long as it kept
+    replaying a stale token, while looking perfectly healthy.
+    """
+    return status == 200 and 'data-join-time' in body
+
+
 def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     """Scan a month's calendar for availability, spawn booking threads per date.
 
-    Runs indefinitely. Each cycle: 1 GET + 1 POST checks ALL target dates.
+    Runs indefinitely. Each cycle checks ALL target dates for the month with a
+    single `calendar_select` POST; the calendar GET that mints the csrf/s pair for
+    it is skipped while a cached pair still works (SCAN_REUSE_SESSION), so the
+    steady-state cycle is one request rather than two.
+
     When availability is found, spawns parallel booking threads (one per date).
     If URL is missing or expired, logs and waits for next cycle.
 
@@ -1201,18 +1488,49 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     def c(method, u, data=None, headers=None, retry=True):
         return curl(cookie_file, method, u, data, headers, retry)
 
+    def mint_tokens(url, attempt):
+        """GET the calendar for a fresh (csrf, s) pair. None if the GET failed.
+
+        This is the request session reuse exists to avoid, and it is also the
+        most failure-prone one in the program: 172 of the 629 dumps on record are
+        a 503 on this GET.
+        """
+        st, bd, lc = c('GET', url)
+        if st != 200:
+            # The cookie jar is only reset after a failure. Truncating it every
+            # cycle asked the site for a brand-new session about 4,300 times a
+            # day and threw a working one away each time.
+            if _is_session_dead(st, lc) or _is_retryable(st):
+                open(cookie_file, 'w').close()
+            log(f"{tag} {Y}[{attempt}] URL returned {st}, waiting...{X}")
+            return None
+        return (ex(bd, r'csrf-token.*?content="(.*?)"'),
+                ex(bd, r'name="s" id="s" value="(.*?)"'))
+
+    def nav_month(tokens, url):
+        """POST calendar_select. Its response carries every date in the month."""
+        csrf, s_param = tokens
+        return c('POST', BASE + '/calendar_apply/calendar_select',
+            {'join_date': month_ym, 's': s_param},
+            {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
+             'Accept': 'text/javascript, application/javascript, */*; q=0.01',
+             'Referer': url})
+
     try:
         attempt = 0
         failures = 0          # consecutive failed cycles, drives the backoff
         idle_since = None     # start of the current unchanged idle streak
         idle_count = 0
+        tokens = None         # cached (csrf, s_param) for the live session
+        tokens_url = None     # the URL they were minted from
+        reuse = SCAN_REUSE_SESSION
+        reuse_failures = 0    # consecutive rejections of a cached pair
         while not stopped():
             attempt += 1
             if attempt > 1:
                 # Back off while the site is unhappy, and jitter always: the
                 # per-month scanners otherwise settle into lockstep and arrive
-                # as a burst, the likeliest reason 1072 of the last log's
-                # calendar GETs came back 503.
+                # as a burst.
                 delay = min(RETRY_DELAY * (2 ** min(failures, 8)), SCAN_BACKOFF_MAX)
                 nap(delay + random.uniform(0, SCAN_JITTER))
                 if stopped():
@@ -1231,35 +1549,56 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
                     failures += 1
                     continue
 
-                # SCAN: Load calendar (1 GET). The cookie jar is only reset
-                # after a failure - truncating it every cycle asked the site for
-                # a brand-new session about 4,300 times a day and threw away a
-                # working one each time.
-                s, body, loc = c('GET', url)
-                if s != 200:
-                    if _is_session_dead(s, loc) or _is_retryable(s):
-                        open(cookie_file, 'w').close()
-                    log(f"{tag} {Y}[{attempt}] URL returned {s}, waiting...{X}")
-                    failures += 1
-                    continue
-                csrf = ex(body, r'csrf-token.*?content="(.*?)"')
-                s_param = ex(body, r'name="s" id="s" value="(.*?)"')
+                if url != tokens_url:
+                    # A re-solved CAPTCHA means a new token and a new session.
+                    tokens, tokens_url = None, url
 
-                # SCAN: Navigate to target month (1 POST)
-                s_nav, body_nav, _ = c('POST', BASE + '/calendar_apply/calendar_select',
-                    {'join_date': month_ym, 's': s_param},
-                    {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf,
-                     'Accept': 'text/javascript, application/javascript, */*; q=0.01',
-                     'Referer': url})
-                if s_nav != 200:
-                    # Without this the scan reports "no dates available" forever
-                    # while the URL monitor's plain GET still returns 200, so no
-                    # re-solve fires and nothing ever gets booked again.
+                s_nav = 0
+                body_nav = ''
+                if tokens is not None:
+                    s_nav, body_nav, _ = nav_month(tokens, url)
+                    if _month_rendered(s_nav, body_nav):
+                        reuse_failures = 0
+                    else:
+                        # Gate on the response *shape*, not the status — see
+                        # _month_rendered. Re-mint in this same cycle rather than
+                        # sleeping on it, and do not charge `failures` for it: a
+                        # token reaching the end of its session is expected, not
+                        # the site being unhappy, and letting it drive the
+                        # backoff would walk the poll interval up to
+                        # SCAN_BACKOFF_MAX and stop finding anything.
+                        reuse_failures += 1
+                        log(f"{tag} {Y}[{attempt}] cached session rejected "
+                            f"({s_nav}), re-minting{X}")
+                        open(cookie_file, 'w').close()
+                        tokens = None
+                        if reuse_failures >= max(1, SCAN_REUSE_MAX_FAILURES):
+                            reuse = False
+                            log(f"{tag} {Y}session reuse disabled after "
+                                f"{reuse_failures} rejections; back to a "
+                                f"calendar GET per cycle{X}")
+
+                if tokens is None:
+                    tokens = mint_tokens(url, attempt)
+                    if tokens is None:
+                        failures += 1
+                        continue
+                    s_nav, body_nav, _ = nav_month(tokens, url)
+
+                if not _month_rendered(s_nav, body_nav):
+                    # Freshly minted tokens and still no calendar. Without this
+                    # the scan reports "no dates available" forever while the URL
+                    # monitor's plain GET still returns 200, so no re-solve fires
+                    # and nothing ever gets booked again.
                     log(f"{tag} {Y}[{attempt}] month nav returned {s_nav}, waiting...{X}")
                     open(cookie_file, 'w').close()
+                    tokens = None
                     _dump_debug(label, 'calendar_select', s_nav, body_nav)
                     failures += 1
                     continue
+
+                if not reuse:
+                    tokens = None   # re-mint every cycle, as before
 
                 failures = 0
 
