@@ -26,6 +26,7 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import book_hotels as bh
+import confirm_booking as cb
 
 # curl inherits this process's proxy settings; without this a local HTTP proxy
 # intercepts the loopback requests and rewrites the responses.
@@ -79,6 +80,12 @@ class FakeITS:
         self.blank_cached_nav = False
         self.completed = []           # (email, hotel) pairs that reached send_complete
         self.selected_hotel = {}      # cookie session -> hotel name, for step 5
+        # The emailed leg. 'ok' | 'expired' | 'reject_apply' | 'no_confirm_form'
+        self.applicant_mode = 'ok'
+        self.filed = []               # bodies that reached 申込する
+        self.confirmed = []           # bodies that reached 確認
+        self.browser_calls = []       # calls into the Chrome fallback
+        self.browser_result = ('failed', 'apply post session rejected')
 
     def nav_was_cached(self):
         """True when the nav POST just recorded had no calendar GET before it."""
@@ -222,6 +229,95 @@ EMAIL_PAGE = """<html><body><h2>確認</h2>
 
 COMPLETE_PAGE = '<html><body><h2>send_complete</h2><p>受付完了</p></body></html>'
 
+# ── The emailed leg (steps 7-9), captured live on 2026-08-19 ─────────
+#
+# Shapes that matter, all of them load-bearing and none of them guessable:
+#   - `_method` is `value="true"`, not a verb, and must be echoed verbatim;
+#   - nothing is marked `required` and 「必須」 never appears — required-ness is an
+#     `<img name="*_img">`, so a guard keyed on the attribute passes a blank form;
+#   - those `<img>`s carry `name=`, so a parser that collects every named element
+#     invents a dozen fields that no browser submits;
+#   - the labels are only *adjacent* to their control, never `for=`-linked;
+#   - `apply[year]`'s preceding text is the tail of another dropdown's options, so
+#     the birth selects can only be matched on field name;
+#   - the option values are `man`/`woman`, `myself`/`family` and prefecture codes,
+#     so matching 男/女/本人 needs the label, not the value.
+FAKE_APPLY_C = 'FAKE-C-0000-1111-2222'
+
+APPLICANT_FORM_PAGE = f"""<html><head><title>施設予約システム</title></head><body>
+<div class="attention">現在、保養施設の抽選処理を実施しております。</div>
+<dl class="input_item clearfix"><dt><label>申込対象サービス</label></dt>
+<dd class="elements">ブルーベリーヒル勝浦申込</dd></dl>
+<form class="edit_apply" id="edit_apply_9999" \
+action="/apply/confirm?c={FAKE_APPLY_C}" accept-charset="UTF-8" method="post">\
+<input type="hidden" name="_method" value="true" autocomplete="off" />\
+<input type="hidden" name="authenticity_token" value="AUTH-APPLICANT" \
+autocomplete="off" />
+<dl class="input_item clearfix"><dt><label>記号</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="sign_no_img"/></dd>
+<dd class="elements"><input value="" maxlength="5" type="text" name="apply[sign_no]" /></dd></dl>
+<dl class="input_item clearfix"><dt><label>番号</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="insured_no_img"/></dd>
+<dd class="elements"><input value="" type="text" name="apply[insured_no]" /></dd></dl>
+<dl class="input_item clearfix"><dt><label>事業所名</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="office_name_img"/></dd>
+<dd class="elements"><input value="" type="text" name="apply[office_name]" /></dd></dl>
+<dl class="input_item clearfix"><dt><label>申込代表者名（カナ氏名）</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="kana_name_img"/></dd>
+<dd class="elements"><input value="" type="text" name="apply[kana_name]" /></dd></dl>
+<dl class="input_item clearfix"><dt><label>生年月日</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="birth_img"/></dd>
+<dd class="elements">
+<select name="apply[year]"><option value="" label=" "></option>\
+<option value="1999">平成11年(1999年)</option><option value="2000">平成12年(2000年)</option>\
+</select>年
+<select name="apply[month]"><option value="" label=" "></option>\
+<option value="3">3</option><option value="4">4</option></select>月
+<select name="apply[day]"><option value="" label=" "></option>\
+<option value="4">4</option><option value="5">5</option></select>日
+</dd></dl>
+<dl class="input_item clearfix"><dt><label>性別</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="gender_img"/></dd>
+<dd class="elements"><select name="apply[gender]">\
+<option value="man">男性</option><option value="woman">女性</option></select></dd></dl>
+<dl class="input_item clearfix"><dt><label>続柄</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="relationship_img"/></dd>
+<dd class="elements"><select name="apply[relationship]">\
+<option value="myself">本人（被保険者）</option>\
+<option value="family">家族（被扶養者）</option></select></dd></dl>
+<dl class="input_item clearfix"><dt><label>連絡先電話番号</label></dt>
+<dd class="must"><img src="/assets/users/must-x.png" alt="" name="contact_phone_img"/></dd>
+<dd class="elements"><input value="" type="text" name="apply[contact_phone]" /></dd></dl>
+<dl class="input_item clearfix"><dt><label>住所</label></dt>
+<dd class="elements">〒<input value="" type="text" name="apply[postal]" />
+<span class="ticket red">（半角）</span>
+<select name="apply[state]"><option value="" label=" "></option>\
+<option value="12">千葉県</option><option value="13">東京都</option></select>
+<input value="" type="text" name="apply[address]" /></dd></dl>
+<input value="申込する" onclick="this.form.submit();" type="button" />
+</form></body></html>"""
+
+# 「30分が経過しましたので、ご利用のURLは無効となりました。」 — 200, and with no form
+# at all, so only the text tells it apart from the markup having changed.
+HOLD_EXPIRED_PAGE = """<html><head><title>施設予約システム</title></head><body>
+<div class="attention">現在、保養施設の抽選処理を実施しております。</div>
+<p>30分が経過しましたので、ご利用のURLは無効となりました。</p>
+<p>ＩＴＳホームページより最初から空き照会申込手続きをおこなってください。</p>
+</body></html>"""
+
+APPLY_CONFIRM_PAGE = f"""<html><head><title>施設予約システム</title></head><body>
+<h2>申込内容確認画面</h2>
+<p>この内容で申し込みをする場合は「確認」ボタンを押してください。</p>
+<form action="/apply/complete?c={FAKE_APPLY_C}" accept-charset="UTF-8" method="post">
+<input type="hidden" name="authenticity_token" value="AUTH-CONFIRM" autocomplete="off" />
+<input value="確認" onclick="this.form.submit();" type="button" />
+</form></body></html>"""
+
+APPLY_COMPLETE_PAGE = """<html><head><title>施設予約システム</title></head><body>
+<h2>申込完了</h2><p>申込を完了しました。<br>申込完了メールを送信しましたのでご確認ください。</p>
+<p class="complete"><strong>申込受付番号：  10287126</strong></p>
+</body></html>"""
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
@@ -281,6 +377,28 @@ class Handler(BaseHTTPRequestHandler):
     # ── the ITS flow ──
     def route(self, method, path, form):
         base = self._base()
+
+        # ── the emailed leg (steps 7-9). Checked first: the fake's email page
+        # also lives at /apply/confirm, and the real site tells the two apart by
+        # the `c=` the emailed link carries.
+        if path.startswith('/apply/new'):
+            if STATE.applicant_mode == 'expired':
+                return self._send(200, HOLD_EXPIRED_PAGE)
+            return self._send(200, APPLICANT_FORM_PAGE)
+
+        if path.startswith('/apply/confirm') and 'c=' in path:
+            if STATE.applicant_mode == 'reject_apply':
+                return self._session_dead()
+            if STATE.applicant_mode == 'no_confirm_form':
+                return self._send(200, '<html><body><p>なにもありません</p></body></html>')
+            with STATE.lock:
+                STATE.filed.append(dict(form))
+            return self._send(200, APPLY_CONFIRM_PAGE)
+
+        if path.startswith('/apply/complete'):
+            with STATE.lock:
+                STATE.confirmed.append(dict(form))
+            return self._send(200, APPLY_COMPLETE_PAGE)
 
         if '/calendar_apply/calendar_select' in path and method == 'GET':
             return self._send(200, CALENDAR_PAGE)
@@ -357,13 +475,23 @@ class Env:
              'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES',
              'HOTEL_RETRY_COOLDOWN', 'HOTEL_HOLD_COOLDOWN',
              'MAX_BOOKINGS_PER_DATE', 'SCAN_REUSE_SESSION',
-             'SCAN_REUSE_MAX_FAILURES')
+             'SCAN_REUSE_MAX_FAILURES', 'AUTO_CONFIRM', 'AUTO_CONFIRM_MIN_DAYS',
+             'APPLICANT')
 
-    def __init__(self, port, skip=(), priority=('NAGU',)):
+    # confirm_booking's own module-level knobs, restored the same way.
+    CB_ATTRS = ('_mail_source', 'CONFIRM_MAIL_TIMEOUT', 'CONFIRM_HOLD_SECONDS',
+                'CONFIRM_HOLD_MARGIN', 'RESERVATIONS_FILE', 'BASE', 'APPLICANT',
+                '_browser_submit', 'BROWSER_CONFIRM')
+
+    def __init__(self, port, skip=(), priority=('NAGU',), confirm=False,
+                 applicant=None, mail=True, browser_confirm=True):
         self.port, self.skip, self.priority = port, list(skip), list(priority)
+        self.confirm, self.applicant, self.mail = confirm, applicant, mail
+        self.browser_confirm = browser_confirm
 
     def __enter__(self):
         self.saved = {a: getattr(bh, a) for a in self.ATTRS}
+        self.saved_cb = {a: getattr(cb, a) for a in self.CB_ATTRS}
         self.tmp = tempfile.TemporaryDirectory()
         d = self.tmp.name
         bh.BASE = f'http://127.0.0.1:{self.port}'
@@ -405,6 +533,50 @@ class Env:
         STATE.blank_cached_nav = False
         STATE.selected_hotel.clear()
         STATE.hotels = [(7, NAGU), (8, RESOL), (9, NIKKO)]
+        STATE.applicant_mode = 'ok'
+        STATE.filed.clear()
+        STATE.confirmed.clear()
+
+        # The emailed leg reaches the network for real: confirm_from_email polls
+        # IMAP for up to CONFIRM_MAIL_TIMEOUT seconds. Left alone, every booking in
+        # this file blocked 180 s against the operator's actual Gmail — over an hour
+        # for the suite, with no output, and only if credentials happened to be
+        # present. So it is off by default and the tests that want it inject a mail
+        # source instead of a mailbox.
+        cb.BASE = bh.BASE
+        cb.RESERVATIONS_FILE = os.path.join(d, 'reservations.json')
+        cb.CONFIRM_MAIL_TIMEOUT = 1.0
+        cb.CONFIRM_HOLD_SECONDS = 1800
+        cb.CONFIRM_HOLD_MARGIN = 300
+        bh.AUTO_CONFIRM = self.confirm
+        bh.AUTO_CONFIRM_MIN_DAYS = 11
+        if self.applicant is not None:
+            bh.APPLICANT = cb.APPLICANT = self.applicant
+        link = f'{bh.BASE}/apply/new?c={FAKE_APPLY_C}'
+        # A str message is treated as pre-decoded text with no Date header, which
+        # is exactly the injection point the module documents.
+        cb._mail_source = (lambda _since: [f'手続きのご案内\n{link}\n']) if self.mail \
+            else (lambda _since: [])
+
+        # The browser fallback must never launch a real Chrome from a test. Left
+        # unstubbed, `test_confirm_rejected_apply_asks_for_a_human` would import
+        # browser_apply and open a window. The default stub returns exactly what the
+        # curl-only path used to, so the tests written before the fallback existed
+        # keep asserting what they meant.
+        cb.BROWSER_CONFIRM = self.browser_confirm
+        STATE.browser_calls.clear()
+        STATE.browser_result = ('failed', 'apply post session rejected')
+
+        def _browser_stub(link_, values, log_, tag_, allow_commit, seconds_left):
+            STATE.browser_calls.append({
+                'link': link_, 'values': dict(values),
+                'seconds_left': seconds_left, 'allow_commit': allow_commit,
+            })
+            result = STATE.browser_result
+            return result() if callable(result) else result
+
+        cb._browser_submit = _browser_stub
+
         bh._dump_last.clear()
         bh._cooldowns.clear()
         return self
@@ -412,9 +584,17 @@ class Env:
     def __exit__(self, *exc):
         for a, v in self.saved.items():
             setattr(bh, a, v)
+        for a, v in self.saved_cb.items():
+            setattr(cb, a, v)
         bh._cooldowns.clear()
         self.tmp.cleanup()
         return False
+
+    def reservations(self):
+        if not os.path.exists(cb.RESERVATIONS_FILE):
+            return {}
+        with open(cb.RESERVATIONS_FILE, encoding='utf-8') as f:
+            return json.load(f)
 
     def bookings(self):
         if not os.path.exists(bh.BOOKINGS_FILE):
@@ -1299,6 +1479,7 @@ def test_dotenv_loader():
 
 
 def test_confirm_gate():
+
     """The 10-day rule. This gate is the only thing standing between the bot and a
     booking that cannot be cancelled, so it is tested for failing closed, not just
     for the happy arithmetic."""
@@ -1568,6 +1749,523 @@ def test_log_rotation():
             main.LOG_FILE, main.LOG_MAX_BYTES, main.LOG_BACKUPS = saved
 
 
+# ── The emailed leg (steps 7-9) ──────────────────────────────────────
+#
+# Everything past `send_complete` had no coverage at all, which is how a booking
+# that reaches 「メール送信を完了しました」 and then silently fails to file went
+# unnoticed. These run the real `confirm_from_email` against the fake, with a mail
+# source injected in place of a mailbox.
+
+APPLICANT_FIXTURE = {
+    'kigou': '9999', 'bangou': '123', 'office': 'Test Company',
+    'kana_sei': 'ヤマダ', 'kana_mei': 'タロウ', 'kana_name': '',
+    'name_sei': '', 'name_mei': '',
+    'birth': '2000-03-04', 'sex': '女', 'zokugara': '本人',
+    'tel': '09012345678', 'zip': '1420051', 'state': '東京都',
+    'addr': 'テスト区1-2-3',
+}
+
+
+def _confirm(port, **kw):
+    """Run confirm_from_email against the fake.
+
+    Returns `(status, detail, captured, logged)`. `captured` is read *inside* the
+    Env block: Env.__exit__ restores cb.RESERVATIONS_FILE, so reading it afterwards
+    reads the operator's real reservations.json.
+    """
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE), **kw) as env:
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(method, u, data=None, headers=None, retry=True):
+            return bh.curl(cookie, method, u, data, headers, retry)
+
+        with CapturedLog() as logged:
+            status, detail = cb.confirm_from_email(
+                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        captured = {'reservations': env.reservations(), 'dumps': env.dumps()}
+        return status, detail, captured, logged
+
+
+def test_confirm_files_the_application(port):
+    """The whole emailed leg: link -> applicant form -> 申込する -> 確認 -> 受付番号."""
+    status, detail, got, _log = _confirm(port)
+    check('confirm: reports confirmed', status == 'confirmed', f'{status}: {detail}')
+    check('confirm: parses the 申込受付番号', detail == '10287126', repr(detail))
+    check('confirm: 申込する reached the server', len(STATE.filed) == 1,
+          str(len(STATE.filed)))
+    check('confirm: 確認 reached the server', len(STATE.confirmed) == 1,
+          str(len(STATE.confirmed)))
+    check('confirm: reservation recorded with its receipt',
+          got['reservations'] == {TARGET: [f'{NAGU}\t10287126']},
+          str(got['reservations']))
+
+    filed = STATE.filed[0] if STATE.filed else {}
+    # Every identity field, and the option *values* rather than the labels — the
+    # form offers man/woman and myself/family, so matching 女 or 本人 literally
+    # would have submitted an empty select.
+    check('confirm: 記号 submitted', filed.get('apply[sign_no]') == '9999', repr(filed))
+    check('confirm: 番号 submitted', filed.get('apply[insured_no]') == '123')
+    check('confirm: 事業所名 submitted',
+          filed.get('apply[office_name]') == 'Test Company')
+    check('confirm: カナ氏名 derived with a full-width space',
+          filed.get('apply[kana_name]') == 'ヤマダ　タロウ',
+          repr(filed.get('apply[kana_name]')))
+    check('confirm: birth split across three unpadded selects',
+          (filed.get('apply[year]'), filed.get('apply[month]'),
+           filed.get('apply[day]')) == ('2000', '3', '4'), repr(filed))
+    check('confirm: 性別 sent as the option value, not the label',
+          filed.get('apply[gender]') == 'woman', repr(filed.get('apply[gender]')))
+    check('confirm: 続柄 sent as the option value',
+          filed.get('apply[relationship]') == 'myself',
+          repr(filed.get('apply[relationship]')))
+    check('confirm: 都道府県 sent as its code',
+          filed.get('apply[state]') == '13', repr(filed.get('apply[state]')))
+    check('confirm: _method echoed verbatim', filed.get('_method') == 'true',
+          repr(filed.get('_method')))
+    check('confirm: authenticity_token echoed',
+          filed.get('authenticity_token') == 'AUTH-APPLICANT', repr(filed))
+    # The 必須 markers are <img name="..._img"> elements. A parser that took every
+    # named element for a control would add a dozen fields no browser submits.
+    check('confirm: the 必須 marker images are not submitted',
+          not any(k.endswith('_img') for k in filed), str(sorted(filed)))
+    check('confirm: no debug dumps on the happy path', got['dumps'] == [],
+          str(got['dumps']))
+
+
+def test_confirm_expired_hold_is_not_a_parse_failure(port):
+    """「30分が経過しましたので…」 is the hold lapsing, not a markup change."""
+    STATE.applicant_mode = 'expired'
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)) as env:
+        STATE.applicant_mode = 'expired'
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        with CapturedLog() as logged:
+            status, detail = cb.confirm_from_email(
+                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        check('expired: reported as an expired hold', detail == 'hold expired',
+              f'{status}: {detail}')
+        check('expired: says so in the log', logged.saw('30-minute hold expired'),
+              str(logged.lines))
+        # Reporting it as 'no form' and dumping made a normal lost race look like
+        # the applicant form having changed underneath the parser.
+        check('expired: not dumped as a parse failure', env.dumps() == [],
+              str(env.dumps()))
+        check('expired: nothing was filed', STATE.filed == [], str(STATE.filed))
+
+
+def test_confirm_rejected_apply_asks_for_a_human(port):
+    """申込する bounced to /service_category/index: dump it, and shout.
+
+    Reproduced live on 2026-08-19. The room is held and the mail is sent, so a
+    person has minutes to finish from the link — which the log never used to say
+    for a 'failed' outcome, only for a 'deferred' one.
+    """
+    STATE.applicant_mode = 'reject_apply'
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)) as env:
+        STATE.applicant_mode = 'reject_apply'
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        with CapturedLog() as logged:
+            status, detail = cb.confirm_from_email(
+                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        check('rejected: failed with the session-rejected detail',
+              (status, detail) == ('failed', 'apply post session rejected'),
+              f'{status}: {detail}')
+        check('rejected: dumped for diagnosis',
+              any('step11_apply_rejected' in f for f in env.dumps()), str(env.dumps()))
+        check('rejected: 確認 was never reached', STATE.confirmed == [],
+              str(STATE.confirmed))
+        check('rejected: the operator is told it is the client, not the form',
+              logged.saw('independent of what we'), str(logged.lines))
+
+
+def test_confirm_human_needed_on_failure(port):
+    """A failed confirm must reach the operator as HUMAN NEEDED, with the clock."""
+    STATE.applicant_mode = 'reject_apply'
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)):
+        STATE.applicant_mode = 'reject_apply'
+        with CapturedLog() as logged:
+            _d, booked = bh.book_all_hotels_for_date(TARGET, 'TEST')
+        check('human-needed: the hold is still recorded', NAGU in booked, str(booked))
+        check('human-needed: HUMAN NEEDED is logged', logged.saw('HUMAN NEEDED'),
+              str([l for l in logged.lines if 'NAGU' in l]))
+        check('human-needed: it names the minutes left',
+              any('minutes' in l for l in logged.lines if 'HUMAN NEEDED' in l),
+              str([l for l in logged.lines if 'HUMAN NEEDED' in l]))
+
+
+def test_confirm_never_submits_a_form_it_cannot_fill(port):
+    """A missing identity value defers to a human, and files nothing.
+
+    These are 資格認証のキー, checked against the insurance record: a half-filled
+    form is a rejected application and a wasted hold, not a near miss.
+    """
+    partial = dict(APPLICANT_FIXTURE, tel='', addr='')
+    with Env(port, confirm=True, applicant=partial) as env:
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        with CapturedLog() as logged:
+            status, detail = cb.confirm_from_email(
+                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        check('unmapped: deferred, not submitted', status == 'deferred',
+              f'{status}: {detail}')
+        check('unmapped: names the fields it could not fill',
+              'apply[contact_phone]' in detail and 'apply[address]' in detail,
+              repr(detail))
+        check('unmapped: nothing reached 申込する', STATE.filed == [], str(STATE.filed))
+        check('unmapped: the form is dumped for a human',
+              any('step10_unmapped_form' in f for f in env.dumps()), str(env.dumps()))
+        check('unmapped: HUMAN NEEDED logged', logged.saw('HUMAN NEEDED'),
+              str(logged.lines))
+
+
+def test_confirm_final_post_is_never_retried(port):
+    """確認 files the application; a lost response must not be repeated."""
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)):
+        bh.CURL_MAX_ATTEMPTS = 3
+        STATE.fail_once['/apply/complete'] = [HANGUP]
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        with CapturedLog() as logged:
+            status, detail = cb.confirm_from_email(
+                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        check('confirm-retry: outcome reported as unknown',
+              (status, detail) == ('failed', 'confirm outcome unknown'),
+              f'{status}: {detail}')
+        check('confirm-retry: 確認 was sent exactly once',
+              STATE.count('POST /apply/complete') == 1,
+              str(STATE.count('POST /apply/complete')))
+        check('confirm-retry: says to check the mailbox before retrying',
+              logged.saw('申込完了メール'), str(logged.lines))
+
+
+def test_confirm_no_mail_gives_up_without_filing(port):
+    """No confirmation mail inside the budget: report it, file nothing."""
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE), mail=False):
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        status, detail = cb.confirm_from_email(
+            c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        check('no-mail: reported', (status, detail) == ('failed', 'mail not received'),
+              f'{status}: {detail}')
+        check('no-mail: nothing filed', STATE.filed == [], str(STATE.filed))
+
+
+def test_browser_fallback_files_what_curl_could_not(port):
+    """申込する refused over curl -> finish in Chrome, and record the reservation.
+
+    The fallback exists because the live site answers curl's POST /apply/confirm with
+    a 302 to /service_category/index whatever it sends, while the identical POST from
+    Chrome succeeds. Chrome itself is stubbed here; what is under test is the wiring.
+    """
+    STATE.applicant_mode = 'reject_apply'
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)) as env:
+        STATE.applicant_mode = 'reject_apply'
+        STATE.browser_result = ('confirmed', '10287126')
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        with CapturedLog() as logged:
+            status, detail = cb.confirm_from_email(
+                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        reservations = env.reservations()
+
+    check('fallback: reports confirmed', (status, detail) == ('confirmed', '10287126'),
+          f'{status}: {detail}')
+    check('fallback: the browser was asked exactly once',
+          len(STATE.browser_calls) == 1, str(len(STATE.browser_calls)))
+    check('fallback: reservation recorded from the browser path',
+          reservations == {TARGET: [f'{NAGU}\t10287126']}, str(reservations))
+    check('fallback: says it went to the browser',
+          logged.saw('Retrying 申込する in real Chrome'), str(logged.lines))
+    check('fallback: reports RESERVED', logged.saw('RESERVED (browser)'),
+          str(logged.lines))
+
+    call = STATE.browser_calls[0] if STATE.browser_calls else {}
+    values = call.get('values', {})
+    # The DOM already holds the live `_method` and `authenticity_token`; the ones we
+    # scraped belong to a different page load, and writing them over the real values
+    # would break the browser submit for a reason that looks like the bug it works
+    # around.
+    check('fallback: hidden fields are not handed to the browser',
+          '_method' not in values and 'authenticity_token' not in values,
+          str(sorted(values)))
+    check('fallback: every applicant field is handed over', len(values) == 13,
+          str(sorted(values)))
+    check('fallback: values are the mapped ones',
+          values.get('apply[gender]') == 'woman'
+          and values.get('apply[state]') == '13'
+          and values.get('apply[kana_name]') == 'ヤマダ　タロウ', str(values))
+    check('fallback: it is given the emailed link, not the POST url',
+          '/apply/new' in call.get('link', ''), call.get('link'))
+    check('fallback: budget is bounded by the hold, not just the timeout',
+          0 < call.get('seconds_left', 0) <= 1800, str(call.get('seconds_left')))
+
+
+def test_browser_fallback_not_used_when_curl_works(port):
+    """The browser is a fallback. It must never fire on the happy path."""
+    status, detail, _got, _log = _confirm(port)
+    check('fallback: curl path still confirms', status == 'confirmed',
+          f'{status}: {detail}')
+    check('fallback: Chrome was never launched', STATE.browser_calls == [],
+          str(STATE.browser_calls))
+
+
+def test_browser_fallback_rechecks_the_gate_live(port):
+    """`allow_commit` must be re-evaluated on 申込内容確認画面, not captured earlier.
+
+    Filling the form takes tens of seconds in a browser, and the free-cancellation
+    gate can close inside that window — so what the fallback receives has to be a
+    callable, and calling it has to reach bh.confirm_allowed as it stands *then*.
+    """
+    STATE.applicant_mode = 'reject_apply'
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)):
+        STATE.applicant_mode = 'reject_apply'
+        seen = {}
+
+        def late_gate():
+            call = STATE.browser_calls[-1]
+            # What a gate closing mid-submit looks like.
+            bh.AUTO_CONFIRM = False
+            seen['allowed'] = call['allow_commit']()
+            return 'deferred', seen['allowed'][1]
+
+        STATE.browser_result = late_gate
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        status, detail = cb.confirm_from_email(
+            c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        check('gate-live: allow_commit is callable and live',
+              seen.get('allowed', (None,))[0] is False, str(seen))
+        check('gate-live: a closed gate defers rather than filing',
+              status == 'deferred', f'{status}: {detail}')
+        check('gate-live: nothing was confirmed', STATE.confirmed == [],
+              str(STATE.confirmed))
+
+
+def test_browser_fallback_can_be_turned_off(port):
+    """BROWSER_CONFIRM=False keeps the pre-fallback behaviour exactly."""
+    STATE.applicant_mode = 'reject_apply'
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE),
+             browser_confirm=False):
+        STATE.applicant_mode = 'reject_apply'
+        cookie = tempfile.NamedTemporaryFile(delete=False, suffix='.txt').name
+
+        def c(m, u, d=None, h=None, retry=True):
+            return bh.curl(cookie, m, u, d, h, retry)
+
+        with CapturedLog() as logged:
+            status, detail = cb.confirm_from_email(
+                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+        check('off: fails as it did before the fallback existed',
+              (status, detail) == ('failed', 'apply post session rejected'),
+              f'{status}: {detail}')
+        check('off: Chrome not launched', STATE.browser_calls == [],
+              str(STATE.browser_calls))
+        check('off: says why', logged.saw('BROWSER_CONFIRM is off'), str(logged.lines))
+
+
+def test_browser_fallback_failure_still_asks_for_a_human(port):
+    """If Chrome cannot finish it either, the room is still held — say so."""
+    STATE.applicant_mode = 'reject_apply'
+    with Env(port, confirm=True, applicant=dict(APPLICANT_FIXTURE)):
+        STATE.applicant_mode = 'reject_apply'
+        STATE.browser_result = ('failed', 'browser submit outcome unknown')
+        with CapturedLog() as logged:
+            _d, booked = bh.book_all_hotels_for_date(TARGET, 'TEST')
+        check('fallback-fail: the hold is still recorded', NAGU in booked, str(booked))
+        check('fallback-fail: HUMAN NEEDED reaches the operator',
+              logged.saw('HUMAN NEEDED'), str(logged.lines))
+        # One per hotel the date offered: each has its own hold and its own mail, so
+        # each gets its own attempt. The guard serialises the browsers, and each
+        # attempt's budget is capped by that hotel's remaining hold.
+        check('fallback-fail: tried once per held hotel',
+              len(STATE.browser_calls) == 3, str(len(STATE.browser_calls)))
+
+
+def test_chrome_is_never_driven_twice_at_once():
+    """captcha_solver and browser_apply must not both hold a Chrome.
+
+    `captcha_solver._kill_stray_chrome()` reaps by `pgrep -f remote-debugging-port`,
+    which matches the browser filing an application as readily as the one solving a
+    Turnstile. Serialising them is what stops a timed-out solve SIGKILLing a browser
+    somewhere between 申込する and 確認, with no way to learn which side of the commit
+    it died on.
+    """
+    import chrome_guard
+
+    check('guard: idle', not chrome_guard.in_use())
+    with chrome_guard.chrome(timeout=1) as owned:
+        check('guard: first caller gets it', owned)
+        check('guard: reports in use', chrome_guard.in_use())
+
+        got = []
+
+        def second():
+            with chrome_guard.chrome(timeout=0.2) as also:
+                got.append(also)
+
+        t = threading.Thread(target=second)
+        t.start()
+        t.join(5)
+        check('guard: a second caller is refused, not blocked forever',
+              got == [False], str(got))
+        check('guard: the refused caller finished', not t.is_alive())
+    check('guard: released on exit', not chrome_guard.in_use())
+
+    # A solve that cannot get the browser gives up for this cycle rather than
+    # racing: the URL monitor comes back in URL_CHECK_INTERVAL seconds. Run in this
+    # thread with a short wait — a background thread that outlives the assertion
+    # goes on to launch a real Chrome once the lock frees.
+    import asyncio
+    import captcha_solver as cs
+    saved_wait = chrome_guard.DEFAULT_WAIT
+    started = []
+    saved_solve = cs._solve_and_cache
+    try:
+        chrome_guard.DEFAULT_WAIT = 0.2
+
+        async def _must_not_run():
+            started.append(True)
+            return 'http://example.invalid/calendar_select?s=x'
+
+        cs._solve_and_cache = _must_not_run
+        with chrome_guard.chrome(timeout=1) as owned:
+            check('guard: held for the solve test', owned)
+            out = asyncio.run(cs.get_calendar_url())
+        check('guard: a busy Chrome defers the solve', out is None, repr(out))
+        check('guard: and never started one', started == [], str(started))
+
+        # Free again, the same call goes through — the guard defers, it does not
+        # permanently disable solving.
+        out = asyncio.run(cs.get_calendar_url())
+        check('guard: solving resumes once Chrome is free', started == [True],
+              str(started))
+    finally:
+        chrome_guard.DEFAULT_WAIT = saved_wait
+        cs._solve_and_cache = saved_solve
+
+
+def test_receipt_parsing():
+    """The 申込受付番号, whatever markup the label and the number sit in.
+
+
+    The live page is `<strong>申込受付番号：  10287126</strong>` — one tag around both,
+    which a raw-markup search reads correctly by luck. Put a tag between them and
+    `[0-9A-Za-z-]{4,}` matches the tag name instead, so reservations.json records
+    `strong` as the only proof a real reservation exists.
+    """
+    live = '<p class="complete"><strong>申込受付番号：  10287126</strong></p>'
+    check('receipt: live markup', cb.parse_receipt(live) == '10287126',
+          repr(cb.parse_receipt(live)))
+    nested = '<p>申込受付番号：<strong>10287126</strong></p>'
+    check('receipt: a tag between label and number', cb.parse_receipt(nested) == '10287126',
+          repr(cb.parse_receipt(nested)))
+    check('receipt: absent is empty, not a tag name',
+          cb.parse_receipt('<p>申込を完了しました。</p>') == '',
+          repr(cb.parse_receipt('<p>申込を完了しました。</p>')))
+    check('receipt: no page at all', cb.parse_receipt(None) == '')
+
+
+def test_name_match_beats_label_match():
+    """A field's name owns it; an adjacent label must never override it.
+
+    Both halves were live failures waiting to happen. `apply[state]`'s label on the
+    captured page is 「postal" /> （半角）」 — the *previous* field's markup — and
+    `apply[month]`'s is the tail of the year dropdown's options.
+    """
+    values = {'zip': '1420051', 'addr': '', 'state': '東京都',
+              'birth_year': '2000', 'kana_name': 'ヤマダ　タロウ'}
+    check('match: 〒 next to the prefecture select does not claim it',
+          cb._match_rule('apply[state]', '住所 〒 （半角）', values) == 'state')
+    check('match: カナ氏名 bleeding into the year select does not claim it',
+          cb._match_rule('apply[year]', 'カナ氏名 生年月日', values) == 'birth_year')
+    # With ITS_ADDR unset the address box used to match the 〒 a few characters
+    # before it and submit the postcode as the street address.
+    check('match: the address field stays the address field when we have none',
+          cb._match_rule('apply[address]', '住所 〒 （半角）', values) == 'addr')
+    check('match: an unrecognised control matches nothing',
+          cb._match_rule('apply[mystery]', 'なにか', values) is None)
+
+
+def test_confirm_leg_is_hermetic():
+    """The suite must never reach a real mailbox.
+
+    `confirm_from_email` polls IMAP for CONFIRM_MAIL_TIMEOUT seconds. Before the
+    mail source was injectable here, every booking in this file blocked 180 s
+    against the operator's own Gmail — the suite took over an hour and printed
+    nothing while doing it.
+    """
+    import config
+    check('hermetic: Env leaves _mail_source injectable',
+          cb._mail_source is None or callable(cb._mail_source))
+    check('hermetic: the fake link is not a real host',
+          '127.0.0.1' in f'http://127.0.0.1/apply/new?c={FAKE_APPLY_C}')
+    check('hermetic: IMAP host is never contacted by these tests',
+          config.IMAP_HOST.endswith('gmail.com'))
+
+
+def test_applicant_data_is_redacted_from_dumps():
+    """Dumps must not carry 記号/番号/カナ氏名/生年月日/電話/住所.
+
+    config.py says these are 資格認証のキー and 'are also added to the debug-dump
+    redaction list'. They were not. No dump on disk carries them only because
+    nothing reached these pages before confirm_booking existed — but 申込内容確認画面
+    echoes every one of them back, and DEBUG_DIR was tracked in a public remote
+    until 2026-08-18.
+    """
+    saved = (bh.APPLICANT, bh.EMAIL)
+    try:
+        bh.APPLICANT = dict(APPLICANT_FIXTURE)
+        bh.EMAIL = 'nobody@example.com'
+        page = (
+            '<form action="/apply/complete" method="post">'
+            '<input type="hidden" name="authenticity_token" value="TOKENTOKENTOKEN" />'
+            '<input type="text" name="apply[sign_no]" value="9999" />'
+            '<input type="text" name="apply[contact_phone]" value="090-1234-5678" />'
+            '<select name="apply[gender]"><option value="woman">女性</option></select>'
+            '<td>記号 9999 番号 123 ヤマダ　タロウ 2000年3月4日 '
+            'テスト区1-2-3 nobody@example.com</td></form>')
+        out = bh._redact_body(page)
+        for label, value in (('記号', '9999'), ('番号', '123'),
+                             ('カナ姓', 'ヤマダ'), ('事業所', 'Test Company'),
+                             ('住所', 'テスト区1-2-3'), ('郵便', '1420051'),
+                             ('email', 'nobody@example.com')):
+            check(f'redact: {label} not in the dump', value not in out, out)
+        check('redact: 生年月日 in the site\'s own rendering is gone',
+              '2000年3月4日' not in out, out)
+        check('redact: a reformatted phone number is caught by field name',
+              '090-1234-5678' not in out, out)
+        # 男/女 and 本人 identify nobody and appear in the form's own <option>
+        # labels whatever we submit; redacting them would shred the markup the
+        # dump exists to show.
+        check('redact: the markup itself survives',
+              'name="apply[gender]"' in out and '女性' in out
+              and 'action="/apply/complete"' in out, out)
+    finally:
+        bh.APPLICANT, bh.EMAIL = saved
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 SERVER_TESTS = (
@@ -1588,6 +2286,18 @@ SERVER_TESTS = (
     'test_reaching_the_room_hold_earns_the_long_cooldown',
     'test_max_bookings_per_date_stops_at_the_cap',
     'test_cap_fails_closed_when_bookings_are_unreadable',
+    'test_confirm_files_the_application',
+    'test_confirm_expired_hold_is_not_a_parse_failure',
+    'test_confirm_rejected_apply_asks_for_a_human',
+    'test_confirm_human_needed_on_failure',
+    'test_confirm_never_submits_a_form_it_cannot_fill',
+    'test_confirm_final_post_is_never_retried',
+    'test_confirm_no_mail_gives_up_without_filing',
+    'test_browser_fallback_files_what_curl_could_not',
+    'test_browser_fallback_not_used_when_curl_works',
+    'test_browser_fallback_rechecks_the_gate_live',
+    'test_browser_fallback_can_be_turned_off',
+    'test_browser_fallback_failure_still_asks_for_a_human',
 )
 
 STANDALONE_TESTS = (
@@ -1600,6 +2310,9 @@ STANDALONE_TESTS = (
     'test_read_cached_url_never_raises', 'test_watchdog_restarts_a_dead_worker',
     'test_group_dates_by_month', 'test_captcha_timeout_wrapper',
     'test_log_rotation', 'test_token_summary', 'test_relative_duration',
+    'test_confirm_leg_is_hermetic', 'test_applicant_data_is_redacted_from_dumps',
+    'test_receipt_parsing', 'test_name_match_beats_label_match',
+    'test_chrome_is_never_driven_twice_at_once',
 )
 
 

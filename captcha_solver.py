@@ -22,6 +22,7 @@ from pydoll.commands.input_commands import InputCommands
 from pydoll.protocol.input.types import MouseEventType, MouseButton
 
 from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE, CAPTCHA_TIMEOUT
+import chrome_guard
 # Shared with the booking engine so there is one implementation of "make this
 # safe to write down". book_hotels imports only config, so this is not a cycle.
 from book_hotels import redact_url, token_summary
@@ -170,17 +171,28 @@ async def get_calendar_url():
     hang there stops all booking indefinitely while the process keeps rendering
     its display and looks perfectly healthy, so the deadline is not optional.
 
+    Held under `chrome_guard` because `browser_apply` drives Chrome too, and
+    `_kill_stray_chrome()` below reaps by `pgrep -f remote-debugging-port` — which
+    matches that browser as readily as this one. Serialised, a timeout here can only
+    fire while nothing else of ours has a Chrome open, so the reaper cannot kill a
+    browser that is midway through filing an application against a room hold.
+
     Returns the URL string, or None on failure or timeout.
     """
-    try:
-        return await asyncio.wait_for(_solve_and_cache(), timeout=CAPTCHA_TIMEOUT)
-    except asyncio.TimeoutError:
-        log(f'TIMEOUT: solve exceeded {CAPTCHA_TIMEOUT}s, abandoning this attempt')
-        _kill_stray_chrome()
-        return None
-    except Exception as e:
-        log(f'Solve failed: {e!r}')
-        return None
+    with chrome_guard.chrome() as owned:
+        if not owned:
+            log('Chrome is busy filing an application; deferring this solve')
+            return None
+        try:
+            return await asyncio.wait_for(_solve_and_cache(),
+                                          timeout=CAPTCHA_TIMEOUT)
+        except asyncio.TimeoutError:
+            log(f'TIMEOUT: solve exceeded {CAPTCHA_TIMEOUT}s, abandoning this attempt')
+            _kill_stray_chrome()
+            return None
+        except Exception as e:
+            log(f'Solve failed: {e!r}')
+            return None
 
 
 def _kill_stray_chrome():

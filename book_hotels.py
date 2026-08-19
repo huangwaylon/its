@@ -24,6 +24,7 @@ from config import (
     HOTEL_RETRY_COOLDOWN, HOTEL_HOLD_COOLDOWN, MAX_BOOKINGS_PER_DATE,
     AUTO_CONFIRM, AUTO_CONFIRM_MIN_DAYS,
     DEBUG_DUMP_INTERVAL, DEBUG_DUMP_KEEP, IDLE_LOG_INTERVAL, SKIP_PAST_DATES,
+    APPLICANT,
 )
 
 BASE = 'https://as.its-kenpo.or.jp'
@@ -696,7 +697,88 @@ def _redact_body(body):
         return whole[:start] + _fingerprint(m.group(1)) + whole[end:]
     for pat in _BODY_SECRETS:
         body = re.sub(pat, replace, body)
+    return _redact_applicant(body)
+
+
+# Inputs whose *name* marks them as carrying 資格認証のキー. Matched on the name so a
+# value the site reformats — 070-8999-3499 for a stored 07089993499, 生年月日 split
+# across three selects — is still caught, which exact-value matching cannot do.
+_PII_FIELD_NAME = re.compile(
+    r'sign_no|kigou|insured_no|bangou|kana|birth|\[year\]|\[month\]|\[day\]'
+    r'|\btel\b|phone|denwa|postal|\bzip\b|post_?code|address|juu?sho'
+    r'|office_name|jigyou?sho|\bmail\b', re.I)
+
+_PII_INPUT = re.compile(
+    r'(?is)<input\b(?=[^>]*\bname=(["\'])(?P<name>[^"\']*)\1)'
+    r'[^>]*?\bvalue=(["\'])(?P<value>[^"\']*)\3[^>]*>')
+
+
+def _redact_applicant(body):
+    """Strip the applicant's identity data out of a body before it is stored.
+
+    `config.APPLICANT` holds 記号 / 番号 / カナ氏名 / 生年月日 / 電話 / 住所 / 事業所名 —
+    identity credentials for somebody's insurance record, and `config.py` says
+    outright that they belong in this redaction list. They were not in it. Nothing
+    reached these pages before `confirm_booking` existed, so no dump on disk carries
+    them, but 申込内容確認画面 echoes every one of them back and a dump of it goes
+    into `DEBUG_DIR` — a directory whose contents were tracked in a public remote
+    until 2026-08-18.
+
+    Two passes, because neither alone is enough:
+
+    - every `value="…"` on an input whose *name* looks like an identity field,
+      which survives the site reformatting the value; and
+    - each configured value found literally in the prose, which catches
+      「記号 1234」 rendered as text rather than as a form control.
+
+    `sex` and `zokugara` are deliberately left alone: 男/女 and 本人 are drawn from a
+    two- and five-value domain, so they identify nobody, and they appear in the
+    form's own `<option>` labels whatever we submit — redacting them would shred
+    the markup the dump exists to show. Values shorter than 3 characters are
+    skipped for the same reason.
+
+    Best-effort by construction, and load-bearing only as a second line of defence:
+    the first is that these pages are dumped at all only when the flow has already
+    failed.
+    """
+    def by_name(m):
+        if not _PII_FIELD_NAME.search(m.group('name')):
+            return m.group(0)
+        value = m.group('value')
+        if not value:
+            return m.group(0)
+        start = m.start('value') - m.start(0)
+        end = m.end('value') - m.start(0)
+        whole = m.group(0)
+        return whole[:start] + _fingerprint(value) + whole[end:]
+
+    body = _PII_INPUT.sub(by_name, body)
+
+    values = {v for k, v in (APPLICANT or {}).items()
+              if k not in ('sex', 'zokugara') and isinstance(v, str) and len(v) >= 3}
+    values.add(EMAIL)
+    values.update(_birth_renderings((APPLICANT or {}).get('birth')))
+    # Longest first, so redacting 記号 does not leave a fragment of 番号 behind.
+    for value in sorted((v for v in values if v), key=len, reverse=True):
+        body = body.replace(value, _fingerprint(value))
     return body
+
+
+def _birth_renderings(birth):
+    """`2000-03-04` as the site writes it back on 申込内容確認画面.
+
+    That page echoes 生年月日 as prose, not as the three selects it was submitted
+    in, and in a different format from the one `.env` stores — so neither matching
+    input values by field name nor matching the configured string literally finds
+    it. Both zero-padded and unpadded forms, since the day/month selects use
+    unpadded option values and the rendering follows no rule we control.
+    """
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', birth or ''):
+        return set()
+    y, m, d = birth[:4], birth[5:7], birth[8:10]
+    mi, di = str(int(m)), str(int(d))
+    return {f'{y}年{m}月{d}日', f'{y}年{mi}月{di}日',
+            f'{y}/{m}/{d}', f'{y}/{mi}/{di}', f'{y}.{m}.{d}'}
 
 
 def _headers_section(resp):
@@ -1079,9 +1161,20 @@ def _finish_from_email(c, target_date, hotel_name, tag, held_at):
         log(f"{tag}   {R}Confirmation step raised {e!r}; the room is held and the "
             f"mail is sent — finish it by hand{X}")
         return
-    if status != 'confirmed':
-        log(f"{tag}   {Y}{hotel_name} on {target_date} not confirmed "
-            f"({status}: {detail}){X}")
+    if status == 'confirmed':
+        return
+    # 'deferred' already explains itself and prints its own HUMAN NEEDED line.
+    # 'failed' did not, and it is the case that most needs one: the room is held,
+    # the mail is sent, and whatever went wrong leaves a person a few minutes to
+    # finish from the link before the site releases the room to somebody else.
+    log(f"{tag}   {Y}{hotel_name} on {target_date} not confirmed "
+        f"({status}: {detail}){X}")
+    if status == 'failed':
+        left = (held_at + confirm_booking.CONFIRM_HOLD_SECONDS - time.time()) / 60
+        log(f"{tag}   {B}{Y}HUMAN NEEDED: {hotel_name} on {target_date} is held and "
+            f"the mail to {EMAIL} is sent. Open its link and finish "
+            f"{'within %.0f minutes' % left if left > 0 else 'now — the hold has lapsed'}"
+            f".{X}")
 
 
 def _open_calendar_session(c, cookie_file, url, target_date, tag, label,

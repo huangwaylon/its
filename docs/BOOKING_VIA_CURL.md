@@ -606,6 +606,97 @@ produces the 申込受付番号, and only that is 申込手続き完了及び予
 in this repo does any of it, and the clock started at step 7: **≤30 minutes**
 from the hold to 申込完了, and no request in this flow can cancel a hold early.
 
+### Steps 7–9, captured live on 2026-08-19
+
+Run end to end against the real site: hold taken on ブルーベリーヒル勝浦 for
+2026-09-01, mail received 10 s later, application filed as 申込受付番号
+**10287126**. `confirm_booking.py` is these three steps.
+
+**The mail.** From `関東ITソフトウェア健保 <noreply@mail.its-kenpo.or.jp>`, subject
+「{施設名}申込手続きのご案内」, containing exactly one URL:
+`https://as.its-kenpo.or.jp/apply/new?c=<uuid4>`. It names only the date it was
+*sent*, never the stay date — a 2026-08-19 mail for a 2026-09-16 stay contains
+「2026年08月19日」 and 09-16 nowhere — so a stay-date filter can never match. Arrival
+time after the hold is the only honest discriminator.
+
+**Step 7 — `GET /apply/new?c=<uuid>`.** 200, one form:
+
+```html
+<form class="edit_apply" id="edit_apply_10287126"
+      action="/apply/confirm?c=<uuid>" accept-charset="UTF-8" method="post">
+  <input type="hidden" name="_method" value="true" autocomplete="off" />
+  <input type="hidden" name="authenticity_token" value="…" autocomplete="off" />
+  …13 applicant controls…
+  <input value="申込する" onclick="this.form.submit();" type="button" />
+</form>
+```
+
+Fifteen submittable controls, and every one of these details bites:
+
+| Trap | What is actually there |
+|---|---|
+| `_method` | `value="true"`, **not** a verb. Echo it verbatim. Sending `_method=patch` instead makes Rack::MethodOverride rewrite the verb and the route 404s. |
+| `utf8` | **absent** — unlike every form in steps 1–9. |
+| required-ness | no `required` attribute, and 「必須」 appears nowhere. It is an `<img src=".../must-*.png" name="sign_no_img">` inside `<dd class="must">`. A guard keyed on `required` reports "0 unmapped" for a blank form. |
+| those `<img>`s | they carry `name=`, so a parser that collects every *named* element invents 22 fields no browser submits (`sign_no_img`, `house1`…`house10`, …). Collect `input`/`select`/`textarea` only. |
+| labels | adjacent, never `for=`-linked. `apply[month]`'s preceding text is the tail of the year dropdown's options; `apply[state]`'s is `postal" /> （半角）`. **Match on field name first, label only as a fallback.** |
+| option values | `man`/`woman`, `myself`/`family`, prefectures `1`…`47`. Matching 男/女/本人 needs the `<option>` *label*, not its value. |
+| birth date | three selects, `apply[year|month|day]`, values **unpadded** (`3`, not `03`); the year labels are 和暦, `平成12年(2000年)`. |
+
+Field names: `apply[sign_no]` 記号, `apply[insured_no]` 番号,
+`apply[office_name]` 事業所名, `apply[kana_name]` 申込代表者名（カナ氏名） — one
+combined box, not 姓/名 — `apply[year|month|day]` 生年月日, `apply[gender]` 性別,
+`apply[relationship]` 続柄, `apply[contact_phone]` 連絡先電話番号,
+`apply[postal]` 〒, `apply[state]` 都道府県, `apply[address]` 住所.
+
+**Step 8 — `POST /apply/confirm?c=<uuid>`** → 200 申込内容確認画面, echoing every
+submitted value back as prose plus a two-field form to `/apply/complete?c=<uuid>`.
+That echo is why `_redact_body` has to strip 記号/番号/カナ氏名/生年月日/電話/住所: a
+dump of this page is a dump of somebody's insurance record.
+
+**Step 9 — `POST /apply/complete?c=<uuid>`** → 200 `/apply/complete`:
+
+```html
+<p class="complete"><strong>申込受付番号：  10287126</strong></p>
+```
+
+Label and number inside one tag, so a raw-markup regex reads it correctly by luck;
+one tag between them and `([0-9A-Za-z-]{4,})` captures `strong`. Search the
+tag-stripped text (`parse_receipt`). **Never retried** — it files the application
+and sends 申込完了メール.
+
+**When the hold lapses** the emailed link answers **200 with no form at all**:
+「30分が経過しましたので、ご利用のURLは無効となりました。」 Only that text tells it
+apart from the form's markup having changed.
+
+### Finding 6: `POST /apply/confirm` refuses curl and accepts Chrome
+
+Measured against a live hold on 2026-08-19, and unresolved. The POST is answered
+`302 → /service_category/index` with an empty body and `x-runtime: ~0.02` — Rails'
+own bounce, from a `before_action`, in 20 ms. It is served identically for:
+
+- a valid `authenticity_token`, a corrupted one, and none at all;
+- an empty body;
+- `+ utf8=✓`, `+ commit=申込する`, `+ c=` in the body, `_method` omitted;
+- `+ Origin`, `+ Sec-Fetch-Site/Mode/Dest/User`, `+ sec-ch-ua*`,
+  `+ Upgrade-Insecure-Requests`, `+ Cache-Control` — singly and all together;
+- the form GET and the POST issued on **one** curl connection (`--next`).
+
+So the guard runs before the request body is read. The same POST — same URL, same
+15 fields, same cookies — **succeeds from real Chrome**, both as a natural
+`form.submit()` and as an in-page `fetch()` with the identical serialised body.
+Since `fetch()` sends none of the navigation headers and still works, the
+difference is not the request: it is the **client**. What is left is curl's TLS
+fingerprint and the egress path.
+
+That run was inside a sandbox whose HTTPS proxy intercepts, and which may present a
+different source address per request; a session pinned to `request.remote_ip` would
+behave exactly like this, including the GET always succeeding, because the GET is
+what establishes the session. **Before changing anything about the request, check
+whether it reproduces off a proxied network.** The 抽選処理 banner visible on these
+pages is site-wide layout — it appears on the 404 page too — and is not evidence of
+a functional block.
+
 ---
 
 ## Key Findings
@@ -742,6 +833,9 @@ manual (not automated):
       emailed URL -> applicant form -> 申込する -> 確認 -> 申込受付番号 -> 予約確定
 ```
 
+`confirm_booking.py` now implements that last line — see "Steps 7–9, captured live"
+above, and Finding 6 for the one request in it that curl cannot get past.
+
 ---
 
 ## Reference Implementation
@@ -753,6 +847,7 @@ manual (not automated):
 | 1, 1b | `_open_calendar_session()` |
 | 2 | `_select_date()` |
 | 3–9 | `book_one_hotel()` |
+| 7–9 of the *official* flow (the emailed leg) | `confirm_booking.confirm_from_email()` |
 
 `test_booking_flow.py` replays the markup above — including the escaped-quote
 AJAX responses — against a localhost `FakeITS` server and injects the failures

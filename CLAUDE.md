@@ -9,12 +9,29 @@ vacancies on target dates and, when one appears, drives the 空き照会申込 f
 curl. Cloudflare Turnstile guards the entry point, so a real Chrome solves it and
 curl replays the resulting `s=` session token until it expires.
 
-**It does not complete reservations.** The official flow has nine steps; the curl
-chain implements six. What the code logs as `BOOKED` is `send_complete` —
-「メール送信を完了しました」, a confirmation email dispatched. The reservation is
-confirmed only once a human opens the link in that mail, fills the applicant form,
-presses 申込する, then 確認. What the bot secures is the **30-minute hold** taken at
-step 7; unattended, the room is released again.
+**`send_complete` is not a reservation.** The official flow has nine steps. The curl
+chain in `book_hotels.py` implements six and ends at `send_complete` —
+「メール送信を完了しました」, a confirmation email dispatched. What that secures is the
+**30-minute hold** taken at step 7. `confirm_booking.py` then runs the official
+steps 7–9 off the emailed link — applicant form → 申込する → 確認 — and only that
+yields a 申込受付番号 and 予約確定. Verified end to end against the live site on
+2026-08-19 (ブルーベリーヒル勝浦, 2026-09-01, 申込受付番号 10287126).
+
+**But one request on that leg does not work over curl.** `POST /apply/confirm`
+(申込する) is answered `302 → /service_category/index` regardless of what is sent,
+while real Chrome — same URL, same 15 fields, same cookies — gets through. It is the
+*client* that is refused, not the request, and the measurement was taken from a
+sandbox whose HTTPS proxy intercepts. See Finding 6 in `docs/BOOKING_VIA_CURL.md`
+before touching anything on that request, and **check whether it reproduces off a
+proxied network first.**
+
+So `confirm_booking` tries curl and, when curl is refused, hands that one leg to
+`browser_apply` — real Chrome, driven the same way `captcha_solver` drives it. curl
+stays the primary path, so if the cause turns out to be environmental the fallback
+simply stops firing with nothing to undo. `BROWSER_CONFIRM=False` restores the
+curl-only behaviour. Without `pydoll-python`, or if the browser fails too, a booking
+still ends with the hold taken and the mail sent, and the log says `HUMAN NEEDED`
+with the minutes remaining.
 
 ## Setup & Running
 
@@ -23,10 +40,12 @@ uv run main.py                       # normal operation: solve CAPTCHA, then boo
 .venv/bin/python captcha_solver.py   # solve only; writes calendar_url_cache.txt
 ```
 
-`book_hotels.py` is stdlib + curl; `captcha_solver.py` needs `pydoll-python` (real
-Chrome over CDP — Turnstile rejects headless, so the window is visible but
-minimised); `display.py` needs `rich`. No linter or formatter configured.
+`book_hotels.py` is stdlib + curl; `captcha_solver.py` and `browser_apply.py` need
+`pydoll-python` (real Chrome over CDP — Turnstile rejects headless, so the window is
+visible but minimised); `display.py` needs `rich`. No linter or formatter configured.
 `make_s_token.py` builds an `s=` token layer by layer, for inspection.
+`check_env.py` is the preflight: `.env` completeness, IMAP reachability, and which
+target dates the confirmation gate would auto-confirm.
 
 ## Booking rules that constrain the design
 
@@ -59,7 +78,8 @@ Full detail and sources in `docs/ITS_RULES.md`. What bears on the code:
 ## Architecture
 
 `config.py` (settings) · `main.py` (orchestration) · `book_hotels.py` (booking
-engine) · `captcha_solver.py` (Turnstile) · `display.py` (TUI).
+engine) · `captcha_solver.py` (Turnstile) · `confirm_booking.py` (the emailed leg) ·
+`display.py` (TUI) · `check_env.py` (`.env` / IMAP preflight).
 
 ### `main.py`
 
@@ -173,7 +193,76 @@ is a **whitelist**: anything unrecognised becomes `[len=N sha256=xxxxxxxx]`, so 
 future session-bearing header cannot leak by default, and the digest is stable so two
 dumps can be compared without either holding a session id.
 
+### `confirm_booking.py`
+
+The official steps 7–9, off the link in the site's confirmation mail: poll IMAP for
+the mail → `GET /apply/new?c=<uuid>` → fill the applicant form → 申込する → 確認 →
+申込受付番号. Called from `book_hotels._finish_from_email`, which imports it lazily and
+swallows every failure: a hold plus a sent mail is already worth keeping, and the
+human fallback works from exactly that state.
+
+- **`bh.confirm_allowed()` is consulted immediately before each committing POST**, not
+  once at the top. Free web cancellation ends at D−10, so anything nearer than
+  `AUTO_CONFIRM_MIN_DAYS` is left for a person.
+- **The form is filled from what the form declares**, never from hard-coded names.
+  `map_fields` matches the live controls against `config.APPLICANT`; anything it
+  cannot place is `unmapped`, and a caller finding `unmapped` non-empty must not
+  submit — these are 資格認証のキー and a half-filled form is a rejected application
+  plus a wasted hold, not a near miss.
+- **`required` cannot be trusted and neither can labels.** The live form marks nothing
+  `required` and never says 必須 (it uses `<img src=".../must-*.png">`), and it labels
+  by *proximity*: `apply[month]`'s preceding text is the tail of the year dropdown's
+  options. So `_match_rule` tries **field name first and label only as a fallback**,
+  and a name match wins even when no value is configured — otherwise `apply[address]`
+  with `ITS_ADDR` unset matched the 〒 a few characters before it and would have
+  submitted the postcode as the street address.
+- **`_URL_RE` is built from `BASE`**, not hard-coded. The host restriction is a safety
+  property — the mail body is the one input here nobody in this repo authors — but
+  baking the literal host in also made the whole leg untestable, because
+  `extract_apply_link` returned None for every fake.
+- Mail is matched on **arrival time**, never the stay date: the mail names only the
+  date it was sent, so a stay-date filter can never match.
+- `parse_receipt` searches the **tag-stripped** text. The live page is
+  `<strong>申込受付番号：  10287126</strong>` — one tag around both — so a raw-markup
+  regex works by luck; one tag between them and it captures `strong`, writing a
+  made-up number into the only record that a real reservation exists.
+- 確認 is the one request here sent with `retry=False`. Status 0 is
+  `confirm outcome unknown` and it says to check the mailbox before trying again.
+
+### `browser_apply.py` and `chrome_guard.py`
+
+`browser_apply.submit()` is the 申込する/確認 leg in real Chrome, reached only after
+curl's POST was refused. It is the sequence that was verified live on 2026-08-19:
+open the emailed link → write every value back **and read it back** → 申込する →
+require 申込内容確認画面 on screen → 確認 → parse the receipt.
+
+- **The read-back is not belt-and-braces.** A `<select>` handed a value that is not
+  among its options keeps its old one silently, so without verifying, a mismatched
+  都道府県 or 生年月日 would be *filed blank* against somebody's insurance record. Any
+  field the page did not accept aborts before 申込する.
+- **`allow_commit` is a callable, not a boolean.** Filling a form in a browser takes
+  tens of seconds and the free-cancellation gate can close inside that window, so it
+  is re-evaluated on the 申込内容確認画面 immediately before the commit.
+- **A timeout does not reap the browser.** It may have landed after 確認 was accepted,
+  and SIGKILL cannot un-file an application; the outcome is reported unknown and the
+  mailbox is the authority.
+- Field values are never logged — they are 資格認証のキー. Only names, and only when
+  the page rejected one.
+- The budget is `min(BROWSER_CONFIRM_TIMEOUT, hold remaining)`, so this can never
+  outlive the room it is trying to keep.
+
+`chrome_guard` exists because **`captcha_solver._kill_stray_chrome()` reaps by
+`pgrep -f remote-debugging-port`**, which matches an application-filing browser as
+readily as a Turnstile-solving one. A solve that timed out while an application was
+in flight would SIGKILL it somewhere between 申込する and 確認, with no way to learn
+which side of the commit it died on. One lock serialises the two, so the reaper only
+runs when nothing else of ours has a Chrome open and anything `pgrep` finds really is
+an orphan. Both sides take it with a timeout — the solve thread is the only thing
+that can re-mint a session, and the booking side is holding a room — and a refused
+solve simply waits for the next `URL_CHECK_INTERVAL`.
+
 ### `captcha_solver.py`
+
 
 pydoll drives real Chrome over CDP (Playwright trips the bot detection).
 `get_calendar_url()` opens the homepage, clicks カレンダーから探す, solves Turnstile,
@@ -231,6 +320,10 @@ temporary booking threads from each scanner's `ThreadPoolExecutor`, one per avai
 date. Long-lived threads are wrapped in `main._Worker` for the watchdog, and their
 loop bodies are guarded internally as the first line of defence.
 
+**Chrome is single-threaded across the process**, by `chrome_guard`: the URL monitor's
+CAPTCHA solve and a booking thread's `browser_apply` submit take one lock, because the
+solve's stray-process reaper cannot tell the two browsers apart.
+
 Shared state: `calendar_url_cache.txt` (written in the URL monitor thread, read
 everywhere — POSIX atomicity for a small file, and readers treat stale or empty data
 as "no URL"); `bookings.json` (only via `save_booking()`, `get_booked_hotels()`,
@@ -254,7 +347,16 @@ as "no URL"); `bookings.json` (only via `save_booking()`, `get_booked_hotels()`,
   MAC, so any decoded field is equivalent to the token.
 - `debug_responses/` — failure dumps, bodies redacted because they embed `s=` tokens
   in form actions. Gitignored, but tracked until 2026-08-18, so earlier files remain
-  in the public remote's history.
+  in the public remote's history. **Redaction now also covers `config.APPLICANT`** —
+  申込内容確認画面 echoes 記号/番号/カナ氏名/生年月日/電話/住所 straight back, and
+  `config.py` claimed those were in the redaction list when they were not. Two passes:
+  every `value="…"` on an input whose *name* looks like an identity field, plus each
+  configured value found literally (including 生年月日 in the site's own
+  `2000年3月4日` rendering). `sex`/`zokugara` are deliberately left alone — 男/女 and
+  本人 identify nobody and appear in the form's `<option>` labels regardless.
+- `reservations.json` — `{date: ["hotel\t申込受付番号"]}`. Unlike `bookings.json` these
+  are **confirmed reservations**, so an entry means a real cancellation liability
+  exists. Gitignored.
 
 ## Tests
 
@@ -278,6 +380,29 @@ display suite needs `rich`. None touches ITS.
   so an `empty`-only filter fails loudly. Also covers priority ordering, skip
   normalisation, the final submit never being repeated, `bookings.json` atomicity and
   corruption handling, the watchdog and the CAPTCHA timeout.
+- **The emailed leg must stay stubbed.** `confirm_from_email` polls IMAP for
+  `CONFIRM_MAIL_TIMEOUT` seconds, so when `AUTO_CONFIRM` reached the suite every
+  successful booking blocked 180 s against the operator's real Gmail: over an hour,
+  printing nothing, and only if credentials happened to be present. `Env` therefore
+  sets `AUTO_CONFIRM=False` by default and injects `confirm_booking._mail_source`
+  (a callable returning message text) for the tests that want the leg. Nothing in
+  any suite may open a socket to `imap.gmail.com`.
+- **`confirm_booking` coverage** replays the *live* applicant form: `_method="true"`,
+  no `utf8`, nothing marked `required`, the 必須 markers as `<img name="*_img">`,
+  labels only adjacent to their control, and `man`/`woman`/`myself` option values.
+  Plus the expired-hold page, the 申込する rejection, `確認` never being repeated,
+  an unfillable form deferring without submitting, and that a dump of these pages
+  carries no 記号/番号/カナ氏名/生年月日/電話/住所.
+- **The Chrome fallback is stubbed, never launched.** `Env` replaces
+  `confirm_booking._browser_submit` with a recorder whose default result is what the
+  curl-only path used to return, so the tests written before the fallback existed keep
+  asserting what they meant. Covered: it fires only after curl is refused, gets the
+  emailed link and the 13 applicant fields with the hidden ones stripped, gets a
+  *live* `allow_commit` callable, records the reservation on success, is skippable via
+  `BROWSER_CONFIRM`, and still reaches `HUMAN NEEDED` when it fails too. A separate
+  test asserts `chrome_guard` refuses a second Chrome and that a busy Chrome defers a
+  solve rather than disabling it — deliberately run in the calling thread, because a
+  background thread that outlives the assertion goes on to open a real browser.
 - **`test_display.py`** — that the newest logged line is on screen: measures
   `_visual_lines` against what Rich really renders, then renders layouts at six
   terminal sizes using real log lines as fixtures.
@@ -309,6 +434,9 @@ clear proxy settings for loopback, since a local proxy would rewrite responses.
 | `MAX_BOOKINGS_PER_DATE` | 0 (off) | Cap on holds per date; off because several hedge against missing the email window. |
 | `URL_CHECK_INTERVAL` / `URL_REFRESH_INTERVAL` | 60 / 1800 | Validity check; proactive re-solve, skipped mid-booking. |
 | `CAPTCHA_TIMEOUT` | 180 | Hard ceiling on one solve. |
+| `AUTO_CONFIRM` / `AUTO_CONFIRM_MIN_DAYS` | `True` / 11 | Run the emailed leg; never inside the free-cancellation window (D−10 plus a day of margin). |
+| `CONFIRM_MAIL_TIMEOUT` / `_HOLD_SECONDS` / `_HOLD_MARGIN` | 180 / 1800 / 300 | IMAP poll budget; the site's hold; how much of it to leave unspent. |
+| `BROWSER_CONFIRM` / `_TIMEOUT` | `True` / 240 | Finish 申込する in real Chrome when curl is refused; never longer than the hold has left. |
 | `PRIORITY_HOTELS` | `['NAGU']` | Substrings attempted first; hotels book sequentially at ~7 requests each. |
 | `SKIP_HOTELS` | list | Never booked, matched normalised. The "keep" list is only a comment — anything on neither list is eligible. |
 | `DEBUG_DUMP_INTERVAL` / `_KEEP` | 300 / 400 | Throttle per label+step; file cap for `DEBUG_DIR`. |

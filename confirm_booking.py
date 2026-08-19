@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from config import (
     IMAP_HOST, IMAP_PORT, IMAP_USER, IMAP_APP_PASSWORD, MAIL_FROM, APPLICANT,
     CONFIRM_MAIL_TIMEOUT, CONFIRM_HOLD_SECONDS, CONFIRM_HOLD_MARGIN,
-    RESERVATIONS_FILE,
+    RESERVATIONS_FILE, BROWSER_CONFIRM,
 )
 import book_hotels as bh
 from book_hotels import log, R, G, Y, C, B, X, redact_url
@@ -95,7 +95,18 @@ def message_text(raw_bytes):
     return '\n'.join(chunks)
 
 
-_URL_RE = re.compile(r'https?://as\.its-kenpo\.or\.jp/[^\s<>"\']+')
+def _url_re():
+    """URLs on the configured site only.
+
+    Built from `BASE` rather than hard-coded, for two reasons. The host restriction
+    is a safety property, not a convenience: the mail body is the one input to this
+    module we do not author, and following an arbitrary link out of it would post
+    somebody's 記号/番号 wherever that link pointed. Deriving the pattern from BASE
+    keeps that property while making the module reachable from a test — with the
+    literal host baked in, `extract_apply_link` silently returned None for every
+    fake and the whole emailed leg was untestable.
+    """
+    return re.compile(re.escape(BASE.rstrip('/')) + r'/[^\s<>"\']+')
 
 
 def extract_apply_link(text):
@@ -106,7 +117,7 @@ def extract_apply_link(text):
     longest wins, because the mail also contains short generic links — the site's
     homepage, a do-not-reply notice — that would otherwise be picked.
     """
-    urls = [u.rstrip('.,)>]') for u in _URL_RE.findall(text or '')]
+    urls = [u.rstrip('.,)>]') for u in _url_re().findall(text or '')]
     if not urls:
         return None
     tokened = [u for u in urls if re.search(r'[?&][cs]=', u)]
@@ -197,6 +208,20 @@ def wait_for_apply_link(target_date, since_epoch, timeout=None, poll=5.0,
 # ── the applicant form ───────────────────────────────────────────────
 
 _TIMEOUT_TEXT = 'セッションがタイムアウトしました'
+
+# The emailed link's own expiry page, served 200 with no form at all:
+# 「30分が経過しましたので、ご利用のURLは無効となりました。ＩＴＳホームページより最初
+# から空き照会申込手続きをおこなってください。」 That is the step-7 hold lapsing, and it
+# is the one failure on this leg that is certainly not a bug — but it renders as a
+# formless page, so it used to be reported as 'no form' and dumped as
+# step10_no_form, i.e. indistinguishable from the applicant form's markup having
+# changed underneath the parser. Confirmed live on 2026-08-19 against a link 1h27m
+# old.
+_EXPIRED_TEXT = 'ご利用のURLは無効となりました'
+
+
+def _hold_expired(body):
+    return bool(body) and _EXPIRED_TEXT in body
 
 
 def _rejected(status, body, location):
@@ -360,6 +385,38 @@ def _match_option(options, wanted):
     return None
 
 
+def _match_rule(name, label, values):
+    """Which `_MAP_RULES` key fills the control called `name`, or None.
+
+    **Field name first, label only as a fallback.** The two signals are not equally
+    good and treating them as interchangeable within one pass lets an earlier rule's
+    label steal a field that a later rule's name matches exactly.
+
+    The live form shows why the label is the weak one: `label` is whatever text
+    happens to sit in the 400 characters before the control, because this site
+    labels by proximity and never with `for=`. On the captured page `apply[month]`'s
+    label is the *tail of the year dropdown's option list* (「年) 令和6年(2024年) …」),
+    `apply[day]`'s is 「">2 3 4 5 …」, and `apply[state]`'s is 「postal" /> （半角）」 —
+    the preceding field's markup, not its own name. Any of those can contain another
+    field's Japanese label, and then 生年月日 gets filled with a カナ氏名 or a 〒.
+
+    A field name, by contrast, is structural: `apply[state]` is the prefecture
+    dropdown whatever text precedes it. So a name match wins even when we have no
+    value for it — the field is then reported unmapped and a human finishes the
+    application. The alternative is worse than useless: with `ITS_ADDR` unset,
+    `apply[address]` fell through to the label pass, matched the 〒 sitting a few
+    characters before it, and would have submitted the *postcode* as the street
+    address against somebody's insurance record.
+    """
+    for candidate, (name_pat, _label_pat) in _MAP_RULES:
+        if re.search(name_pat, name, re.I):
+            return candidate
+    for candidate, (_name_pat, label_pat) in _MAP_RULES:
+        if values.get(candidate) and label_pat and re.search(label_pat, label):
+            return candidate
+    return None
+
+
 def map_fields(fields, applicant=None, email_address=None, optional=()):
     """`(post_data, unmapped)` — fill what we recognise, report what we do not.
 
@@ -396,14 +453,7 @@ def map_fields(fields, applicant=None, email_address=None, optional=()):
                 unmapped.append(name)
             continue
 
-        key = None
-        for candidate, (name_pat, label_pat) in _MAP_RULES:
-            if not a.get(candidate):
-                continue
-            if re.search(name_pat, name, re.I) or (
-                    label_pat and re.search(label_pat, f['label'])):
-                key = candidate
-                break
+        key = _match_rule(name, f['label'], a)
 
         if key is None:
             post[name] = f['value']
@@ -411,7 +461,15 @@ def map_fields(fields, applicant=None, email_address=None, optional=()):
                 unmapped.append(name)
             continue
 
-        wanted = a[key]
+        wanted = a.get(key) or ''
+        if not wanted:
+            # The field is recognised but we were given nothing to put in it — an
+            # unset ITS_* variable. Unmapped, so the caller defers rather than
+            # submitting a blank 資格認証のキー.
+            post[name] = f['value']
+            if name not in optional:
+                unmapped.append(name)
+            continue
         if f['options']:
             chosen = _match_option(f['options'], wanted)
             if chosen is None:
@@ -439,6 +497,71 @@ def _save_reservation(target_date, hotel_name, receipt):
 
 
 _RECEIPT_RE = re.compile(r'申込受付番号[^0-9A-Za-z]{0,12}([0-9A-Za-z-]{4,})')
+
+# Replaceable so the tests can exercise the fallback without launching Chrome, the
+# same way `_mail_source` stands in for a mailbox. Signature matches
+# `browser_apply.submit`.
+_browser_submit = None
+
+
+def _submit_in_browser(link, post, target_date, hotel_name, tag, hold_left):
+    """Finish the application in real Chrome after curl's 申込する was refused.
+
+    Everything the curl path does after this point happens inside the browser, so
+    this returns a final `(status, detail)` and records the reservation itself.
+
+    The hidden fields are dropped: `_method` and `authenticity_token` are already in
+    the DOM, and the ones we scraped belong to a *different* page load. Re-writing
+    them over the live values is how a browser submit would fail for a reason that
+    looks like the bug it is working around.
+    """
+    if not BROWSER_CONFIRM:
+        log(f"{tag}   {Y}BROWSER_CONFIRM is off, so 申込する ends here{X}")
+        return 'failed', 'apply post session rejected'
+
+    submit = _browser_submit
+    if submit is None:
+        try:
+            import browser_apply
+        except Exception as e:
+            # pydoll missing or broken. The hold and the mail still stand, so this
+            # is a degraded outcome, not a crash.
+            log(f"{tag}   {R}Cannot load browser_apply ({e!r}); "
+                f"申込する cannot be retried in a browser{X}")
+            return 'failed', 'apply post session rejected (no browser available)'
+        submit = browser_apply.submit
+
+    values = {k: v for k, v in post.items()
+              if k not in ('_method', 'authenticity_token')}
+    log(f"{tag}   {C}Retrying 申込する in real Chrome "
+        f"({hold_left() / 60:.0f}m of hold left){X}")
+
+    status, detail = submit(
+        link, values, log, tag,
+        # Re-consulted on the 申込内容確認画面, immediately before the commit.
+        allow_commit=lambda: bh.confirm_allowed(target_date),
+        seconds_left=hold_left() - 15)
+
+    if status == 'confirmed':
+        log(f"{tag}   {B}{G}RESERVED (browser): {hotel_name} on {target_date}"
+            + (f' — 申込受付番号 {detail}' if detail else '') + X)
+        _save_reservation(target_date, hotel_name, detail)
+    return status, detail
+
+
+def parse_receipt(body):
+    """The 申込受付番号 on 申込完了画面, or ''.
+
+    Searched against the tag-stripped text, not the markup. The live page renders it
+    as `<strong>申込受付番号：  10287126</strong>` — label and number inside one tag,
+    which the pattern happens to read correctly. One tag between the two, which any
+    template change could introduce, and `[0-9A-Za-z-]{4,}` matches the *tag name*:
+    the receipt recorded in reservations.json becomes `strong`, and the only record
+    that a real reservation exists carries a made-up number.
+    """
+    text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', body or ''))
+    m = _RECEIPT_RE.search(text)
+    return m.group(1) if m else ''
 
 
 def confirm_from_email(c, target_date, hotel_name, tag, held_at=None,
@@ -490,6 +613,11 @@ def confirm_from_email(c, target_date, hotel_name, tag, held_at=None,
         log(f"{tag}   {R}Application page returned {s}{X}")
         bh._dump_debug(label, 'step10_apply_page', s, body)
         return 'failed', f'apply page {s}'
+    if _hold_expired(body):
+        # Not a parser problem and not worth a dump: the 30 minutes ran out.
+        log(f"{tag}   {Y}The 30-minute hold expired before the mail was "
+            f"followed — the site has released {hotel_name}{X}")
+        return 'failed', 'hold expired'
 
     action, fields = parse_form(body)
     if not action or not fields:
@@ -525,9 +653,32 @@ def confirm_from_email(c, target_date, hotel_name, tag, held_at=None,
     if _rejected(s, body, loc):
         # Distinguished from "no form on the page", which is what this looked like
         # on the first live run once the 302 had been followed.
-        log(f"{tag}   {R}申込する was rejected: the site dropped the session{X}")
+        #
+        # Measured live on 2026-08-19 against a real hold, and worth writing down
+        # because the shape is misleading. The 302 is Rails' own (`x-runtime` is
+        # present, ~20 ms) and it is served *whatever* we post: a valid
+        # authenticity_token, a corrupted one, none at all, an empty body, with and
+        # without Origin / Sec-Fetch-* / sec-ch-ua / Upgrade-Insecure-Requests, and
+        # with the GET and the POST on one curl connection. So the guard runs before
+        # the body is read.
+        #
+        # The same POST — same URL, same 15 fields, same cookies — succeeds from
+        # real Chrome, both as a natural form submit and as an in-page `fetch()`.
+        # So the request is right and what the site refuses is the *client*: the
+        # remaining differences are curl's TLS fingerprint and the egress path.
+        # That run was inside a sandbox whose HTTPS proxy intercepts and may
+        # present a different address per request, and a session pinned to
+        # `request.remote_ip` would behave exactly like this. Before changing any
+        # of the request, check whether it reproduces off a proxied network.
+        log(f"{tag}   {R}申込する was rejected: the site dropped the session "
+            f"(Rails 302 to /service_category/index, independent of what we "
+            f"post — suspect the client/egress path, not the form){X}")
         bh._dump_debug(label, 'step11_apply_rejected', s, body)
-        return 'failed', 'apply post session rejected'
+        # Chrome is not refused where curl is, so hand this leg to a real browser
+        # rather than abandoning a held room. Only reached after curl was refused,
+        # so the day this stops happening the browser never launches.
+        return _submit_in_browser(link, post, target_date, hotel_name, tag,
+                                  hold_left)
     if s != 200 or not body:
         log(f"{tag}   {R}申込する returned {s}{X}")
         bh._dump_debug(label, 'step11_apply_post', s, body)
@@ -563,10 +714,7 @@ def confirm_from_email(c, target_date, hotel_name, tag, held_at=None,
     if s == 302 and loc:
         s, body, loc = c('GET', loc)
 
-    receipt = ''
-    m = _RECEIPT_RE.search(body or '')
-    if m:
-        receipt = m.group(1)
+    receipt = parse_receipt(body)
     if receipt or '申込完了' in (body or ''):
         log(f"{tag}   {B}{G}RESERVED: {hotel_name} on {target_date}"
             + (f' — 申込受付番号 {receipt}' if receipt else '') + X)

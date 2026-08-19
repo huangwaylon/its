@@ -181,6 +181,28 @@ CONFIRM_MAIL_TIMEOUT = 180     # seconds to poll IMAP for the message
 CONFIRM_HOLD_SECONDS = 1800    # the site's hold on the room, from step 7
 CONFIRM_HOLD_MARGIN = 300      # stop starting new work with less than this left
 
+# Finish the application in real Chrome when curl's 申込する POST is refused.
+#
+# Measured against a live hold on 2026-08-19: `POST /apply/confirm` answers
+# `302 → /service_category/index` for curl whatever it sends — valid CSRF token,
+# corrupted, absent, empty body, every browser header, one shared connection — while
+# the identical POST from Chrome succeeds, including as an in-page `fetch()` that
+# sends none of the navigation headers. The site refuses the *client*, not the
+# request. Finding 6 in docs/BOOKING_VIA_CURL.md has the full matrix.
+#
+# curl is still tried first and this only runs after it is refused, so if the cause
+# turns out to be environmental — that measurement was taken through an intercepting
+# HTTPS proxy, and a session pinned to request.remote_ip would look identical — the
+# fast path simply resumes and this never fires. A refused POST costs one request and
+# consumes nothing: the form still rendered afterwards and Chrome still succeeded.
+#
+# Needs `pydoll-python`. Without it the booking still takes its hold and sends its
+# mail, and the log asks for a human.
+BROWSER_CONFIRM = True
+# Hard ceiling on one browser submit, and it is never longer than the hold has left.
+# Chrome can hang, and this runs inside a booking thread holding a room.
+BROWSER_CONFIRM_TIMEOUT = 240
+
 # ── Secrets, from the environment only ───────────────────────────────
 # Never hard-coded and never written to a tracked file: this repository's history
 # is on a public remote. 記号/番号/カナ氏名/生年月日 are 資格認証のキー — identity
