@@ -22,7 +22,7 @@ from config import (
     SCAN_BACKOFF_MAX, SCAN_JITTER,
     SCAN_REUSE_SESSION, SCAN_REUSE_MAX_FAILURES,
     AUTO_CONFIRM, AUTO_CONFIRM_MIN_DAYS,
-    DEBUG_DUMP_INTERVAL, DEBUG_DUMP_KEEP, IDLE_LOG_INTERVAL, SKIP_PAST_DATES,
+    DEBUG_DUMP_INTERVAL, DEBUG_DUMP_KEEP, SKIP_PAST_DATES,
     APPLICANT,
 )
 
@@ -1183,8 +1183,6 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     try:
         attempt = 0
         failures = 0          # consecutive failed cycles, drives the backoff
-        idle_since = None     # start of the current unchanged idle streak
-        idle_count = 0
         tokens = None         # cached (csrf, s_param) for the live session
         tokens_url = None     # the URL they were minted from
         reuse = SCAN_REUSE_SESSION
@@ -1266,17 +1264,10 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
                              if is_available(_date_css_class(body_nav, td))]
 
                 if not available:
-                    # This one message was 116k of the last log's 150k lines.
-                    idle_count += 1
-                    now = time.monotonic()
-                    if idle_since is None or now - idle_since >= IDLE_LOG_INTERVAL:
-                        extra = f', {idle_count} scans' if idle_count > 1 else ''
-                        log(f"{tag} {Y}[{attempt}] no dates available "
-                            f"({len(dates)} checked{extra}), waiting...{X}")
-                        idle_since, idle_count = now, 0
+                    log(f"{tag} {Y}[{attempt}] no dates available "
+                        f"({len(dates)} checked), waiting...{X}")
                     continue
 
-                idle_since, idle_count = None, 0
                 log(f"{tag} {C}[{attempt}] {len(available)}/{len(dates)} dates "
                     f"available: {', '.join(d[5:] for d in available)}{X}")
 

@@ -54,7 +54,6 @@ USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
-    "2026-09-01",
     "2026-09-05",
     "2026-09-19",
     "2026-09-20",
@@ -67,7 +66,7 @@ NUM_GUESTS = '2'
 SKIP_PAST_DATES = True    # stop polling dates that have already passed
 
 # ── Network tuning ───────────────────────────────────────────────────
-RETRY_DELAY = 20          # seconds between scan retry attempts
+RETRY_DELAY = 15          # seconds between scan retry attempts
 CURL_MAX_ATTEMPTS = 3     # max attempts per curl request (1 = no retry)
 URL_CHECK_INTERVAL = 60   # seconds between URL validity checks
 URL_REFRESH_INTERVAL = 1800  # seconds between proactive URL refreshes
@@ -171,11 +170,10 @@ DEBUG_DUMP_INTERVAL = 300   # seconds between dumps of the same label+step
 DEBUG_DUMP_KEEP = 400       # max files retained in DEBUG_DIR
 
 # ── Logging ──────────────────────────────────────────────────────────
+# Every scan cycle logs, so a healthy day is ~4,100 "no dates available" lines and
+# rotation is what bounds that.
 LOG_MAX_BYTES = 32 * 1024 * 1024   # rotate the log past this size
 LOG_BACKUPS = 3                    # keep this many rotated logs
-# Collapse an unchanged idle scan result to one line per N s; it was 116k of 150k
-# log lines. Availability and errors are never suppressed.
-IDLE_LOG_INTERVAL = 300
 
 # ── HTTP fingerprint ─────────────────────────────────────────────────
 # On, curl replays carry the UA of the Chrome that solved the CAPTCHA; off, they
@@ -234,7 +232,7 @@ SKIP_HOTELS = [
     # "ラビスタ横須賀観音崎テラス",                 # ✓
     "ホテルオークラ東京ベイ",                      # ✓
     # "リソルの森",                               # ✓
-    # "ブルーベリーヒル勝浦",                        # ✓ D−4
+    "ブルーベリーヒル勝浦",                        # ✓ D−4
     "和倉温泉 あえの風",
     # "ラビスタ富士河口湖",                        # ✓
     "ホテルハーヴェスト斑尾",                      # ✓

@@ -470,7 +470,7 @@ class Env:
              'SKIP_HOTELS', '_SKIP_NORM', 'PRIORITY_HOTELS', '_PRIORITY_NORM',
              'EMAIL', 'NUM_GUESTS', 'BOOK_MAX_ATTEMPTS', 'BOOK_RETRY_DELAY',
              'CURL_RETRY_BACKOFF', 'CURL_MAX_ATTEMPTS', 'RETRY_DELAY',
-             'SCAN_JITTER', 'SCAN_BACKOFF_MAX', 'IDLE_LOG_INTERVAL',
+             'SCAN_JITTER', 'SCAN_BACKOFF_MAX',
              'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES', 'SCAN_REUSE_SESSION',
              'SCAN_REUSE_MAX_FAILURES', 'AUTO_CONFIRM', 'AUTO_CONFIRM_MIN_DAYS',
              'APPLICANT')
@@ -509,7 +509,6 @@ class Env:
         bh.RETRY_DELAY = 0.05
         bh.SCAN_JITTER = 0
         bh.SCAN_BACKOFF_MAX = 0.2
-        bh.IDLE_LOG_INTERVAL = 0
         bh.DEBUG_DUMP_INTERVAL = 0    # no throttling, so dumps are countable
         bh.SKIP_PAST_DATES = True
         bh.SCAN_REUSE_SESSION = True
