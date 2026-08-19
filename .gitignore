@@ -5,7 +5,8 @@ __pycache__/
 
 # Runtime artifacts carrying live session material.
 # calendar_url_cache.txt holds the `s=` token; debug_responses/ holds raw server
-# responses, whose form actions embed `s=` tokens.
+# responses verbatim — session cookies, `s=` tokens, and on the emailed leg the
+# applicant's 記号/番号/カナ氏名/生年月日, which 申込内容確認画面 echoes back.
 calendar_url_cache.txt
 chrome_user_agent.txt
 debug_responses/

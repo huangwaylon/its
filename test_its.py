@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""End-to-end tests for the booking flow, against a fake ITS server.
+"""The whole suite, against a fake ITS server. Never touches ITS.
 
-test_http_layer.py covers curl and redaction. This covers the part that actually
-wins or loses a slot: the nine-step booking chain, hotel ordering and filtering,
-and the retry behaviour on the transient failures the production log is full of
-(1072 x 503 on the calendar GET, 302 dumps out of service_group_select).
+Two halves. The booking flow — the part that actually wins or loses a slot: the
+nine-step chain, hotel ordering and filtering, and the retry behaviour on the
+transient failures the production log is full of (1072 x 503 on the calendar GET,
+302 dumps out of service_group_select). And the curl layer underneath it: header
+merging, the UA cache, and the debug dumps.
 
-The fake server replays the real markup shapes from docs/SITE.md and
-from the dumps in debug_responses/, including the escaped-quote form that AJAX
-responses arrive in — the extractors are markup-exact, so a fake that pretties
-the markup up would test nothing.
+The fake server replays the real markup shapes from docs/SITE.md and from the dumps
+in debug_responses/, including the escaped-quote form that AJAX responses arrive in
+— the extractors are markup-exact, so a fake that pretties the markup up would test
+nothing.
 
-Never touches ITS.
+Pass a substring to select tests, `-v` to see the flow's own logging:
 
-    .venv/bin/python test_booking_flow.py
+    .venv/bin/python test_its.py
+    .venv/bin/python test_its.py -v test_503
 """
 import json
 import os
@@ -32,8 +34,9 @@ import confirm_booking as cb
 os.environ['NO_PROXY'] = os.environ['no_proxy'] = '127.0.0.1,localhost'
 
 FAILURES = []
-# Synthetic; see the note in test_http_layer.py. Never put a real `s=` token in a
-# fixture — even an expired one publishes the token format.
+# Synthetic, and deliberately self-describing: base64 of
+# "FAKE_TOKEN_FOR_TESTS_NOT_A_REAL_SESSION_TOKEN", the same 60 characters a real ITS
+# `s=` token runs to. Never put a real one here — even expired, it publishes the format.
 S_TOKEN = 'RkFLRV9UT0tFTl9GT1JfVEVTVFNfTk9UX0FfUkVBTF9TRVNTSU9OX1RPS0VO'
 TARGET = '2026-09-05'
 TARGET_LIMITED = '2026-09-06'    # 'a_little': few rooms left, but still bookable
@@ -84,6 +87,7 @@ class FakeITS:
         self.confirmed = []           # bodies that reached 確認
         self.browser_calls = []       # calls into the Chrome fallback
         self.browser_result = ('confirmed', '10287126')
+        self.received = []            # raw request headers, for the curl tests
 
     def nav_was_cached(self):
         """True when the nav POST just recorded had no calendar GET before it."""
@@ -351,6 +355,8 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method):
         path = self.path
         STATE.record(f'{method} {path}')
+        with STATE.lock:
+            STATE.received.append(self.headers)
         injected = STATE.injected(path)
         if injected == 302:
             return self._session_dead()
@@ -458,27 +464,42 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/apply/send_complete':
             return self._send(200, COMPLETE_PAGE)
 
+        # ── raw shapes for the curl / dump-layer tests ──
+        if path.startswith('/ok'):
+            return self._send(200, '<html>hello</html>', ctype='text/html')
+
+        if path.startswith('/raw302'):
+            # A bodyless 302 out of the flow, carrying the header shapes a dump is
+            # kept for: x-runtime says Rails answered, set-cookie says whether the
+            # session was re-issued.
+            self.send_response(302)
+            self.send_header('Location',
+                             f'{base}/service_category/index?s={S_TOKEN}&n=1')
+            self.send_header('Set-Cookie',
+                             '_src_session=deadbeefcafe1234; path=/; HttpOnly; Max-Age=0')
+            self.send_header('X-Runtime', '0.0123')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+
         return self._send(404, '<html>not found</html>')
 
 
 # ── Harness ─────────────────────────────────────────────────────────
 
+def _settings(mod):
+    """Every module-level setting, snapshotted for restore.
+
+    Taken by reflection rather than a hand-listed tuple: a knob added to config.py
+    would otherwise leak across tests until someone remembered to name it here.
+    """
+    return {k: v for k, v in vars(mod).items()
+            if not k.startswith('__') and not callable(v)
+            and not isinstance(v, type(os))}
+
+
 class Env:
     """Point book_hotels at the fake server and temp files, then restore."""
-
-    ATTRS = ('BASE', 'CALENDAR_URL_CACHE', 'HOLDS_FILE', 'DEBUG_DIR',
-             'SKIP_HOTELS', '_SKIP_NORM', 'PRIORITY_HOTELS', '_PRIORITY_NORM',
-             'EMAIL', 'NUM_GUESTS', 'BOOK_MAX_ATTEMPTS', 'BOOK_RETRY_DELAY',
-             'CURL_RETRY_BACKOFF', 'CURL_MAX_ATTEMPTS', 'RETRY_DELAY',
-             'SCAN_JITTER', 'SCAN_BACKOFF_MAX',
-             'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES', 'SCAN_REUSE_SESSION',
-             'SCAN_REUSE_MAX_FAILURES', 'AUTO_CONFIRM', 'AUTO_CONFIRM_MIN_DAYS',
-             'APPLICANT')
-
-    # confirm_booking's own module-level knobs, restored the same way.
-    CB_ATTRS = ('_mail_source', 'CONFIRM_MAIL_TIMEOUT',
-                'RESERVATIONS_FILE', 'BASE', 'APPLICANT',
-                '_browser_submit')
 
     def __init__(self, port, skip=(), priority=('NAGU',), confirm=False,
                  applicant=None, mail=True):
@@ -486,8 +507,8 @@ class Env:
         self.confirm, self.applicant, self.mail = confirm, applicant, mail
 
     def __enter__(self):
-        self.saved = {a: getattr(bh, a) for a in self.ATTRS}
-        self.saved_cb = {a: getattr(cb, a) for a in self.CB_ATTRS}
+        self.saved = _settings(bh)
+        self.saved_cb = _settings(cb)
         self.tmp = tempfile.TemporaryDirectory()
         d = self.tmp.name
         bh.BASE = f'http://127.0.0.1:{self.port}'
@@ -539,7 +560,7 @@ class Env:
         bh.AUTO_CONFIRM = self.confirm
         bh.AUTO_CONFIRM_MIN_DAYS = 11
         if self.applicant is not None:
-            bh.APPLICANT = cb.APPLICANT = self.applicant
+            cb.APPLICANT = self.applicant
         link = f'{bh.BASE}/apply/new?c={FAKE_APPLY_C}'
         # A str message is treated as pre-decoded text with no Date header, which
         # is exactly the injection point the module documents.
@@ -1394,7 +1415,7 @@ def test_read_cached_url_never_raises():
         bh.CALENDAR_URL_CACHE = saved
 
 
-# ── main.py / captcha_solver.py ─────────────────────────────────────
+# ── main.py / chrome.py ─────────────────────────────────────────────
 
 def test_watchdog_restarts_a_dead_worker():
     import main
@@ -1427,7 +1448,7 @@ def test_watchdog_restarts_a_dead_worker():
 def test_captcha_timeout_wrapper():
     """A hung solve must give up, not wedge the only thread that re-mints a session."""
     import asyncio
-    import captcha_solver as cs
+    import chrome as cs
 
     saved = (cs._solve_and_cache, cs.CAPTCHA_TIMEOUT, cs._kill_stray_chrome)
     killed = []
@@ -1554,6 +1575,12 @@ def test_confirm_files_the_application(port):
     # named element for a control would add a dozen fields no browser submits.
     check('confirm: the 必須 marker images are not submitted',
           not any(k.endswith('_img') for k in filed), str(sorted(filed)))
+    check('confirm: every applicant field is handed over', len(filed) == 13,
+          str(sorted(filed)))
+    check('confirm: Chrome got the emailed link, not the POST url',
+          '/apply/new' in STATE.browser_calls[0].get('link', ''),
+          STATE.browser_calls[0].get('link'))
+    check('confirm: reports RESERVED', _log.saw('RESERVED'), str(_log.lines))
     check('confirm: no debug dumps on the happy path', got['dumps'] == [],
           str(got['dumps']))
 
@@ -1716,46 +1743,6 @@ def test_worker_survives_a_leg_that_raises(port):
             cb.confirm_from_email = saved
 
 
-def test_chrome_files_the_application(port):
-    """Chrome is the only committer: it gets the values, files, and is recorded.
-
-    Chrome itself is stubbed; what is under test is the wiring — which values reach it,
-    and that its receipt lands in reservations.json.
-    """
-    status, detail, got, logged = _confirm(
-        port,
-        setup=lambda: setattr(STATE, 'browser_result', ('confirmed', '10287126')))
-
-    check('fallback: reports confirmed', (status, detail) == ('confirmed', '10287126'),
-          f'{status}: {detail}')
-    check('fallback: the browser was asked exactly once',
-          len(STATE.browser_calls) == 1, str(len(STATE.browser_calls)))
-    check('fallback: reservation recorded from the browser path',
-          got['reservations'] == {TARGET: [f'{NAGU}\t10287126']},
-          str(got['reservations']))
-    check('fallback: says it is filing in the browser',
-          logged.saw('Filing 申込する → 確認 in real Chrome'), str(logged.lines))
-    check('fallback: reports RESERVED', logged.saw('RESERVED'), str(logged.lines))
-
-    call = STATE.browser_calls[0] if STATE.browser_calls else {}
-    values = call.get('values', {})
-    # The DOM already holds the live `_method` and `authenticity_token`; the ones we
-    # scraped belong to a different page load, and writing them over the real values
-    # would break the browser submit for a reason that looks like the bug it works
-    # around.
-    check('fallback: hidden fields are not handed to the browser',
-          '_method' not in values and 'authenticity_token' not in values,
-          str(sorted(values)))
-    check('fallback: every applicant field is handed over', len(values) == 13,
-          str(sorted(values)))
-    check('fallback: values are the mapped ones',
-          values.get('apply[gender]') == 'woman'
-          and values.get('apply[state]') == '13'
-          and values.get('apply[kana_name]') == 'ヤマダ　タロウ', str(values))
-    check('fallback: it is given the emailed link, not the POST url',
-          '/apply/new' in call.get('link', ''), call.get('link'))
-
-
 def test_browser_fallback_rechecks_the_gate_live(port):
     """`allow_commit` must be re-evaluated on 申込内容確認画面, not captured earlier.
 
@@ -1813,23 +1800,23 @@ def test_browser_fallback_failure_still_asks_for_a_human(port):
 
 
 def test_chrome_is_never_driven_twice_at_once():
-    """captcha_solver and browser.submit must not both hold a Chrome.
+    """The Turnstile solve and chrome.submit must not both hold a Chrome.
 
-    `captcha_solver._kill_stray_chrome()` reaps by `pgrep -f remote-debugging-port`,
+    `chrome._kill_stray_chrome()` reaps by `pgrep -f remote-debugging-port`,
     which matches the browser filing an application as readily as the one solving a
     Turnstile. Serialising them is what stops a timed-out solve SIGKILLing a browser
     somewhere between 申込する and 確認, with no way to learn which side of the commit
     it died on.
     """
-    import browser
+    import chrome
 
-    with browser.chrome(timeout=1) as owned:
+    with chrome.hold(timeout=1) as owned:
         check('guard: first caller gets it', owned)
 
         got = []
 
         def second():
-            with browser.chrome(timeout=0.2) as also:
+            with chrome.hold(timeout=0.2) as also:
                 got.append(also)
 
         t = threading.Thread(target=second)
@@ -1844,19 +1831,19 @@ def test_chrome_is_never_driven_twice_at_once():
     # thread with a short wait — a background thread that outlives the assertion
     # goes on to launch a real Chrome once the lock frees.
     import asyncio
-    import captcha_solver as cs
-    saved_wait = browser.DEFAULT_WAIT
+    import chrome as cs
+    saved_wait = chrome.DEFAULT_WAIT
     started = []
     saved_solve = cs._solve_and_cache
     try:
-        browser.DEFAULT_WAIT = 0.2
+        chrome.DEFAULT_WAIT = 0.2
 
         async def _must_not_run():
             started.append(True)
             return 'http://example.invalid/calendar_select?s=x'
 
         cs._solve_and_cache = _must_not_run
-        with browser.chrome(timeout=1) as owned:
+        with chrome.hold(timeout=1) as owned:
             check('guard: held for the solve test', owned)
             out = asyncio.run(cs.get_calendar_url())
         check('guard: a busy Chrome defers the solve', out is None, repr(out))
@@ -1868,7 +1855,7 @@ def test_chrome_is_never_driven_twice_at_once():
         check('guard: solving resumes once Chrome is free', started == [True],
               str(started))
     finally:
-        browser.DEFAULT_WAIT = saved_wait
+        chrome.DEFAULT_WAIT = saved_wait
         cs._solve_and_cache = saved_solve
 
 
@@ -1914,45 +1901,211 @@ def test_name_match_beats_label_match():
           cb._match_rule('apply[mystery]', 'なにか', values) is None)
 
 
-def test_applicant_data_is_redacted_from_dumps():
-    """Dumps must not carry 記号/番号/カナ氏名/生年月日/電話/住所.
+# ── The curl / dump layer ─────────────────────────────────────────
 
-    config.py says these are 資格認証のキー and 'are also added to the debug-dump
-    redaction list'. They were not. No dump on disk carries them only because
-    nothing reached these pages before confirm_booking existed — but 申込内容確認画面
-    echoes every one of them back, and DEBUG_DIR was tracked in a public remote
-    until 2026-08-18.
-    """
-    saved = (bh.APPLICANT, bh.EMAIL)
+def test_user_agent():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'ua.txt')
+        orig, bh.USER_AGENT_CACHE, bh._ua_cache = bh.USER_AGENT_CACHE, path, (None, None)
+        desktop = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/140'
+        try:
+            check('missing file -> fallback', bh._user_agent() == bh.FALLBACK_USER_AGENT)
+            with open(path, 'w') as f:
+                f.write(desktop + '\n')
+            check('reads recorded UA', bh._user_agent() == desktop)
+            os.utime(path, (1, 1))
+            with open(path, 'w') as f:
+                f.write(desktop + '-v2\n')
+            check('picks up a rewrite', bh._user_agent() == desktop + '-v2')
+            os.utime(path, (2, 2))
+            with open(path, 'w') as f:
+                f.write('   \n')
+            check('empty file -> fallback', bh._user_agent() == bh.FALLBACK_USER_AGENT)
+
+            # A raise here would kill a scanner or the URL monitor thread.
+            os.utime(path, (3, 3))
+            with open(path, 'wb') as f:
+                f.write(b'Mozilla/5.0 (Macintosh) \xff\xfe bad bytes\n')
+            try:
+                ua = bh._user_agent()
+                check('undecodable UA file does not raise', isinstance(ua, str), repr(ua))
+            except Exception as e:
+                check('undecodable UA file does not raise', False, repr(e))
+
+            # The UA is spliced into a curl -H flag.
+            os.utime(path, (4, 4))
+            with open(path, 'w') as f:
+                f.write('Mozilla/5.0 (Macintosh) evil\nX-Injected: 1\n')
+            check('newline injection stripped', '\n' not in bh._user_agent(), repr(bh._user_agent()))
+            check('injected header not present',
+                  'X-Injected' not in ''.join(bh.header_args()), str(bh.header_args()))
+
+            # A mobile template would break SKIP_HOTELS name matching.
+            os.utime(path, (5, 5))
+            with open(path, 'w') as f:
+                f.write('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari\n')
+            check('mobile UA rejected -> fallback', bh._user_agent() == bh.FALLBACK_USER_AGENT)
+
+            os.utime(path, (6, 6))
+            with open(path, 'w') as f:
+                f.write('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140\n')
+            check('windows UA accepted', 'Windows NT' in bh._user_agent())
+        finally:
+            bh.USER_AGENT_CACHE, bh._ua_cache = orig, (None, None)
+
+
+def test_merge_headers():
+    orig = bh.BROWSER_HEADERS
     try:
-        bh.APPLICANT = dict(APPLICANT_FIXTURE)
-        bh.EMAIL = 'nobody@example.com'
-        page = (
-            '<form action="/apply/complete" method="post">'
-            '<input type="hidden" name="authenticity_token" value="TOKENTOKENTOKEN" />'
-            '<input type="text" name="apply[sign_no]" value="9999" />'
-            '<input type="text" name="apply[contact_phone]" value="090-1234-5678" />'
-            '<select name="apply[gender]"><option value="woman">女性</option></select>'
-            '<td>記号 9999 番号 123 ヤマダ　タロウ 2000年3月4日 '
-            'テスト区1-2-3 nobody@example.com</td></form>')
-        out = bh._redact_body(page)
-        for label, value in (('記号', '9999'), ('番号', '123'),
-                             ('カナ姓', 'ヤマダ'), ('事業所', 'Test Company'),
-                             ('住所', 'テスト区1-2-3'), ('郵便', '1420051'),
-                             ('email', 'nobody@example.com')):
-            check(f'redact: {label} not in the dump', value not in out, out)
-        check('redact: 生年月日 in the site\'s own rendering is gone',
-              '2000年3月4日' not in out, out)
-        check('redact: a reformatted phone number is caught by field name',
-              '090-1234-5678' not in out, out)
-        # 男/女 and 本人 identify nobody and appear in the form's own <option>
-        # labels whatever we submit; redacting them would shred the markup the
-        # dump exists to show.
-        check('redact: the markup itself survives',
-              'name="apply[gender]"' in out and '女性' in out
-              and 'action="/apply/complete"' in out, out)
+        bh.BROWSER_HEADERS = True
+        m = bh._merge_headers(None)
+        check('defaults include UA', 'User-Agent' in m)
+        check('defaults include Accept', m.get('Accept') == bh.ACCEPT)
+        check('defaults include Accept-Language', m.get('Accept-Language') == bh.ACCEPT_LANGUAGE)
+
+        m = bh._merge_headers({'Accept-Language': 'en-US'})
+        check('per-call overrides default', m['Accept-Language'] == 'en-US')
+        check('override does not duplicate', len([k for k in m if k.lower() == 'accept-language']) == 1, str(m))
+
+        m = bh._merge_headers({'accept-language': 'en-US', 'user-agent': 'custom'})
+        check('override is case-insensitive',
+              len([k for k in m if k.lower() == 'accept-language']) == 1
+              and len([k for k in m if k.lower() == 'user-agent']) == 1, str(m))
+
+        m = bh._merge_headers({'X-CSRF-Token': 'tok', 'Referer': 'r'})
+        check('per-call extras preserved', m['X-CSRF-Token'] == 'tok' and m['Referer'] == 'r')
+
+        # ex() returns None on no match; `X-CSRF-Token: None` would 422.
+        m = bh._merge_headers({'X-CSRF-Token': None})
+        check('None-valued header dropped', 'X-CSRF-Token' not in m, str(m))
+        check('None does not clobber defaults', m.get('Accept') == bh.ACCEPT, str(m))
+
+        caller = {'Accept': 'text/javascript'}
+        bh._merge_headers(caller)
+        check('caller dict not mutated', caller == {'Accept': 'text/javascript'}, str(caller))
+
+        bh.BROWSER_HEADERS = False
+        m = bh._merge_headers({'Accept': 'text/javascript'})
+        check('flag off -> only per-call headers', m == {'Accept': 'text/javascript'}, str(m))
     finally:
-        bh.APPLICANT, bh.EMAIL = saved
+        bh.BROWSER_HEADERS = orig
+
+
+# ── Live curl tests against localhost ───────────────────────────────
+
+def test_curl_against_local_server(port):
+    base = f'http://127.0.0.1:{port}'
+    fd, cookie_file = tempfile.mkstemp(prefix='test_cookies_')
+    os.close(fd)
+    try:
+        STATE.received.clear()
+        status, body, loc = bh.curl(cookie_file, 'GET', base + '/ok')
+        check('GET status', status == 200, str(status))
+        check('GET body', body == '<html>hello</html>', repr(body))
+        check('GET captured headers', 'content-type' in body.headers.lower(), body.headers)
+        sent = STATE.received[-1]
+        check('exactly one User-Agent sent', len(sent.get_all('user-agent') or []) == 1)
+        check('User-Agent is browser-like', 'Mozilla/5.0' in sent['user-agent'], sent['user-agent'])
+        check('Accept-Language sent', sent['accept-language'] == bh.ACCEPT_LANGUAGE)
+        check('navigation Accept is browser-like', sent['accept'] == bh.ACCEPT, sent['accept'])
+        check('exactly one Accept sent', len(sent.get_all('accept') or []) == 1)
+
+        STATE.received.clear()
+        status, body, loc = bh.curl(
+            cookie_file, 'POST', base + '/raw302',
+            {'utf8': '✓', 's': S_TOKEN},
+            {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'text/javascript',
+             'Accept-Language': 'en-US'})
+        check('POST status is 302', status == 302, str(status))
+        check('POST body is empty', body == '', repr(body))
+        check('POST location captured', loc and '/service_category/index' in loc, str(loc))
+        check('POST headers captured', 'x-runtime' in body.headers.lower(), body.headers)
+        check('request recorded on Response', body.request.startswith('POST '), body.request)
+
+        sent = STATE.received[-1]
+        check('AJAX header passed through', sent['x-requested-with'] == 'XMLHttpRequest')
+        check('per-call Accept wins, once', (sent.get_all('accept') or []) == ['text/javascript'],
+              str(sent.get_all('accept')))
+        check('per-call Accept-Language wins, once',
+              (sent.get_all('accept-language') or []) == ['en-US'],
+              str(sent.get_all('accept-language')))
+        check('still exactly one User-Agent', len(sent.get_all('user-agent') or []) == 1)
+
+        # A None-valued header must not reach the wire as the string "None".
+        STATE.received.clear()
+        bh.curl(cookie_file, 'GET', base + '/ok', None, {'X-CSRF-Token': None})
+        sent = STATE.received[-1]
+        check('None header absent from the wire', sent.get('x-csrf-token') is None,
+              str(sent.get('x-csrf-token')))
+
+        STATE.received.clear()
+        _, body, _ = bh.curl(cookie_file, 'GET', f'{base}/ok?s={S_TOKEN}')
+        check('request line records the URL verbatim', f'/ok?s={S_TOKEN}' in body.request,
+              body.request)
+    finally:
+        os.unlink(cookie_file)
+
+
+def test_dump_debug(port, tmpdir):
+    base = f'http://127.0.0.1:{port}'
+    fd, cookie_file = tempfile.mkstemp(prefix='test_cookies_')
+    os.close(fd)
+    orig = bh.DEBUG_DIR
+    bh.DEBUG_DIR = tmpdir
+    try:
+        _, body, _ = bh.curl(cookie_file, 'POST', base + '/raw302', {'s': S_TOKEN})
+        bh._dump_debug('2026-08-22_NAGU 勝浦', 'step3_service_select', 302, body)
+        files = sorted(os.listdir(tmpdir))
+        html = [f for f in files if f.endswith('.html')]
+        hdrs = [f for f in files if f.endswith('.headers.txt')]
+        # The 302 body is 0 bytes — 302 of the 380 real dumps are — so no .html
+        # is written for it. The headers file still records the size.
+        check('no .html for an empty body', html == [], str(files))
+        check('dump wrote a headers file', len(hdrs) == 1, str(files))
+        check('label spaces sanitized', 'NAGU_勝浦' in hdrs[0], hdrs[0])
+
+        with open(os.path.join(tmpdir, hdrs[0])) as f:
+            text = f.read()
+        check('headers file records request', '# request: POST' in text, text)
+        check('headers file records body size', '# body: 0 bytes' in text, text)
+        check('headers file keeps status line', 'HTTP/1.1 302' in text, text)
+        check('headers file keeps x-runtime', 'x-runtime: 0.0123' in text.lower(), text)
+        check('headers file keeps location path', '/service_category/index' in text, text)
+
+        # `via` carries the headers of the 302 that a follow-up GET would erase.
+        _, post_body, loc = bh.curl(cookie_file, 'POST', base + '/raw302', {'s': S_TOKEN})
+        _, get_body, _ = bh.curl(cookie_file, 'GET', base + '/ok')
+        bh._dump_debug('2026-08-22_NAGU 勝浦', 'step8_rules', 200, get_body, post_body)
+        hdrs = sorted(f for f in os.listdir(tmpdir) if 'step8_rules' in f and f.endswith('.txt'))
+        with open(os.path.join(tmpdir, hdrs[0])) as f:
+            text = f.read()
+        check('via section present', '# ── preceding response' in text, text)
+        check('via keeps the 302 status line', 'HTTP/1.1 302' in text, text)
+        check('via keeps the followed body status', 'HTTP/1.1 200' in text, text)
+
+        # Byte count, not character count: content-length is bytes, and the
+        # whole point of the line is comparing the two.
+        jp = bh.Response('日本語テスト', headers='HTTP/1.1 200 OK\r\ncontent-length: 18\r\n')
+        section = bh._headers_section(jp)
+        check('body size is bytes not chars', '# body: 18 bytes' in section, section)
+    finally:
+        bh.DEBUG_DIR = orig
+        os.unlink(cookie_file)
+
+
+def test_curl_unreachable():
+    """A transport failure must return, not raise — the scan loop has no except."""
+    fd, cookie_file = tempfile.mkstemp(prefix='test_cookies_')
+    os.close(fd)
+    try:
+        status, body, loc = bh.curl(cookie_file, 'GET', 'http://127.0.0.1:1/nope')
+        check('unreachable host returns status 0', status == 0, str(status))
+        check('unreachable host returns empty body', body == '', repr(body))
+        check('unreachable body still carries attrs', hasattr(body, 'headers'))
+    except Exception as e:
+        check('unreachable host does not raise', False, repr(e))
+    finally:
+        os.unlink(cookie_file)
 
 
 # ── Runner ──────────────────────────────────────────────────────────
@@ -1978,12 +2131,15 @@ def main_(argv=()):
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith('test_') and callable(f)
              and (not names or any(k in n for k in names))]
+    if not tests:
+        raise SystemExit(f'no tests matched {names}')
     try:
-        for name, fn in tests:
-            if 'port' in fn.__code__.co_varnames[:fn.__code__.co_argcount]:
-                fn(port)
-            else:
-                fn()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Injected by parameter name, so a test declares what it needs.
+            available = {'port': port, 'tmpdir': tmpdir}
+            for name, fn in tests:
+                wanted = fn.__code__.co_varnames[:fn.__code__.co_argcount]
+                fn(**{k: v for k, v in available.items() if k in wanted})
     finally:
         bh._log_handler = None
         srv.shutdown()

@@ -5,7 +5,7 @@ Reads the calendar URL from calendar_url_cache.txt each cycle and never solves a
 CAPTCHA; main.py's URL monitor does that. Ends at the hold — confirm_booking's worker
 turns it into a reservation.
 """
-import subprocess, re, urllib.parse, os, json, tempfile, threading, time, hashlib
+import subprocess, re, urllib.parse, os, json, tempfile, threading, time
 import contextlib
 import html as _html
 import random
@@ -23,7 +23,6 @@ from config import (
     SCAN_REUSE_SESSION, SCAN_REUSE_MAX_FAILURES,
     AUTO_CONFIRM, AUTO_CONFIRM_MIN_DAYS,
     DEBUG_DUMP_INTERVAL, DEBUG_DUMP_KEEP, SKIP_PAST_DATES,
-    APPLICANT,
 )
 
 BASE = 'https://as.its-kenpo.or.jp'
@@ -74,6 +73,25 @@ def _booking_in_flight():
     finally:
         with _active_lock:
             _active_bookings -= 1
+
+
+@contextlib.contextmanager
+def session_jar(prefix):
+    """Yield `(cookie_file, c)` — a private cookie jar and a `curl` bound to it.
+
+    One jar per thread, never shared: all five Rails/ALB cookies must survive a whole
+    chain (docs/SITE.md §4). The jar is handed back too, because a scanner truncates
+    it after a failure to force a fresh session.
+    """
+    fd, path = tempfile.mkstemp(suffix='.txt', prefix=prefix)
+    os.close(fd)
+    try:
+        yield path, lambda m, u, d=None, h=None, retry=True: curl(path, m, u, d, h, retry)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _read_cached_url():
@@ -171,7 +189,7 @@ class Response(str):
         return obj
 
 
-# Chrome's real user agent, recorded by captcha_solver at each solve.
+# Chrome's real user agent, recorded by chrome.py at each solve.
 _ua_lock = threading.Lock()
 _ua_cache = (None, None)  # ((path, mtime), user_agent)
 
@@ -183,7 +201,7 @@ _UA_PLATFORMS = ('Macintosh', 'Windows NT', 'X11')
 def _user_agent():
     """The UA of the Chrome that minted the current session token.
 
-    Re-read when captcha_solver rewrites the file, so it cannot drift out of sync with
+    Re-read when chrome.py rewrites the file, so it cannot drift out of sync with
     its session. Never raises: callers sit outside curl()'s try, so an exception would
     kill a scanner or the URL monitor.
     """
@@ -228,7 +246,6 @@ def _merge_headers(headers):
 
 
 def header_args(headers=None):
-    """curl `-H` flags for the merged header set."""
     args = []
     for k, v in _merge_headers(headers).items():
         args.extend(['-H', f'{k}: {v}'])
@@ -240,7 +257,7 @@ def _is_retryable(status):
     429 is explicit rate limiting, any other 4xx is a rejection. 302 is deliberately
     excluded — it is either flow progress or a dead session, and `_is_session_dead`
     tells those apart."""
-    return status == 0 or status == 429 or status >= 500
+    return status in (0, 429) or status >= 500
 
 
 def curl(cookie_file, method, url, data=None, headers=None, retry=True):
@@ -281,9 +298,7 @@ def curl(cookie_file, method, url, data=None, headers=None, retry=True):
             status = int(st[-1]) if st else 0
         if not _is_retryable(status) or attempt + 1 == attempts:
             break
-        # A zero-delay retry puts both attempts in the same millisecond, against a
-        # server answering 503 because it is being asked too often. `Retry-After`
-        # wins when the server states a figure.
+        # `Retry-After` wins when the server states a figure.
         delay = min(CURL_RETRY_BACKOFF * (2 ** attempt), CURL_RETRY_BACKOFF_MAX)
         delay = max(delay, _retry_after(hdrs))
         log(f"  {Y}curl {method} failed ({status}), retrying in {delay:.1f}s...{X}")
@@ -330,185 +345,24 @@ def _follow(c, s, body, loc):
     return s, body, None
 
 
-# Headers written verbatim to debug dumps. Everything else has its value
-# fingerprinted — a whitelist, so a future session-bearing header cannot leak
-# by default. `debug_responses/` is gitignored, but these files still get read,
-# pasted and shared, so no cookie or token value is ever written to disk.
-# Anything ambiguous fails closed (redacted) rather than open.
-_SAFE_HEADERS = frozenset("""
-    accept-ranges age alt-svc cache-control connection content-encoding
-    content-language content-length content-security-policy content-type date
-    etag expires keep-alive last-modified pragma referrer-policy server status
-    strict-transport-security transfer-encoding upgrade vary via x-cache
-    x-content-type-options x-frame-options x-permitted-cross-domain-policies
-    x-powered-by x-request-id x-runtime x-xss-protection
-    cf-cache-status cf-ray location
-""".split())
-
-# Set-Cookie attributes, kept verbatim. Anything else in the attribute list is
-# a second comma-joined cookie (or a value that broke across a `;`), so it gets
-# fingerprinted instead of passed through.
-_COOKIE_ATTRS = frozenset(
-    'expires max-age domain path samesite priority'.split())
-_COOKIE_FLAGS = frozenset('secure httponly partitioned'.split())
-
-def _fingerprint(value):
-    """Stable, non-reversible stand-in for a secret. The digest is what lets two
-    dumps be compared — same session or a fresh one — without either holding it."""
-    digest = hashlib.sha256(value.encode('utf-8', 'replace')).hexdigest()[:8]
-    return f'[len={len(value)} sha256={digest}]'
-
-
-def _redact_set_cookie(value):
-    """Fingerprint the value, keep the name and the real attributes — `Max-Age=0` or a
-    past `Expires` is how a session *reset* is told from a *re-issue*."""
-    out = []
-    for i, part in enumerate(value.split(';')):
-        name, eq, val = part.partition('=')
-        attr = name.strip().lower()
-        if i == 0:  # the cookie itself
-            out.append(f'{name}={_fingerprint(val)}' if eq else _fingerprint(part))
-        elif eq and attr in _COOKIE_ATTRS:
-            # Only an RFC-1123 Expires may contain a comma; anywhere else it is
-            # the join between two cookies, so the tail is a second name=value.
-            if ',' in val and not (attr == 'expires' and val.strip().lower().endswith('gmt')):
-                head, _, tail = val.partition(',')
-                out.append(f'{name}={head},{_fingerprint(tail)}')
-            else:
-                out.append(part)
-        elif not eq and attr in _COOKIE_FLAGS:
-            out.append(part)
-        elif eq:  # a comma-joined second cookie
-            out.append(f'{name}={_fingerprint(val)}')
-        else:  # a value that broke across the `;`
-            out.append(_fingerprint(part))
-    return ';'.join(out)
-
-
-def _redact_headers(hdrs):
-    """Redact a raw curl `-D` header dump for safe storage."""
-    out = []
-    for raw in (hdrs or '').splitlines():
-        line = raw.rstrip('\r')
-        if not line or line.startswith('HTTP/'):
-            out.append(line)
-            continue
-        if raw[:1] in (' ', '\t'):
-            # An obs-fold continuation — the tail of the header above, which
-            # may well be the tail of a Set-Cookie value.
-            out.append(f'# folded: {_fingerprint(line.strip())}')
-            continue
-        name, sep, value = line.partition(':')
-        if not sep:
-            out.append(f'# unparsed: {_fingerprint(line)}')
-            continue
-        key, value = name.strip().lower(), value.strip()
-        if key == 'set-cookie':
-            out.append(f'{name}: {_redact_set_cookie(value)}')
-        elif key in _SAFE_HEADERS:
-            out.append(f'{name}: {value}')
-        else:
-            out.append(f'{name}: {_fingerprint(value)}')
-    return '\n'.join(out).strip() or '(no headers captured)'
-
-
-# Credentials embedded in response bodies. The dump is kept for its markup —
-# form actions, CSS classes, error text — none of which needs a token's value.
-# Each pattern appears twice: AJAX responses are Rails-UJS JavaScript, in which
-# the markup arrives with backslash-escaped quotes.
-_BODY_SECRETS = (
-    r'name=\\?"authenticity_token\\?"[^>]*?value=\\?"([^"\\]+)',
-    r'csrf-token\\?"[^>]*?content=\\?"([^"\\]+)',
-    r"coma_search\(\\?'([^'\\]+)",
-    r'[?&](?:amp;)?s=([^"\'&<>\s\\]{13,})',
-)
-
-
-def _redact_body(body):
-    """Fingerprint credentials embedded in a dumped response body."""
-    def replace(m):
-        # Splice by span, not str.replace: a short value can also occur in the
-        # surrounding markup, and the dump exists to show those tags.
-        start, end = m.start(1) - m.start(0), m.end(1) - m.start(0)
-        whole = m.group(0)
-        return whole[:start] + _fingerprint(m.group(1)) + whole[end:]
-    for pat in _BODY_SECRETS:
-        body = re.sub(pat, replace, body)
-    return _redact_applicant(body)
-
-
-# Inputs whose *name* marks them as carrying 資格認証のキー. Matched on the name, so a
-# value the site reformats is still caught where exact-value matching would miss.
-_PII_FIELD_NAME = re.compile(
-    r'sign_no|kigou|insured_no|bangou|kana|birth|\[year\]|\[month\]|\[day\]'
-    r'|\btel\b|phone|denwa|postal|\bzip\b|post_?code|address|juu?sho'
-    r'|office_name|jigyou?sho|\bmail\b', re.I)
-
-_PII_INPUT = re.compile(
-    r'(?is)<input\b(?=[^>]*\bname=(["\'])(?P<name>[^"\']*)\1)'
-    r'[^>]*?\bvalue=(["\'])(?P<value>[^"\']*)\3[^>]*>')
-
-
-def _redact_applicant(body):
-    """Strip the applicant's 資格認証のキー out of a body before it is stored —
-    申込内容確認画面 echoes every one of them back.
-
-    Two passes, because neither alone suffices: every `value="…"` on an input whose
-    *name* looks like an identity field, plus each configured value found literally in
-    the prose. `sex`/`zokugara` are left alone — 男/女 and 本人 identify nobody and
-    appear in the form's own `<option>` labels regardless. Same for values under 3.
-    """
-    def by_name(m):
-        if not _PII_FIELD_NAME.search(m.group('name')):
-            return m.group(0)
-        value = m.group('value')
-        if not value:
-            return m.group(0)
-        start = m.start('value') - m.start(0)
-        end = m.end('value') - m.start(0)
-        whole = m.group(0)
-        return whole[:start] + _fingerprint(value) + whole[end:]
-
-    body = _PII_INPUT.sub(by_name, body)
-
-    values = {v for k, v in (APPLICANT or {}).items()
-              if k not in ('sex', 'zokugara') and isinstance(v, str) and len(v) >= 3}
-    values.add(EMAIL)
-    values.update(_birth_renderings((APPLICANT or {}).get('birth')))
-    # Longest first, so redacting 記号 does not leave a fragment of 番号 behind.
-    for value in sorted((v for v in values if v), key=len, reverse=True):
-        body = body.replace(value, _fingerprint(value))
-    return body
-
-
-def _birth_renderings(birth):
-    """`2000-03-04` as the site writes it back: 申込内容確認画面 echoes 生年月日 as prose,
-    in neither the three-select form it was submitted in nor the format `.env` stores,
-    so neither other pass finds it. Padded and unpadded, since the rendering follows
-    no rule we control."""
-    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', birth or ''):
-        return set()
-    y, m, d = birth[:4], birth[5:7], birth[8:10]
-    mi, di = str(int(m)), str(int(d))
-    return {f'{y}年{m}月{d}日', f'{y}年{mi}月{di}日',
-            f'{y}/{m}/{d}', f'{y}/{mi}/{di}', f'{y}.{m}.{d}'}
-
-
 def _headers_section(resp):
-    """The `# request` / `# body` preamble plus redacted headers for a response."""
+    """The `# request` / `# body` preamble plus the response's headers."""
     return (f'# request: {getattr(resp, "request", "") or "(unknown)"}\n'
             f'# body: {len(str(resp).encode("utf-8", "replace"))} bytes\n\n'
-            f'{_redact_headers(getattr(resp, "headers", ""))}\n')
+            f'{(getattr(resp, "headers", "") or "").strip() or "(no headers captured)"}\n')
 
 
 def _dump_debug(label, step, status, body, via=None, throttle=True):
-    """Save an unexpected HTTP response, redacted, for later debugging.
+    """Save an unexpected HTTP response for later debugging.
 
     The headers are the diagnostic payload: whether a 302 carries `x-runtime` (Rails
     made it) or not (Apache/ALB/WAF did), whether `content-length` is 0 by intent or
     truncated, whether `set-cookie` re-issued the session. `via` is the response
-    *before* a redirect was followed. Throttled and pruned, so a failure repeating
-    every cycle cannot fill the disk.
+    *before* a redirect was followed.
+
+    **Dumps are written verbatim**, so they hold live session cookies, `s=` tokens and
+    — on 申込内容確認画面 — the applicant's 記号/番号/カナ氏名/生年月日. `debug_responses/`
+    is gitignored; treat it as credential-bearing and do not paste one anywhere.
     """
     try:
         if throttle and not _dump_allowed(label, step):
@@ -520,12 +374,11 @@ def _dump_debug(label, step, status, body, via=None, throttle=True):
         # in the same second; without the counter one silently overwrites the other.
         stem = os.path.join(
             DEBUG_DIR, f'{ts}_{_dump_seq()}_{safe_label}_{step}_status{status}')
-        redacted = _redact_body(str(body))
         # A 0-byte body is the common case for these failures and its `.html` is
         # pure noise; the headers file records the size either way.
-        if redacted:
+        if str(body):
             with open(stem + '.html', 'w', encoding='utf-8') as f:
-                f.write(redacted)
+                f.write(str(body))
         with open(stem + '.headers.txt', 'w', encoding='utf-8') as f:
             f.write(_headers_section(body))
             if via is not None:
@@ -622,9 +475,7 @@ def is_skipped(name):
     return _norm_hotel(name) in _SKIP_NORM
 
 
-
 def _date_css_class(body, date):
-    """Extract the CSS class for a date cell from escaped JS response."""
     return ex(body, rf'class=\\"([^"\\]*)\\\"[^>]*data-join-time=\\"{date}\\"') or ''
 
 
@@ -657,6 +508,12 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     """Book a single hotel for a date. Steps 3-9. Returns True on success."""
     label = f"{target_date}_{hotel_name}"
 
+    def fail(msg, step, s, body, via=None):
+        """Report a step that could not proceed, dump the response, give up."""
+        log(f"{tag}   {R}{msg}{X}")
+        _dump_debug(label, step, s, body, via)
+        return False
+
     # STEP 3: Select hotel
     log(f"{tag} {C}Booking: {hotel_name}{X}")
     s, body, _ = c('POST', BASE + '/calendar_apply/apply_service_select',
@@ -664,9 +521,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'join_time': target_date, 's': s_param, 'service_group_id': hotel_id})
     services = re.findall(r'data-apply-service-id="(\d+)".*?>(.*?)</a>', body)
     if not services:
-        log(f"{tag}   {R}No services for {hotel_name}{X}")
-        _dump_debug(label, 'step3_service_select', s, body)
-        return False
+        return fail(f'No services for {hotel_name}', 'step3_service_select', s, body)
     auth = ex(body, _AUTH_RE)
 
     # STEP 4: Select service (302)
@@ -675,9 +530,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         {'utf8': '\u2713', 'authenticity_token': auth,
          'join_time': target_date, 's': s_param, 'apply_service_id': service_id})
     if not loc or 'empty_new' not in loc:
-        log(f"{tag}   {R}Step 4 redirect failed{X}")
-        _dump_debug(label, 'step4_check_coma', s, body)
-        return False
+        return fail('Step 4 redirect failed', 'step4_check_coma', s, body)
 
     # STEP 5: Load booking form
     referer_url = loc
@@ -711,15 +564,11 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
          'apply[stay_persons]': NUM_GUESTS, 'apply[hope_rooms]': '1'},
         _ajax(csrf, referer_url))
     if 'service_category' in body:
-        log(f"{tag}   {R}Session expired at room search{X}")
-        _dump_debug(label, 'step6_room_search', s, body)
-        return False
+        return fail('Session expired at room search', 'step6_room_search', s, body)
     rooms = re.findall(r'name=\\"apply\[coma\[(\d+)\]\]\\".*?value=\\"(\d+)\\"', body)
     guid = ex(body, r'apply_session_guid.*?value=\\"([^"\\]+)\\"')
     if not rooms:
-        log(f"{tag}   {R}No rooms available{X}")
-        _dump_debug(label, 'step6_no_rooms', s, body)
-        return False
+        return fail('No rooms available', 'step6_no_rooms', s, body)
     log(f"{tag}   {C}{len(rooms)} rooms -> selecting room{X}")
 
     # STEP 7: the hold, and the point of no return — nothing here can release one.
@@ -736,18 +585,14 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
 
     # STEP 8: Agree to rules
     if '\u540c\u610f' not in body:
-        log(f"{tag}   {R}Not on rules page{X}")
-        _dump_debug(label, 'step8_rules', s, body, via)
-        return False
+        return fail('Not on rules page', 'step8_rules', s, body, via)
     auth = ex(body, _AUTH_RE)
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
     # The hidden `s` is mandatory even though the action carries no `s` query param;
     # omit it and the server drops the session. Send no `commit`: 同意する is a button.
     s_rule = ex(body, r'name="s"[^>]*value="([^"]*)"')
     if not form_act:
-        log(f"{tag}   {R}Missing rules form action{X}")
-        _dump_debug(label, 'step8_rules_form', s, body)
-        return False
+        return fail('Missing rules form action', 'step8_rules_form', s, body)
     post_data = {'utf8': '\u2713', 'authenticity_token': auth}
     if s_rule:
         post_data['s'] = s_rule
@@ -756,16 +601,12 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
 
     # STEP 9: Submit email
     if 'email' not in body.lower():
-        log(f"{tag}   {R}Not on email page{X}")
-        _dump_debug(label, 'step9_email_page', s, body, via)
-        return False
+        return fail('Not on email page', 'step9_email_page', s, body, via)
     auth = ex(body, _AUTH_RE)
     form_act = ex(body, r'<form[^>]*action="([^"]*)"[^>]*method="post"')
     token_field = ex(body, r'name="__token__"[^>]*value="([^"]*)"')
     if not form_act:
-        log(f"{tag}   {R}Missing email form action{X}")
-        _dump_debug(label, 'step9_email_form', s, body)
-        return False
+        return fail('Missing email form action', 'step9_email_form', s, body)
     post_data = {
         'utf8': '\u2713', 'authenticity_token': auth,
         'email': EMAIL, 'commit': '\u9001\u4fe1',
@@ -791,9 +632,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         _queue_confirmation(target_date, hotel_name, tag)
         return True
 
-    log(f"{tag}   {R}Final page not send_complete{X}")
-    _dump_debug(label, 'step9_final', s, body, via)
-    return False
+    return fail('Final page not send_complete', 'step9_final', s, body, via)
 
 
 def _queue_confirmation(target_date, hotel_name, tag):
@@ -871,9 +710,9 @@ def _open_calendar_session(c, cookie_file, url, target_date, tag, label,
 
     target_ym = f"{target_date[:4]}-{target_date[5:7]}-01"
     s_nav, body_nav, loc_nav = _calendar_select(c, csrf, s_param, target_ym, url)
-    # Gated on the response *shape*, not the status \u2014 see _month_rendered. Gating on
-    # the status alone reported a null-session 200 as 'unavailable', i.e. as the date
-    # being full, which is the one answer that suppresses the retry this needs.
+    # Gated on the response *shape*, not the status \u2014 see _month_rendered. A
+    # null-session 200 read as 'unavailable' is the one answer that suppresses the
+    # retry this needs.
     if not _month_rendered(s_nav, body_nav):
         if s_nav == 200 or _is_retryable(s_nav) or _is_session_dead(s_nav, loc_nav):
             log(f"{tag} {Y}month nav {s_nav} with no calendar, will retry{X}")
@@ -955,13 +794,7 @@ def _book_date_once(target_date, label, tag, booked, attempted):
     if not url:
         return 'failed'
 
-    cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_{target_date}_')
-    os.close(cookie_fd)
-
-    def c(method, u, data=None, headers=None, retry=True):
-        return curl(cookie_file, method, u, data, headers, retry)
-
-    try:
+    with session_jar(f'cookies_{target_date}_') as (cookie_file, c):
         outcome, auth, s_param = _open_calendar_session(
             c, cookie_file, url, target_date, tag, label)
         if outcome != 'ok':
@@ -975,8 +808,6 @@ def _book_date_once(target_date, label, tag, booked, attempted):
         log(f"{tag} {C}Found {len(all_hotels)} hotels: "
             f"{', '.join(n for _, n in all_hotels)}{X}")
 
-        # Normalized on both sides: comparing raw names let one full-width space in
-        # holds.json defeat the already-booked filter, i.e. a duplicate application.
         seen = {_norm_hotel(n) for n in get_booked_hotels(target_date)}
         seen |= {_norm_hotel(n) for n in attempted}
         hotels, filtered = [], []
@@ -1018,13 +849,6 @@ def _book_date_once(target_date, label, tag, booked, attempted):
                     f"{len(booked)} ({', '.join(booked)}){X}")
 
         return 'done'
-
-    finally:
-        try:
-            os.unlink(cookie_file)
-        except OSError:
-            pass
-
 
 
 def _future_dates(target_dates):
@@ -1101,66 +925,55 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     """
     tag = f"[{label}]"
     month_ym = f"{month_str}-01"
+    # An Event nobody sets makes `.wait(n)` behave exactly like `time.sleep(n)`, so
+    # production needs no second code path to wake early on a stop request.
+    stop_event = stop_event or threading.Event()
 
-    def stopped():
-        return stop_event is not None and stop_event.is_set()
+    with session_jar(f'cookies_scan_{month_str}_') as (cookie_file, c):
 
-    def nap(seconds):
-        """Sleep, but wake immediately on a stop request."""
-        if stop_event is not None:
-            stop_event.wait(seconds)
-        else:
-            time.sleep(seconds)
+        def mint_tokens(url, attempt):
+            """GET the calendar for a fresh (csrf, s) pair. None if the GET failed.
 
-    cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix=f'cookies_scan_{month_str}_')
-    os.close(cookie_fd)
+            The request session reuse exists to avoid, and the most failure-prone in
+            the program: most dumps are a 503 here, and a 503 is how the 24-hour ban
+            presents.
+            """
+            st, bd, lc = c('GET', url)
+            if st != 200:
+                # Only after a failure: truncating every cycle asked for a brand-new
+                # session ~4,300 times a day, discarding a working one each time.
+                if _is_session_dead(st, lc) or _is_retryable(st):
+                    open(cookie_file, 'w').close()
+                log(f"{tag} {Y}[{attempt}] URL returned {st}, waiting...{X}")
+                return None
+            return ex(bd, _CSRF_RE), ex(bd, _S_RE)
 
-    def c(method, u, data=None, headers=None, retry=True):
-        return curl(cookie_file, method, u, data, headers, retry)
+        def nav_month(tokens, url):
+            csrf, s_param = tokens
+            return _calendar_select(c, csrf, s_param, month_ym, url)
 
-    def mint_tokens(url, attempt):
-        """GET the calendar for a fresh (csrf, s) pair. None if the GET failed.
-
-        The request session reuse exists to avoid, and the most failure-prone in the
-        program: most dumps are a 503 here, and a 503 is how the 24-hour ban presents.
-        """
-        st, bd, lc = c('GET', url)
-        if st != 200:
-            # Only after a failure: truncating every cycle asked for a brand-new
-            # session ~4,300 times a day, discarding a working one each time.
-            if _is_session_dead(st, lc) or _is_retryable(st):
-                open(cookie_file, 'w').close()
-            log(f"{tag} {Y}[{attempt}] URL returned {st}, waiting...{X}")
-            return None
-        return ex(bd, _CSRF_RE), ex(bd, _S_RE)
-
-    def nav_month(tokens, url):
-        csrf, s_param = tokens
-        return _calendar_select(c, csrf, s_param, month_ym, url)
-
-    try:
         attempt = 0
         failures = 0          # consecutive failed cycles, drives the backoff
         tokens = None         # cached (csrf, s_param) for the live session
         tokens_url = None     # the URL they were minted from
         reuse = SCAN_REUSE_SESSION
         reuse_failures = 0    # consecutive rejections of a cached pair
-        while not stopped():
+        while not stop_event.is_set():
             attempt += 1
             if attempt > 1:
                 # Back off while the site is unhappy, and jitter always: the
                 # per-month scanners otherwise settle into lockstep and arrive
                 # as a burst.
                 delay = min(RETRY_DELAY * (2 ** min(failures, 8)), SCAN_BACKOFF_MAX)
-                nap(delay + random.uniform(0, SCAN_JITTER))
-                if stopped():
+                stop_event.wait(delay + random.uniform(0, SCAN_JITTER))
+                if stop_event.is_set():
                     break
 
             try:
                 dates = _future_dates(target_dates)
                 if not dates:
                     log(f"{tag} {Y}all target dates are in the past, idle{X}")
-                    nap(SCAN_BACKOFF_MAX)
+                    stop_event.wait(SCAN_BACKOFF_MAX)
                     continue
 
                 url = _read_cached_url()
@@ -1248,9 +1061,3 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
             except Exception as e:
                 failures += 1
                 log(f"{tag} {R}[{attempt}] scan cycle error: {e!r}{X}")
-
-    finally:
-        try:
-            os.unlink(cookie_file)
-        except OSError:
-            pass

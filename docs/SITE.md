@@ -10,7 +10,7 @@ Published rules read 2026-08-19 from [申し込みから利用まで](https://ww
 
 Verified live end to end on 2026-08-19: ブルーベリーヒル勝浦, 2026-09-01, 申込受付番号 **10287126**, 予約確定.
 
-`test_booking_flow.py`'s `FakeITS` replays every page below and is checked on every run.
+`test_its.py`'s `FakeITS` replays every page below and is checked on every run.
 **Where this doc and the fake disagree, the fake is right.**
 
 ## 1. Published rules

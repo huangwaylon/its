@@ -1,14 +1,12 @@
 # Project-scoped unsandboxed commands for the ITS booker.
-# test_http_layer.py binds a throwaway localhost HTTP server, which the
-# sandbox denies (PermissionError on socket.bind). It makes no outbound
-# network requests.
-python test_http_layer.py,contains_match,Local-only HTTP layer tests; needs to bind 127.0.0.1
-python test_booking_flow.py,contains_match,Local-only fake-ITS end-to-end tests; needs to bind 127.0.0.1
+# test_its.py binds a throwaway localhost HTTP server, which the sandbox denies
+# (PermissionError on socket.bind). It makes no outbound network requests.
+python test_its.py,contains_match,Local-only fake-ITS tests; needs to bind 127.0.0.1
 
 # The live booker. Two things the sandbox denies and the domain allowlist cannot
 # reach: confirm_booking opens a raw TLS socket to imap.gmail.com:993 (the proxy
 # only covers HTTP, so this fails with PermissionError on connect), and
-# captcha_solver launches real Chrome, which aborts when it cannot bind its
+# chrome.py launches real Chrome, which aborts when it cannot bind its
 # ProcessSingleton socket. Both are inside the process tree of these commands.
 uv run main.py,contains_match,Live ITS booker — needs IMAP :993 and Chrome CDP sockets
 python /tmp/its_mail_probe.py,contains_match,Read-only IMAP probe of the ITS confirmation mail
@@ -23,4 +21,4 @@ python /tmp/its_header_probe.py,contains_match,Bisect which browser header /appl
 python /tmp/its_onehop_probe.py,contains_match,Send the form GET and 申込する POST on one curl connection
 python /tmp/its_fetch_probe.py,contains_match,POST 申込する from inside Chrome with fetch() to isolate client vs request
 python /tmp/its_finish_probe.py,contains_match,Complete the authorised live reservation in real Chrome
-python check_env.py,contains_match,Environment check — its IMAP reachability test opens imap.gmail.com:993
+uv run main.py --check,contains_match,Environment check — its IMAP reachability test opens imap.gmail.com:993

@@ -33,24 +33,24 @@ govern the design:
 ## Setup & Running
 
 ```bash
-uv run main.py                       # normal operation: solve CAPTCHA, then book forever
-.venv/bin/python captcha_solver.py   # solve only; writes calendar_url_cache.txt
-.venv/bin/python check_env.py        # preflight: .env, IMAP, the confirmation gate
-.venv/bin/python test_http_layer.py      # curl + dump layer
-.venv/bin/python test_booking_flow.py    # booking flow end to end
+uv run main.py                  # normal operation: solve CAPTCHA, then book forever
+uv run main.py --check          # preflight: .env, IMAP, the confirmation gate
+.venv/bin/python chrome.py      # solve only; writes calendar_url_cache.txt
+.venv/bin/python test_its.py    # the whole suite (substring selects, -v for logs)
 ```
 
-`book_hotels.py` is stdlib + curl; `captcha_solver.py` and `browser.py` need
-`pydoll-python`, the only dependency. Two runtime requirements the packaging cannot express:
-the `curl` binary and `pgrep`. No linter or formatter, and deliberately no TUI.
+Everything but `chrome.py` is stdlib + curl; `chrome.py` needs `pydoll-python`, the only
+dependency, imported inside the functions that use it so the rest of the program runs
+without it. Two runtime requirements the packaging cannot express: the `curl` binary and
+`pgrep`. No linter or formatter, and deliberately no TUI.
 
 ## Architecture
 
-`config.py` (settings) · `main.py` (orchestration) · `book_hotels.py` (scan + hold) ·
-`captcha_solver.py` (Turnstile) · `confirm_booking.py` (the hold queue + the emailed leg) ·
-`browser.py` (the one Chrome, and the leg that needs it) · `check_env.py` (preflight).
-`book_hotels.log()` is the one line formatter (`main.py` imports it as `url_log`);
-`captcha_solver.log()` is independent.
+Six files. `config.py` (settings) · `main.py` (orchestration, the URL monitor, and
+`--check`) · `book_hotels.py` (the curl layer, scan + hold) · `confirm_booking.py` (the hold
+queue + the emailed leg) · `chrome.py` (the one Chrome: Turnstile *and* the filing leg) ·
+`test_its.py`. `book_hotels.log()` is the one line formatter for the whole program
+(`main.py` imports it as `url_log`).
 
 Booking and confirming are **decoupled**: a booking thread takes the hold, records it,
 enqueues it and returns; one confirm worker drains that queue serially. Not tidiness — two
@@ -110,10 +110,10 @@ three recorded bans hit the scanner's `calendar_get`, so the risk lives in the *
 cadence, not in booking retries. Budget freed by `SCAN_REUSE_SESSION` is banked, not
 respent.
 
-**Debug dump redaction is a whitelist** over headers and bodies, not URLs. Anything unrecognised
-becomes `[len=N sha256=xxxxxxxx]`, so a future session-bearing header cannot leak by default. It
-covers `config.APPLICANT`, since 申込内容確認画面 echoes those back — insurance identity, a separate
-concern from the session token.
+**Debug dumps are written verbatim** — there is no redaction layer. A dump therefore holds live
+session cookies, `s=` tokens, and, for anything on the emailed leg, the applicant's
+記号/番号/カナ氏名/生年月日 (申込内容確認画面 echoes them all back). `debug_responses/` is gitignored;
+treat a dump as credential-bearing and do not paste one anywhere.
 
 ### The other modules — their docstrings are the reference
 
@@ -125,14 +125,14 @@ concern from the session token.
   off to Chrome, and again by Chrome on the 申込内容確認画面; **`unmapped` non-empty must never
   submit**; every non-confirmed outcome logs `HUMAN NEEDED`. IMAP timeouts go to
   `IMAP4_SSL(...)`, never `socket.setdefaulttimeout()`.
-- **`browser.py`** owns the one Chrome and is **the only thing that can file an application**.
-  Serialised because `captcha_solver._kill_stray_chrome()` reaps by
+- **`chrome.py`** owns the one Chrome and both jobs that need it. `submit()` is **the only
+  thing that can file an application**; *every* field `:missing` there means a consumed link,
+  not a fill bug. The solve runs under a hard `CAPTCHA_TIMEOUT` (it occupies the one thread
+  that can re-mint a session) and **never caches a URL without `calendar_select`** — a
+  non-calendar URL answers 200 too, so caching one poisons the cache with a healthy-looking
+  session. The two are serialised by `hold()` because `_kill_stray_chrome()` reaps by
   `pgrep -f remote-debugging-port`, matching a filing browser as readily as a solving one — a
-  timed-out solve would SIGKILL it between 申込する and 確認. *Every* field `:missing` means a
-  consumed link, not a fill bug.
-- **`captcha_solver.py`** runs under a hard `CAPTCHA_TIMEOUT` (it occupies the one thread that can
-  re-mint a session) and **never caches a URL without `calendar_select`** — a non-calendar URL
-  answers 200 too, so caching one poisons the cache with a healthy-looking session.
+  timed-out solve would otherwise SIGKILL it between 申込する and 確認.
 
 **The `s=` token** decodes to `service_category_id=1&verify_expires=<10 digits>`, unsigned. URLs
 are logged and dumped **verbatim** — both files are gitignored and the token expires anyway.
@@ -142,7 +142,7 @@ are logged and dumped **verbatim** — both files are gitignored and the token e
 1 URL monitor, 1 confirm worker, 1 watchdog, N scanners (one per month) — all daemons — plus
 temporary booking threads from each scanner's `ThreadPoolExecutor`, one per available date.
 Loop bodies are guarded internally. **Chrome is single-threaded across the process** by
-`browser.chrome()`; with one confirm worker only ever one emailed leg is in flight, so the
+`chrome.hold()`; with one confirm worker only ever one emailed leg is in flight, so the
 only contention left is the CAPTCHA solve. Shared state: `calendar_url_cache.txt` (written in
 the URL monitor thread, read everywhere — POSIX atomicity for a small file, and readers treat
 stale or empty data as "no URL"); `holds.json` and `reservations.json` (only via
@@ -162,26 +162,28 @@ cancellation liability.
 
 ## Tests
 
-Both suites are stdlib-only against a throwaway localhost server; neither touches ITS. Pass a
-substring for a subset, `-v` for the flow's logging: `test_booking_flow.py -v test_503`. They
-bind `127.0.0.1`, which the Apple Claude Code sandbox denies, so
-`.claude/apple/tool_allowlist.csv` allowlists both by name. **Run each in its own Bash call** —
-the allowlist matches the whole command string, so chaining one behind `&&` falls through to the
-sandbox. Both clear proxy settings for loopback, since a local proxy would rewrite responses.
+`test_its.py` is stdlib-only against a throwaway localhost server and never touches ITS. Pass a
+substring for a subset, `-v` for the flow's logging: `test_its.py -v test_503`. It binds
+`127.0.0.1`, which the Apple Claude Code sandbox denies, so `.claude/apple/tool_allowlist.csv`
+allowlists it by name — the allowlist matches the whole command string, so do not chain it
+behind `&&`. It clears proxy settings for loopback, since a local proxy would rewrite responses.
 
-- **`test_http_layer.py`** — header merging, UA injection, mobile-UA rejection, dump redaction.
-- **`test_booking_flow.py`** — the part that wins or loses a room. `FakeITS` replays the real
-  markup **including the escaped quotes AJAX responses arrive in**, because the extractors are
-  markup-exact; `STATE.fail_once` injects the production failures; the calendar serves an
-  `empty` date *and* an `a_little` one so an `empty`-only filter fails loudly; and
-  `/apply/confirm` is a **tripwire** — anything reaching it means curl regressed into
-  committing.
-- **Tests are discovered, not hand-listed.** One needing the fake server declares a `port`
-  parameter (`test_http_layer.py` injects `srv`/`tmpdir` likewise).
+- **The part that wins or loses a room.** `FakeITS` replays the real markup **including the
+  escaped quotes AJAX responses arrive in**, because the extractors are markup-exact;
+  `STATE.fail_once` injects the production failures; the calendar serves an `empty` date *and*
+  an `a_little` one so an `empty`-only filter fails loudly; and `/apply/confirm` is a
+  **tripwire** — anything reaching it means curl regressed into committing.
+- **The curl layer underneath it** — header merging, UA injection, mobile-UA rejection, and the
+  debug dumps — runs against the same fake, on its `/ok` and `/raw302` routes.
+- **Tests are discovered, not hand-listed**, and arguments are injected by parameter name: a
+  test declares `port` and/or `tmpdir` to receive them. An empty selection is an error, so a
+  typo'd filter cannot read as green.
+- **`Env` restores by reflection**, snapshotting every module-level setting rather than a
+  hand-listed tuple, so a new knob in `config.py` cannot leak across tests.
 - **The emailed leg must stay stubbed and the Chrome fallback never launched.** `Env` sets
   `AUTO_CONFIRM=False`, injects `_mail_source`/`_browser_submit` and clears `_pending` and
   `_claimed`; nothing may open a socket to `imap.gmail.com`. Drive the worker with
-  `drain_once()`, never `worker()` — the loop would outlive the assertion. The `chrome()`
+  `drain_once()`, never `worker()` — the loop would outlive the assertion. The `hold()`
   test runs in the calling thread for the same reason.
 
 ## Configuration (`config.py`)

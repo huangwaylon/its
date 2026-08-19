@@ -22,9 +22,7 @@ Three things guard the commit:
 import email
 import email.utils
 import imaplib
-import os
 import re
-import tempfile
 import threading
 import time
 import urllib.parse
@@ -44,14 +42,20 @@ _mail_source = None
 
 # ── the emailed link ─────────────────────────────────────────────────
 
-def message_text(raw_bytes):
-    """All text of a message, charset-decoded. ITS mail may be ISO-2022-JP or UTF-8,
-    base64 or quoted-printable, plain or multipart; every part is concatenated because
-    the URL only has to appear in one."""
+def parse_message(raw_bytes):
+    """`(text, arrival_epoch)` for one message. `arrival_epoch` is None if unreadable.
+
+    All text parts are concatenated, charset-decoded: ITS mail may be ISO-2022-JP or
+    UTF-8, base64 or quoted-printable, plain or multipart, and the URL only has to
+    appear in one of them. The Date is read in the same pass — `parsedate_to_datetime`
+    *raises* on a malformed header, and one bad Date on an unrelated message in the
+    mailbox used to silently cost a booking.
+    """
     try:
         msg = email.message_from_bytes(raw_bytes)
     except Exception:
-        return raw_bytes.decode('utf-8', 'replace')
+        return raw_bytes.decode('utf-8', 'replace'), None
+
     chunks = []
     for part in msg.walk():
         if part.get_content_maintype() != 'text':
@@ -64,7 +68,15 @@ def message_text(raw_bytes):
             chunks.append(payload.decode(charset, 'replace'))
         except LookupError:
             chunks.append(payload.decode('utf-8', 'replace'))
-    return '\n'.join(chunks)
+
+    try:
+        dt = email.utils.parsedate_to_datetime(msg.get('Date') or '')
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        epoch = dt.timestamp()
+    except Exception:
+        epoch = None
+    return '\n'.join(chunks), epoch
 
 
 def _url_re():
@@ -91,7 +103,7 @@ def _imap_messages(since_epoch):
     """Raw bytes of candidate messages from the site, newest last."""
     if not (IMAP_USER and IMAP_APP_PASSWORD):
         log(f"  {R}No IMAP credentials — cannot read the confirmation mail. "
-            f"See check_env.py{X}")
+            f"See `uv run main.py --check`{X}")
         return []
     since = datetime.fromtimestamp(since_epoch, timezone.utc).strftime('%d-%b-%Y')
     out = []
@@ -120,20 +132,6 @@ def _imap_messages(since_epoch):
     return out
 
 
-def _message_epoch(raw_bytes):
-    """The Date header as an epoch, or None. `parsedate_to_datetime` *raises* on a
-    malformed header, and one bad Date on any unrelated message in the mailbox used to
-    silently cost a booking."""
-    try:
-        msg = email.message_from_bytes(raw_bytes)
-        dt = email.utils.parsedate_to_datetime(msg.get('Date') or '')
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
-
-
 def _fetch_links(since_epoch):
     """`[(link, arrival_epoch)]` for every confirmation mail since `since_epoch`.
 
@@ -142,10 +140,11 @@ def _fetch_links(since_epoch):
     """
     out = []
     for raw in (_mail_source or _imap_messages)(since_epoch):
-        text = raw if isinstance(raw, str) else message_text(raw)
+        # A str is an injected test message: pre-decoded, and with no Date header.
+        text, epoch = (raw, None) if isinstance(raw, str) else parse_message(raw)
         link = extract_apply_link(text)
         if link:
-            out.append((link, None if isinstance(raw, str) else _message_epoch(raw)))
+            out.append((link, epoch))
     return out
 
 
@@ -428,17 +427,10 @@ def map_fields(fields, email_address=None):
 
 # ── committing the application ───────────────────────────────────────
 
-def _save_reservation(target_date, hotel_name, receipt):
-    """Record a confirmed reservation. Separate from holds.json: an entry here
-    means a real cancellation liability exists."""
-    bh.save_booking(target_date, f'{hotel_name}\t{receipt}'.strip(),
-                    path=RESERVATIONS_FILE)
-
-
 _RECEIPT_RE = re.compile(r'申込受付番号[^0-9A-Za-z]{0,12}([0-9A-Za-z-]{4,})')
 
 # Replaceable so the tests can exercise the commit without launching Chrome, the same
-# way `_mail_source` stands in for a mailbox. Signature matches `browser.submit`.
+# way `_mail_source` stands in for a mailbox. Signature matches `chrome.submit`.
 _browser_submit = None
 
 
@@ -456,14 +448,14 @@ def _commit(link, post, target_date, hotel_name, tag):
     submit = _browser_submit
     if submit is None:
         try:
-            import browser
+            import chrome
         except Exception as e:
             # pydoll missing or broken. The hold and the mail still stand, so this is a
             # degraded outcome, not a crash.
             log(f"{tag}   {R}Cannot load browser ({e!r}); nothing can file this "
                 f"application{X}")
             return 'failed', 'no browser available'
-        submit = browser.submit
+        submit = chrome.submit
 
     values = {k: v for k, v in post.items()
               if k not in ('_method', 'authenticity_token')}
@@ -477,7 +469,10 @@ def _commit(link, post, target_date, hotel_name, tag):
     if status == 'confirmed':
         log(f"{tag}   {B}{G}RESERVED: {hotel_name} on {target_date}"
             + (f' — 申込受付番号 {detail}' if detail else '') + X)
-        _save_reservation(target_date, hotel_name, detail)
+        # reservations.json, not holds.json: an entry here means a real
+        # cancellation liability exists.
+        bh.save_booking(target_date, f'{hotel_name}\t{detail}'.strip(),
+                        path=RESERVATIONS_FILE)
     return status, detail
 
 
@@ -488,8 +483,7 @@ def parse_receipt(body):
     number, so a raw-markup regex works by luck; one tag between them and it captures
     `strong`, writing a made-up number into the only record a reservation exists.
     """
-    text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', body or ''))
-    m = _RECEIPT_RE.search(text)
+    m = _RECEIPT_RE.search(_strip_tags(body))
     return m.group(1) if m else ''
 
 
@@ -502,19 +496,8 @@ def confirm_from_email(link, target_date, hotel_name, tag):
     establishes its own session, which is what lets this run on the worker.
     """
     label = f'{target_date}_{hotel_name}'
-    cookie_fd, cookie_file = tempfile.mkstemp(suffix='.txt', prefix='cookies_confirm_')
-    os.close(cookie_fd)
-
-    def c(method, u, data=None, headers=None, retry=True):
-        return bh.curl(cookie_file, method, u, data, headers, retry)
-
-    try:
+    with bh.session_jar('cookies_confirm_') as (_jar, c):
         return _run_leg(c, link, target_date, hotel_name, tag, label)
-    finally:
-        try:
-            os.unlink(cookie_file)
-        except OSError:
-            pass
 
 
 def _run_leg(c, link, target_date, hotel_name, tag, label):
@@ -564,14 +547,6 @@ def _run_leg(c, link, target_date, hotel_name, tag, label):
 
 # ── the worker ───────────────────────────────────────────────────────
 
-def _drop(held_at, target_date, hotel_name, tag):
-    """Give up on a hold whose mail never arrived."""
-    log(f"{tag}   {R}No confirmation mail for {hotel_name} on {target_date} "
-        f"within {CONFIRM_MAIL_TIMEOUT:.0f}s{X}")
-    log(f"{tag}   {B}{Y}HUMAN NEEDED: the room is held and the mail was sent to "
-        f"{bh.EMAIL}. Open its link and finish now.{X}")
-
-
 def _process(hold, links):
     """Run one hold's leg if a link is available. True when done with the hold, False
     to leave it queued for a later poll."""
@@ -581,7 +556,10 @@ def _process(hold, links):
     link = _take_link(held_at, links)
     if link is None:
         if time.time() - held_at >= CONFIRM_MAIL_TIMEOUT:
-            _drop(held_at, target_date, hotel_name, tag)
+            log(f"{tag}   {R}No confirmation mail for {hotel_name} on "
+                f"{target_date} within {CONFIRM_MAIL_TIMEOUT:.0f}s{X}")
+            log(f"{tag}   {B}{Y}HUMAN NEEDED: the room is held and the mail was "
+                f"sent to {bh.EMAIL}. Open its link and finish now.{X}")
             return True
         return False
 
@@ -636,15 +614,11 @@ def worker(stop_event=None):
     this is the only thing that completes an application and main() never joins it, so
     an escaping exception would strand every future hold silently.
     """
-    def nap(seconds):
-        if stop_event is not None:
-            stop_event.wait(seconds)
-        else:
-            time.sleep(seconds)
-
-    while not (stop_event is not None and stop_event.is_set()):
+    # An Event nobody sets makes `.wait(n)` behave exactly like `time.sleep(n)`.
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
         try:
             drain_once()
         except Exception as e:
             log(f"{R}Confirm worker error: {e!r}{X}")
-        nap(CONFIRM_POLL_INTERVAL)
+        stop_event.wait(CONFIRM_POLL_INTERVAL)
