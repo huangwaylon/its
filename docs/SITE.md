@@ -35,8 +35,17 @@ Verified live end to end on 2026-08-19: ブルーベリーヒル勝浦, 2026-09-
     和倉温泉 あえの風, ラビスタ富士河口湖, ハーヴェスト斑尾・旧軽井沢, **熱海後楽園ホテル (D−4)**,
     ハーヴェスト伊東・浜名湖, ホテル琵琶レイクオーツカ, ホテル日航プリンセス京都,
     ハーヴェスト京都鷹峯・有馬六彩・南紀田辺, ゆふいん山水館
-  - *冬季, D−4:* **unverified** — no roster page read. スキージャム勝山 and 函館ベイANNEX are on
-    neither other roster, so presumably 冬季, but that is inference.
+  - *冬季 (5), D−4:* ラビスタ函館ベイANNEX, ホテル日航アリビラ, NAGU勝浦, NASPAニューオータニ,
+    蓼科東急ホテル — so all but 函館ベイANNEX also sit on the 夏季 roster. Read from
+    `/shisetsu/keiyaku/touki/index.html` 2026-08-19.
+  - `ホテルハーヴェスト スキージャム勝山` is on **none** of the four rosters, nor 提携施設 —
+    presumably delisted. `SKIP_HOTELS` keeps it anyway: skipping a facility that never
+    appears is free, dropping it books the place if ITS re-contracts it.
+- **The booking system and the roster pages do not always agree on a name.**
+  `service_group_select` returns 「グランドメルキュール伊勢志摩」 where the 夏季 roster says
+  「グランドメルキュール 伊勢志摩リゾート＆スパ」. `is_skipped()` compares normalised names for
+  *exact* equality, so the roster spelling would never match — always prefer a string
+  observed in a 「Found N hotels: …」 log line over one transcribed from the website.
 - **`PRIORITY_HOTELS = ['NAGU']` is NAGU勝浦, 夏季**: D−4, and never listed for stays past 9/30
   (「夏季保養施設の9/30～2泊…は選択いただけません」 — the season boundary itself is inferred).
 - **Month-end two-night stays** open only from the 照会開始日 of the month the *second* night

@@ -4,3 +4,8 @@
 # application link (steps 7-9). Without this the sandbox denies the outbound
 # connection and every booking stalls at "mail not received" with the room held.
 imap.gmail.com,Gmail IMAP — read the ITS confirmation mail for the application link
+
+# The published facility rosters (直営/通年/夏季/冬季) and the 申込受付期間一覧表 live on
+# the marketing host, not the booking host. Needed to verify SKIP_HOTELS names and
+# the D-4/D-10 cutoff classification against the source of truth.
+www.its-kenpo.or.jp,ITS published rules + facility rosters (read-only)

@@ -62,7 +62,7 @@ USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
-    # "2026-09-16",
+    "2026-09-01",
     "2026-09-05",
     "2026-09-16",
     "2026-09-19",
@@ -272,29 +272,74 @@ PRIORITY_HOTELS = [
 ]
 
 # ── Hotel skip list ──────────────────────────────────────────────────
-# Matched after normalizing case, HTML entities, and full-width vs half-width
-# spaces, so an entry cannot silently miss on whitespace alone.
+# Matched after normalizing case, HTML entities and full-width vs half-width
+# spaces — but the comparison is **exact membership** of the normalized name, not
+# a substring test. So a facility the booking system spells differently from the
+# published roster silently never matches, and an unmatched skip entry books a
+# hotel that was meant to be skipped.
+#
+# That is not hypothetical. `service_group_select` returns 「グランドメルキュール伊勢志摩」
+# while the 夏季 roster page says 「グランドメルキュール 伊勢志摩リゾート＆スパ」; the roster
+# spelling would never fire. So entries marked ✓ are the exact strings observed in
+# `service_group_select` (recovered from its_booking.log) and are safe. The rest are
+# transcribed from the roster pages, read 2026-08-19, and are **unverified against
+# the live markup** — to check one, read a 「Found N hotels: …」 line in the log.
+#
+# The whole roster is listed for reference; anything not currently skipped is
+# commented out. Cutoffs (docs/SITE.md §1): 直営, ブルーベリーヒル勝浦, 日光千姫物語,
+# 熱海後楽園ホテル and every 夏季/冬季 facility are D−4; all other 通年 are D−10.
 SKIP_HOTELS = [
-    "ブルーベリーヒル勝浦",
-    "ホテル日航プリンセス京都",
-    "ホテルハーヴェスト南紀田辺",
-    "草津温泉　ホテルヴィレッジ",
-    "ホテルハーヴェスト伊東",
-    "ホテルハーヴェスト　スキージャム勝山",
-    "ホテル琵琶レイクオーツカ",
-    "ホテルハーヴェスト有馬六彩",
-    "ホテルハーヴェスト浜名湖",
-    "ゆふいん山水館",
-    "ホテル日航アリビラ",
-    "ラビスタ函館ベイANNEX",
-    "ホテルハーヴェスト斑尾",
-    "ホテルハーヴェスト京都鷹峯",
-    "和倉温泉 あえの風",
-    "鳴子温泉　湯元　吉祥",
-    "ホテルオークラ東京ベイ",  # also listed under Keep below; skipping wins
-    "NASPAニューオータニ",
-    "トスラブ館山ルアーナ",
-    "ホテルハーヴェスト旧軽井沢",
+    # ── 直営 (3) — D−4 ──────────────────────────────────────────────
+    # "トスラブ箱根ビオーレ",                     # ✓
+    # "トスラブ箱根和奏林",                       # ✓
+    "トスラブ館山ルアーナ",                        # ✓
+
+    # ── 通年 (24) — D−10 unless marked ──────────────────────────────
+    # "ラビスタ熱海テラス",
+    # "ホテルハーヴェスト鬼怒川",
+    "鳴子温泉　湯元　吉祥",                        # ✓ full-width spaces on the site
+    # "ホテルハーヴェスト那須",                    # ✓
+    # "日光千姫物語",                             # D−4
+    "草津温泉　ホテルヴィレッジ",                   # ✓ full-width space
     "伊香保温泉 ホテル天坊",
-    "蓼科東急ホテル",
+    # "ラビスタ横須賀観音崎テラス",                 # ✓
+    "ホテルオークラ東京ベイ",                      # ✓
+    # "リソルの森",                               # ✓
+    # "ブルーベリーヒル勝浦",                        # ✓ D−4
+    "和倉温泉 あえの風",
+    # "ラビスタ富士河口湖",                        # ✓
+    "ホテルハーヴェスト斑尾",                      # ✓
+    "ホテルハーヴェスト旧軽井沢",                   # ✓ roster writes it with a space
+    # "熱海後楽園ホテル",                          # D−4
+    "ホテルハーヴェスト伊東",                      # ✓
+    "ホテルハーヴェスト浜名湖",
+    "ホテル琵琶レイクオーツカ",
+    "ホテル日航プリンセス京都",                     # ✓
+    "ホテルハーヴェスト京都鷹峯",
+    "ホテルハーヴェスト有馬六彩",
+    "ホテルハーヴェスト南紀田辺",                   # ✓
+    "ゆふいん山水館",
+
+    # ── 夏季 (13) — D−4, none listed for a stay past 9/30 ───────────
+    # "グランドメルキュール伊勢志摩",               # ✓ NOT the roster's longer name
+    # "スパリゾートハワイアンズ モノリスタワー",
+    # "フルーツパーク富士屋ホテル",                 # ✓
+    # "定山渓 ゆらく草庵",                         # ✓ half-width space
+    # "鎌倉パークホテル",
+    # "NAGU 勝浦",           # ✓ in PRIORITY_HOTELS — skipping WINS, so leave commented
+    # "プレジャーリゾート伊豆赤沢温泉",
+    # "軽井沢マリオットホテル",
+    "蓼科東急ホテル",                             # ✓ also 冬季
+    # "高山グリーンホテル",
+    "NASPAニューオータニ",                        # ✓ also 冬季
+    # "アオアヲナルトリゾート",                     # ✓
+    "ホテル日航アリビラ",                          # ✓ also 冬季
+
+    # ── 冬季 (5) — D−4. Four overlap 夏季 above; only this one is unique ──
+    "ラビスタ函館ベイANNEX",
+
+    # No longer on any ITS roster (直営/通年/夏季/冬季/提携 all checked 2026-08-19).
+    # Kept because skipping a facility that never appears costs nothing, while
+    # dropping it would book the place if ITS re-contracts it.
+    "ホテルハーヴェスト　スキージャム勝山",
 ]
