@@ -64,7 +64,6 @@ USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
 TARGET_DATES = [
     "2026-09-01",
     "2026-09-05",
-    "2026-09-16",
     "2026-09-19",
     "2026-09-20",
     "2026-09-21",
