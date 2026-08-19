@@ -23,12 +23,11 @@ from pydoll.protocol.input.types import MouseEventType, MouseButton
 
 from config import CALENDAR_URL_CACHE, USER_AGENT_CACHE, CAPTCHA_TIMEOUT
 import chrome_guard
-# Shared with the booking engine so there is one implementation of "make this
-# safe to write down". book_hotels imports only config, so this is not a cycle.
-from book_hotels import redact_url, token_summary
+# One implementation of "make this safe to write down"; not a cycle.
+from book_hotels import redact_url
 
 # ── Config ──────────────────────────────────────────────────────────
-DEBUG_DIR = '/tmp/captcha_debug'
+SCREENSHOT_DIR = '/tmp/captcha_debug'   # failure screenshots, not config.DEBUG_DIR
 MAX_ATTEMPTS = 3          # Turnstile retries before giving up
 TOKEN_POLL_INTERVAL = 2   # seconds between token checks
 TOKEN_TIMEOUT = 30        # max seconds to wait for token after click
@@ -49,8 +48,8 @@ def log(msg):
 
 
 def _debug_path(name):
-    os.makedirs(DEBUG_DIR, exist_ok=True)
-    return os.path.join(DEBUG_DIR, name)
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    return os.path.join(SCREENSHOT_DIR, name)
 
 
 def _script_value(result):
@@ -166,16 +165,9 @@ async def solve_turnstile(tab, max_attempts=MAX_ATTEMPTS):
 async def get_calendar_url():
     """Solve the CAPTCHA and cache a fresh calendar URL, under a hard deadline.
 
-    The solve runs synchronously inside main.py's URL monitor thread, and that
-    thread is the only thing that ever re-mints a session. A pydoll or Chrome
-    hang there stops all booking indefinitely while the process keeps rendering
-    its display and looks perfectly healthy, so the deadline is not optional.
-
-    Held under `chrome_guard` because `browser_apply` drives Chrome too, and
-    `_kill_stray_chrome()` below reaps by `pgrep -f remote-debugging-port` — which
-    matches that browser as readily as this one. Serialised, a timeout here can only
-    fire while nothing else of ours has a Chrome open, so the reaper cannot kill a
-    browser that is midway through filing an application against a room hold.
+    The solve occupies the one thread that can re-mint a session, so an untimed
+    Chrome hang would stop all booking behind a healthy-looking display. Serialised
+    against `browser_apply`'s Chrome — see `chrome_guard`.
 
     Returns the URL string, or None on failure or timeout.
     """
@@ -198,12 +190,9 @@ async def get_calendar_url():
 def _kill_stray_chrome():
     """Kill Chrome processes left behind by an abandoned solve.
 
-    On a timeout the `async with Chrome(...)` block is cancelled mid-await, and
-    pydoll cannot always complete its own teardown. Over weeks of solves every
-    orphan keeps its profile directory and a few hundred MB of RSS, so they are
-    reaped here rather than accumulating until the machine runs out of memory.
-    Matched narrowly on the flags pydoll launches with, so a Chrome the user is
-    browsing in is never a candidate.
+    A cancelled `async with Chrome(...)` cannot always finish pydoll's teardown, and
+    each orphan keeps a profile directory and a few hundred MB of RSS. Matched
+    narrowly on pydoll's launch flags, so a user's own Chrome is never a candidate.
     """
     try:
         out = subprocess.run(['pgrep', '-f', 'remote-debugging-port'],
@@ -291,16 +280,12 @@ async def _solve_and_cache():
             await asyncio.sleep(5)
 
             calendar_url = await tab.current_url
-            # The decoded token fields, never the URL: this line ran on all 647
-            # solves in the previous log and wrote the complete `s=` token to
-            # disk every time.
-            log(f'Calendar URL obtained — {token_summary(calendar_url)}')
+            # The decoded token fields, never the URL itself.
+            log(f'Calendar URL obtained — {redact_url(calendar_url)}')
 
-            # Refuse to cache anything that is not a calendar session. Saving it
-            # anyway used to poison the cache: every scanner would then replay a
-            # non-calendar URL that can still answer 200, so check_cached_url
-            # called the session healthy and no re-solve ever fired. Returning
-            # None leaves the previous URL in place and retries next cycle.
+            # Refuse to cache anything that is not a calendar session: a
+            # non-calendar URL still answers 200, so check_cached_url would call
+            # the session healthy and no re-solve would ever fire.
             if 'calendar_select' not in (calendar_url or ''):
                 log(f'FAILED: not a calendar URL, not caching: '
                     f'{redact_url(calendar_url)}')
@@ -316,13 +301,6 @@ async def _solve_and_cache():
             return calendar_url
 
         finally:
-            # `async with Chrome(...)` stops the browser on exit too, so this is
-            # the second call. Guarded because a raise from a finally would
-            # replace a perfectly good return value with an exception.
-            try:
-                await browser.stop()
-            except Exception as e:
-                log(f'Browser stop: {e}')
             log('Browser closed')
 
 

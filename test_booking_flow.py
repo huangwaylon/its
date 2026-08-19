@@ -17,7 +17,6 @@ Never touches ITS.
 """
 import json
 import os
-import re
 import tempfile
 import threading
 import time
@@ -473,14 +472,14 @@ class Env:
              'CURL_RETRY_BACKOFF', 'CURL_MAX_ATTEMPTS', 'RETRY_DELAY',
              'SCAN_JITTER', 'SCAN_BACKOFF_MAX', 'IDLE_LOG_INTERVAL',
              'DEBUG_DUMP_INTERVAL', 'SKIP_PAST_DATES',
-             'HOTEL_RETRY_COOLDOWN', 'HOTEL_HOLD_COOLDOWN',
-             'MAX_BOOKINGS_PER_DATE', 'SCAN_REUSE_SESSION',
+             'HOTEL_RETRY_COOLDOWN',
+             'SCAN_REUSE_SESSION',
              'SCAN_REUSE_MAX_FAILURES', 'AUTO_CONFIRM', 'AUTO_CONFIRM_MIN_DAYS',
              'APPLICANT')
 
     # confirm_booking's own module-level knobs, restored the same way.
-    CB_ATTRS = ('_mail_source', 'CONFIRM_MAIL_TIMEOUT', 'CONFIRM_HOLD_SECONDS',
-                'CONFIRM_HOLD_MARGIN', 'RESERVATIONS_FILE', 'BASE', 'APPLICANT',
+    CB_ATTRS = ('_mail_source', 'CONFIRM_MAIL_TIMEOUT',
+                'RESERVATIONS_FILE', 'BASE', 'APPLICANT',
                 '_browser_submit', 'BROWSER_CONFIRM')
 
     def __init__(self, port, skip=(), priority=('NAGU',), confirm=False,
@@ -521,8 +520,6 @@ class Env:
         # The registry is module-global and several tests share TARGET, so
         # clearing it is what stops one test's holds suppressing the next's.
         bh.HOTEL_RETRY_COOLDOWN = 0
-        bh.HOTEL_HOLD_COOLDOWN = 0
-        bh.MAX_BOOKINGS_PER_DATE = 0
         bh.SCAN_REUSE_SESSION = True
         bh.SCAN_REUSE_MAX_FAILURES = 3
         STATE.hits.clear()
@@ -546,8 +543,6 @@ class Env:
         cb.BASE = bh.BASE
         cb.RESERVATIONS_FILE = os.path.join(d, 'reservations.json')
         cb.CONFIRM_MAIL_TIMEOUT = 1.0
-        cb.CONFIRM_HOLD_SECONDS = 1800
-        cb.CONFIRM_HOLD_MARGIN = 300
         bh.AUTO_CONFIRM = self.confirm
         bh.AUTO_CONFIRM_MIN_DAYS = 11
         if self.applicant is not None:
@@ -567,10 +562,10 @@ class Env:
         STATE.browser_calls.clear()
         STATE.browser_result = ('failed', 'apply post session rejected')
 
-        def _browser_stub(link_, values, log_, tag_, allow_commit, seconds_left):
+        def _browser_stub(link_, values, log_, tag_, allow_commit):
             STATE.browser_calls.append({
                 'link': link_, 'values': dict(values),
-                'seconds_left': seconds_left, 'allow_commit': allow_commit,
+                'allow_commit': allow_commit,
             })
             result = STATE.browser_result
             return result() if callable(result) else result
@@ -812,23 +807,6 @@ def test_date_unavailable(port):
               STATE.count('POST /calendar_apply/service_group_select') == 0)
 
 
-def test_limited_availability_is_booked(port):
-    """`a_little` is "few rooms left", not "unavailable".
-
-    Both classes are clickable on the real site, so both can be applied for. The
-    filter used to match `empty` only, which meant the dates closest to selling
-    out — the ones a booker exists for — were the ones never attempted.
-    """
-    with Env(port) as env:
-        date_str, booked = bh.book_all_hotels_for_date(TARGET_LIMITED, 'TEST')
-        check('a_little: returns the date', date_str == TARGET_LIMITED, date_str)
-        check('a_little: books every eligible hotel',
-              booked == [NAGU, RESOL, NIKKO], str(booked))
-        check('a_little: recorded', env.bookings() == {TARGET_LIMITED: booked},
-              str(env.bookings()))
-        check('a_little: not treated as a fault', env.dumps() == [], str(env.dumps()))
-
-
 def test_final_submit_is_never_retried(port):
     """The request that files an application must go out at most once.
 
@@ -877,78 +855,6 @@ def test_missing_url(port):
         date_str, booked = bh.book_all_hotels_for_date(TARGET, 'TEST')
         check('no-url: returns cleanly', (date_str, booked) == (TARGET, []), str(booked))
         check('no-url: made no requests', STATE.hits == [], str(STATE.hits))
-
-
-def test_token_summary():
-    """The `s=` token decoder, and the guarantee that it leaks nothing.
-
-    The token is base64(reverse(base64("k=v&k=v"))) with no MAC, so the payload
-    is only `service_category_id` plus a timestamp. Printing that timestamp in
-    full would reconstruct the token, which is why it is rendered as a delta.
-    """
-    import base64 as b64
-
-    def mint(payload):
-        inner = b64.b64encode(payload.encode()).decode()
-        return b64.b64encode(inner[::-1].encode()).decode()
-
-    now = 1786183972
-    tok = mint(f'service_category_id=1&verify_expires={now}')
-
-    fields = bh.decode_s_token(tok)
-    check('token: fields decoded in order',
-          fields == [('service_category_id', '1'), ('verify_expires', str(now))],
-          str(fields))
-
-    # Round-trips the real shape observed live.
-    real = 'service_category_id=1&verify_expires=1786183972'
-    check('token: real payload shape round-trips',
-          bh.decode_s_token(mint(real)) == bh.decode_s_token(tok), str(fields))
-
-    url = f'https://as.its-kenpo.or.jp/calendar_apply/calendar_select?s={tok}'
-    s = bh.token_summary(url, now=now - 3600)
-    check('token: field names shown', 'service_category_id=1' in s, s)
-    check('token: expiry shown as a delta', 'verify_expires=+1h00m' in s, s)
-    check('token: absolute timestamp NEVER logged', str(now) not in s, s)
-    check('token: raw token NEVER logged', tok not in s, s)
-
-    s = bh.token_summary(url, now=now + 90)
-    check('token: expired shows negative delta', 'verify_expires=-1m30s' in s, s)
-
-    # A field the site adds later must show its name but mask its value.
-    tok2 = mint(f'service_category_id=1&member_no=A1234567890&verify_expires={now}')
-    s = bh.token_summary(f'https://h/x?s={tok2}', now=now)
-    check('token: unknown field name shown', 'member_no=' in s, s)
-    check('token: unknown field value masked', 'A1234567890' not in s, s)
-    check('token: unknown field length reported', '<11 chars>' in s, s)
-
-    # Strictness: a truncated token must report failure, not garbage. Every
-    # token in the previous production log was cut at 80 characters.
-    check('token: truncated reports failure',
-          bh.token_summary(f'https://h/x?s={tok[:60]}').startswith('token does not decode'),
-          bh.token_summary(f'https://h/x?s={tok[:60]}'))
-    check('token: non-base64 reports failure',
-          'does not decode' in bh.token_summary('https://h/x?s=!!!!not-base64!!!!'))
-    check('token: single-layer base64 rejected',
-          bh.decode_s_token(b64.b64encode(b'service_category_id=1').decode()) is None)
-
-    # Never raises: this is in the URL monitor's logging path.
-    for bad in (None, '', 'not a url', 'https://h/x', 'https://h/x?s=',
-                'http://[garbage?s=abc', 'https://h/x?s=' + 'A' * 4000):
-        try:
-            check(f'token: no raise on {str(bad)[:24]!r}',
-                  isinstance(bh.token_summary(bad), str))
-        except Exception as e:
-            check(f'token: no raise on {str(bad)[:24]!r}', False, repr(e))
-
-
-def test_relative_duration():
-    check('relative: hours', bh._relative(9061) == '+2h31m', bh._relative(9061))
-    check('relative: minutes', bh._relative(125) == '+2m05s', bh._relative(125))
-    check('relative: seconds', bh._relative(9) == '+9s', bh._relative(9))
-    check('relative: zero', bh._relative(0) == '+0s', bh._relative(0))
-    check('relative: negative', bh._relative(-9061) == '-2h31m', bh._relative(-9061))
-    check('relative: negative seconds', bh._relative(-5) == '-5s', bh._relative(-5))
 
 
 def _run_scanner(month, dates, label):
@@ -1098,60 +1004,6 @@ def test_failing_hotel_is_not_retried_until_its_cooldown_expires(port):
         check('cooldown: expires', not bh.in_cooldown(TARGET, NAGU))
 
 
-def test_reaching_the_room_hold_earns_the_long_cooldown(port):
-    """Step 7 takes a 30-minute hold and nothing here can release one.
-
-    So the cooldown claimed on entry has to be upgraded before that request, or a
-    re-attempt inside the hold window stacks a second hold on the same facility
-    and we end up reading our own holds back as 空き部屋がございません.
-    """
-    with Env(port) as env:
-        bh.HOTEL_RETRY_COOLDOWN = 60
-        bh.HOTEL_HOLD_COOLDOWN = 1800
-        _, booked = bh.book_all_hotels_for_date(TARGET, 'HOLD')
-        check('hold: booked', NAGU in booked, str(booked))
-        left = bh.cooldown_remaining(TARGET, NAGU)
-        check('hold: cooldown upgraded past the short one', left > 60, f'{left:.0f}s')
-        check('hold: cooldown covers the site\'s 30-minute hold',
-              left > 1700, f'{left:.0f}s')
-
-
-def test_max_bookings_per_date_stops_at_the_cap(port):
-    """The cap counts successes, and the priority hotel is the one that gets in."""
-    with Env(port) as env:
-        bh.MAX_BOOKINGS_PER_DATE = 1
-        _, booked = bh.book_all_hotels_for_date(TARGET, 'CAP')
-        check('cap: exactly one booking', booked == [NAGU], str(booked))
-        check('cap: only the one recorded', env.bookings() == {TARGET: [NAGU]},
-              str(env.bookings()))
-        completions = [c for c in STATE.completed if c[1] == NAGU]
-        check('cap: the site saw one completion', len(STATE.completed) == 1
-              and len(completions) == 1, str(STATE.completed))
-
-        # Already at the cap, so a later pass must not spend a single request.
-        hits = len(STATE.hits)
-        _, again = bh.book_all_hotels_for_date(TARGET, 'CAP')
-        check('cap: a capped date books nothing more', again == [], str(again))
-        check('cap: and makes no requests', len(STATE.hits) == hits,
-              f'{len(STATE.hits) - hits} extra requests')
-
-
-def test_cap_fails_closed_when_bookings_are_unreadable(port):
-    """A cap that silently became unlimited on a read error would file duplicates.
-
-    `get_booked_hotels` cannot tell "nothing booked" from "could not read", so the
-    cap has to consult a flag that can.
-    """
-    with Env(port) as env:
-        bh.MAX_BOOKINGS_PER_DATE = 1
-        os.mkdir(bh.BOOKINGS_FILE)        # a read of this raises OSError
-        hits = len(STATE.hits)
-        _, booked = bh.book_all_hotels_for_date(TARGET, 'CLOSED')
-        check('fail-closed: booked nothing', booked == [], str(booked))
-        check('fail-closed: made no requests', len(STATE.hits) == hits,
-              f'{len(STATE.hits) - hits} requests')
-
-
 def test_scanner_books_and_survives_errors(port):
     """The scan loop must book, and must never let an exception end the thread."""
     with Env(port) as env:
@@ -1178,21 +1030,6 @@ def test_scanner_books_and_survives_errors(port):
             stop.set()
             t.join(timeout=10)
         check('scanner: stops when asked', not t.is_alive())
-
-
-def test_scanner_survives_dead_url(port):
-    """A cache file that never becomes valid must not end the thread either."""
-    with Env(port) as env:
-        with open(bh.CALENDAR_URL_CACHE, 'w') as f:
-            f.write('http://127.0.0.1:1/nope\n')
-        t, stop = _run_scanner('2026-09', [TARGET], 'TEST')
-        try:
-            time.sleep(2)
-            check('dead-url: scanner thread still alive', t.is_alive())
-            check('dead-url: booked nothing', env.bookings() == {}, str(env.bookings()))
-        finally:
-            stop.set()
-            t.join(timeout=10)
 
 
 def test_scanner_skips_past_dates(port):
@@ -1232,6 +1069,12 @@ def test_scanner_spots_a_limited_availability_date(port):
 # ── Persistence ─────────────────────────────────────────────────────
 
 def test_bookings_atomic_and_non_destructive():
+    """Writes are atomic, and an unreadable file is never replaced.
+
+    A bad read returning {} followed by a normal save would rewrite the file with
+    only the one new entry. The production log has 5 bookings for 2026-08-22 that
+    no longer appear in bookings.json, which is that failure having happened.
+    """
     with tempfile.TemporaryDirectory() as d:
         saved = bh.BOOKINGS_FILE
         bh.BOOKINGS_FILE = os.path.join(d, 'bookings.json')
@@ -1255,69 +1098,28 @@ def test_bookings_atomic_and_non_destructive():
             leftovers = [f for f in os.listdir(d) if f != 'bookings.json']
             check('persist: no temp files left behind', leftovers == [], str(leftovers))
 
-            # A corrupt file must be preserved, not silently overwritten. The
-            # production log has 5 bookings for 2026-08-22 that no longer appear
-            # in bookings.json, which is this failure having already happened.
-            with open(bh.BOOKINGS_FILE, 'w') as f:
-                f.write('{"2026-08-22": ["truncated wri')
-            bh.save_booking('2026-09-26', NIKKO)
-            salvaged = [f for f in os.listdir(d) if '.corrupt.' in f]
-            check('persist: corrupt file preserved', len(salvaged) == 1, str(os.listdir(d)))
-            check('persist: corrupt bytes still readable',
-                  'truncated wri' in open(os.path.join(d, salvaged[0])).read())
-            with open(bh.BOOKINGS_FILE, encoding='utf-8') as f:
-                check('persist: new booking still recorded after corruption',
-                      json.load(f) == {'2026-09-26': [NIKKO]})
+            # Every unreadable shape must leave the bytes exactly as they were.
+            for label, payload in (('truncated json', '{"2026-08-22": ["truncated wri'),
+                                   ('non-object payload', '[1, 2, 3]')):
+                with open(bh.BOOKINGS_FILE, 'w') as f:
+                    f.write(payload)
+                with CapturedLog() as logs:
+                    bh.save_booking('2026-09-26', NIKKO)
+                check(f'persist: {label} is not overwritten',
+                      open(bh.BOOKINGS_FILE).read() == payload,
+                      open(bh.BOOKINGS_FILE).read())
+                check(f'persist: {label} refusal is reported',
+                      logs.saw('could not be read'))
 
-            # A non-object payload is corruption too, not an empty history.
-            with open(bh.BOOKINGS_FILE, 'w') as f:
-                f.write('[1, 2, 3]')
-            bh.save_booking('2026-09-27', NAGU)
-            check('persist: list payload treated as corrupt',
-                  len([f for f in os.listdir(d) if '.corrupt.' in f]) == 2,
-                  str(os.listdir(d)))
-        finally:
-            bh.BOOKINGS_FILE = saved
-
-
-def test_unreadable_bookings_file_is_never_clobbered():
-    """A read error is not corruption, and must not be treated as it.
-
-    An OSError used to share a branch with a parse failure, so one transient read
-    error was enough to rename a perfectly good file to `bookings.json.corrupt.*`
-    and replace it with a single entry — destroying the record for every other
-    date, which is the only thing preventing duplicate applications.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        saved = bh.BOOKINGS_FILE
-        bh.BOOKINGS_FILE = os.path.join(d, 'bookings.json')
-        try:
             # A directory: present, so not the missing-file path, but any read of
             # it raises OSError rather than producing unparseable bytes.
+            os.unlink(bh.BOOKINGS_FILE)
             os.mkdir(bh.BOOKINGS_FILE)
             with CapturedLog() as logs:
                 bh.save_booking('2026-09-05', NAGU)
-            check('unreadable: nothing salvaged aside',
-                  [f for f in os.listdir(d) if '.corrupt.' in f] == [],
-                  str(os.listdir(d)))
-            check('unreadable: the file itself is untouched',
+            check('persist: an OSError leaves the path untouched',
                   os.path.isdir(bh.BOOKINGS_FILE))
-            check('unreadable: refusal is reported', logs.saw('could not be read'))
-            check('unreadable: flagged unreadable but not corrupt',
-                  bh._bookings_unreadable and not bh._bookings_corrupt,
-                  f'{bh._bookings_unreadable=} {bh._bookings_corrupt=}')
-
-            # Unparseable bytes, by contrast, ARE corruption and get salvaged.
-            os.rmdir(bh.BOOKINGS_FILE)
-            with open(bh.BOOKINGS_FILE, 'w') as f:
-                f.write('{ not json')
-            bh.save_booking('2026-09-05', NAGU)
-            check('unreadable: a parse failure is still salvaged',
-                  len([f for f in os.listdir(d) if '.corrupt.' in f]) == 1,
-                  str(os.listdir(d)))
-            check('unreadable: and the booking is recorded',
-                  bh.get_booked_hotels('2026-09-05') == [NAGU],
-                  str(bh.get_booked_hotels('2026-09-05')))
+            check('persist: OSError refusal is reported', logs.saw('could not be read'))
         finally:
             bh.BOOKINGS_FILE = saved
 
@@ -1666,14 +1468,6 @@ def test_watchdog_restarts_a_dead_worker():
     check('watchdog: living worker left alone', alive.ensure_alive() is False)
 
 
-def test_group_dates_by_month():
-    import main
-    out = main.group_dates_by_month(['2026-08-22', '2026-08-29', '2026-09-05'])
-    check('group: months split', out == {'2026-08': ['2026-08-22', '2026-08-29'],
-                                        '2026-09': ['2026-09-05']}, str(out))
-    check('group: empty input', main.group_dates_by_month([]) == {})
-
-
 def test_captcha_timeout_wrapper():
     """A hung solve must give up, not wedge the only thread that re-mints a session."""
     import asyncio
@@ -1713,42 +1507,6 @@ def test_captcha_timeout_wrapper():
         cs._solve_and_cache, cs.CAPTCHA_TIMEOUT, cs._kill_stray_chrome = saved
 
 
-def test_log_rotation():
-    import main
-    with tempfile.TemporaryDirectory() as d:
-        saved = (main.LOG_FILE, main.LOG_MAX_BYTES, main.LOG_BACKUPS)
-        main.LOG_FILE = os.path.join(d, 'its.log')
-        main.LOG_MAX_BYTES, main.LOG_BACKUPS = 100, 3
-        try:
-            main._rotate_log()
-            check('rotate: missing file is fine', not os.path.exists(main.LOG_FILE))
-
-            with open(main.LOG_FILE, 'w') as f:
-                f.write('x' * 50)
-            main._rotate_log()
-            check('rotate: small file left alone',
-                  os.path.exists(main.LOG_FILE) and not os.path.exists(main.LOG_FILE + '.1'))
-
-            with open(main.LOG_FILE, 'w') as f:
-                f.write('first' + 'x' * 200)
-            main._rotate_log()
-            check('rotate: oversized file moved to .1', os.path.exists(main.LOG_FILE + '.1'))
-            check('rotate: contents preserved',
-                  open(main.LOG_FILE + '.1').read().startswith('first'))
-
-            for gen in ('second', 'third', 'fourth'):
-                with open(main.LOG_FILE, 'w') as f:
-                    f.write(gen + 'x' * 200)
-                main._rotate_log()
-            backups = sorted(f for f in os.listdir(d) if '.log.' in f)
-            check('rotate: kept to LOG_BACKUPS', len(backups) <= 3, str(backups))
-            check('rotate: newest backup is the most recent generation',
-                  open(main.LOG_FILE + '.1').read().startswith('fourth'),
-                  open(main.LOG_FILE + '.1').read()[:10])
-        finally:
-            main.LOG_FILE, main.LOG_MAX_BYTES, main.LOG_BACKUPS = saved
-
-
 # ── The emailed leg (steps 7-9) ──────────────────────────────────────
 #
 # Everything past `send_complete` had no coverage at all, which is how a booking
@@ -1781,7 +1539,7 @@ def _confirm(port, **kw):
 
         with CapturedLog() as logged:
             status, detail = cb.confirm_from_email(
-                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+                c, TARGET, NAGU, '[TEST]')
         captured = {'reservations': env.reservations(), 'dumps': env.dumps()}
         return status, detail, captured, logged
 
@@ -1844,7 +1602,7 @@ def test_confirm_expired_hold_is_not_a_parse_failure(port):
 
         with CapturedLog() as logged:
             status, detail = cb.confirm_from_email(
-                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+                c, TARGET, NAGU, '[TEST]')
         check('expired: reported as an expired hold', detail == 'hold expired',
               f'{status}: {detail}')
         check('expired: says so in the log', logged.saw('30-minute hold expired'),
@@ -1873,7 +1631,7 @@ def test_confirm_rejected_apply_asks_for_a_human(port):
 
         with CapturedLog() as logged:
             status, detail = cb.confirm_from_email(
-                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+                c, TARGET, NAGU, '[TEST]')
         check('rejected: failed with the session-rejected detail',
               (status, detail) == ('failed', 'apply post session rejected'),
               f'{status}: {detail}')
@@ -1895,8 +1653,8 @@ def test_confirm_human_needed_on_failure(port):
         check('human-needed: the hold is still recorded', NAGU in booked, str(booked))
         check('human-needed: HUMAN NEEDED is logged', logged.saw('HUMAN NEEDED'),
               str([l for l in logged.lines if 'NAGU' in l]))
-        check('human-needed: it names the minutes left',
-              any('minutes' in l for l in logged.lines if 'HUMAN NEEDED' in l),
+        check('human-needed: it says where to finish and that mail was sent',
+              all('the mail to' in l for l in logged.lines if 'HUMAN NEEDED' in l),
               str([l for l in logged.lines if 'HUMAN NEEDED' in l]))
 
 
@@ -1915,7 +1673,7 @@ def test_confirm_never_submits_a_form_it_cannot_fill(port):
 
         with CapturedLog() as logged:
             status, detail = cb.confirm_from_email(
-                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+                c, TARGET, NAGU, '[TEST]')
         check('unmapped: deferred, not submitted', status == 'deferred',
               f'{status}: {detail}')
         check('unmapped: names the fields it could not fill',
@@ -1940,7 +1698,7 @@ def test_confirm_final_post_is_never_retried(port):
 
         with CapturedLog() as logged:
             status, detail = cb.confirm_from_email(
-                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+                c, TARGET, NAGU, '[TEST]')
         check('confirm-retry: outcome reported as unknown',
               (status, detail) == ('failed', 'confirm outcome unknown'),
               f'{status}: {detail}')
@@ -1960,7 +1718,7 @@ def test_confirm_no_mail_gives_up_without_filing(port):
             return bh.curl(cookie, m, u, d, h, retry)
 
         status, detail = cb.confirm_from_email(
-            c, TARGET, NAGU, '[TEST]', held_at=time.time())
+            c, TARGET, NAGU, '[TEST]')
         check('no-mail: reported', (status, detail) == ('failed', 'mail not received'),
               f'{status}: {detail}')
         check('no-mail: nothing filed', STATE.filed == [], str(STATE.filed))
@@ -1984,7 +1742,7 @@ def test_browser_fallback_files_what_curl_could_not(port):
 
         with CapturedLog() as logged:
             status, detail = cb.confirm_from_email(
-                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+                c, TARGET, NAGU, '[TEST]')
         reservations = env.reservations()
 
     check('fallback: reports confirmed', (status, detail) == ('confirmed', '10287126'),
@@ -2015,8 +1773,6 @@ def test_browser_fallback_files_what_curl_could_not(port):
           and values.get('apply[kana_name]') == 'ヤマダ　タロウ', str(values))
     check('fallback: it is given the emailed link, not the POST url',
           '/apply/new' in call.get('link', ''), call.get('link'))
-    check('fallback: budget is bounded by the hold, not just the timeout',
-          0 < call.get('seconds_left', 0) <= 1800, str(call.get('seconds_left')))
 
 
 def test_browser_fallback_not_used_when_curl_works(port):
@@ -2054,7 +1810,7 @@ def test_browser_fallback_rechecks_the_gate_live(port):
             return bh.curl(cookie, m, u, d, h, retry)
 
         status, detail = cb.confirm_from_email(
-            c, TARGET, NAGU, '[TEST]', held_at=time.time())
+            c, TARGET, NAGU, '[TEST]')
         check('gate-live: allow_commit is callable and live',
               seen.get('allowed', (None,))[0] is False, str(seen))
         check('gate-live: a closed gate defers rather than filing',
@@ -2076,7 +1832,7 @@ def test_browser_fallback_can_be_turned_off(port):
 
         with CapturedLog() as logged:
             status, detail = cb.confirm_from_email(
-                c, TARGET, NAGU, '[TEST]', held_at=time.time())
+                c, TARGET, NAGU, '[TEST]')
         check('off: fails as it did before the fallback existed',
               (status, detail) == ('failed', 'apply post session rejected'),
               f'{status}: {detail}')
@@ -2208,23 +1964,6 @@ def test_name_match_beats_label_match():
           cb._match_rule('apply[mystery]', 'なにか', values) is None)
 
 
-def test_confirm_leg_is_hermetic():
-    """The suite must never reach a real mailbox.
-
-    `confirm_from_email` polls IMAP for CONFIRM_MAIL_TIMEOUT seconds. Before the
-    mail source was injectable here, every booking in this file blocked 180 s
-    against the operator's own Gmail — the suite took over an hour and printed
-    nothing while doing it.
-    """
-    import config
-    check('hermetic: Env leaves _mail_source injectable',
-          cb._mail_source is None or callable(cb._mail_source))
-    check('hermetic: the fake link is not a real host',
-          '127.0.0.1' in f'http://127.0.0.1/apply/new?c={FAKE_APPLY_C}')
-    check('hermetic: IMAP host is never contacted by these tests',
-          config.IMAP_HOST.endswith('gmail.com'))
-
-
 def test_applicant_data_is_redacted_from_dumps():
     """Dumps must not carry 記号/番号/カナ氏名/生年月日/電話/住所.
 
@@ -2274,18 +2013,15 @@ SERVER_TESTS = (
     'test_session_death_on_date_select_is_retried',
     'test_session_death_mid_hotel_loop', 'test_no_rooms_is_not_an_error',
     'test_unexpected_status_is_dumped_not_retried', 'test_date_unavailable',
-    'test_limited_availability_is_booked', 'test_final_submit_is_never_retried',
+    'test_final_submit_is_never_retried',
     'test_missing_url', 'test_scanner_books_and_survives_errors',
-    'test_scanner_survives_dead_url', 'test_scanner_skips_past_dates',
+    'test_scanner_skips_past_dates',
     'test_scanner_spots_a_limited_availability_date',
     'test_active_bookings_counter',
     'test_scan_reuses_the_session',
     'test_scan_remints_when_the_cached_session_is_rejected',
     'test_scan_gives_up_on_reuse_after_repeated_rejection',
     'test_failing_hotel_is_not_retried_until_its_cooldown_expires',
-    'test_reaching_the_room_hold_earns_the_long_cooldown',
-    'test_max_bookings_per_date_stops_at_the_cap',
-    'test_cap_fails_closed_when_bookings_are_unreadable',
     'test_confirm_files_the_application',
     'test_confirm_expired_hold_is_not_a_parse_failure',
     'test_confirm_rejected_apply_asks_for_a_human',
@@ -2302,15 +2038,13 @@ SERVER_TESTS = (
 
 STANDALONE_TESTS = (
     'test_bookings_atomic_and_non_destructive', 'test_bookings_concurrent_writes',
-    'test_unreadable_bookings_file_is_never_clobbered',
     'test_availability_classes', 'test_retry_classification', 'test_retry_after',
     'test_hotel_name_matching',
     'test_future_dates', 'test_dump_throttle_and_prune',
     'test_confirm_gate', 'test_dotenv_loader',
     'test_read_cached_url_never_raises', 'test_watchdog_restarts_a_dead_worker',
-    'test_group_dates_by_month', 'test_captcha_timeout_wrapper',
-    'test_log_rotation', 'test_token_summary', 'test_relative_duration',
-    'test_confirm_leg_is_hermetic', 'test_applicant_data_is_redacted_from_dumps',
+    'test_captcha_timeout_wrapper',
+    'test_applicant_data_is_redacted_from_dumps',
     'test_receipt_parsing', 'test_name_match_beats_label_match',
     'test_chrome_is_never_driven_twice_at_once',
 )

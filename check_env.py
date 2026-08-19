@@ -135,8 +135,7 @@ def check_imap_login():
         return
     import imaplib
     try:
-        socket.setdefaulttimeout(20)
-        with imaplib.IMAP4_SSL(config.IMAP_HOST, config.IMAP_PORT) as m:
+        with imaplib.IMAP4_SSL(config.IMAP_HOST, config.IMAP_PORT, timeout=20) as m:
             try:
                 m.login(config.IMAP_USER, config.IMAP_APP_PASSWORD)
             except imaplib.IMAP4.error as e:
@@ -162,21 +161,6 @@ def check_imap_login():
             report('mailbox', box.strip('"'), typ == 'OK',
                    '' if typ == 'OK' else 'could not select a mailbox')
 
-            typ, data = m.search(None, 'FROM', f'"{config.MAIL_FROM}"')
-            ids = data[0].split() if typ == 'OK' and data and data[0] else []
-            print(f'  [{OK}ok{X}] {"ITS messages":<22} {len(ids)} from '
-                  f'{config.MAIL_FROM}')
-            if ids:
-                typ, hdr = m.fetch(ids[-1], '(BODY.PEEK[HEADER.FIELDS (DATE)])')
-                if typ == 'OK':
-                    for part in hdr:
-                        if isinstance(part, tuple) and part[1]:
-                            newest = part[1].decode('utf-8', 'replace').strip()
-                            print(f'  {DIM}newest: {newest}{X}')
-                            break
-            else:
-                print(f'  {DIM}none yet — expected until the first booking '
-                      f'reaches the email step{X}')
     except (OSError, socket.timeout) as e:
         report('connection', f'{config.IMAP_HOST}:{config.IMAP_PORT}', False,
                f'{type(e).__name__}: {e} — IMAP disabled, or the network blocks 993')

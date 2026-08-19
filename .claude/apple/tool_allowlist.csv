@@ -15,7 +15,6 @@ python /tmp/its_mail_probe.py,contains_match,Read-only IMAP probe of the ITS con
 python /tmp/its_confirm_probe.py,contains_match,Replay the emailed applicant form against the live site
 python /tmp/its_apply_probe.py,contains_match,Replay the 申込する POST on a fresh cookie jar
 python /tmp/its_variant_probe.py,contains_match,Bisect the 申込する rejection against the live site
-python /tmp/its_variant_probe.py,contains_match,Bisect the 申込する rejection against the live site
 python /tmp/its_wire_probe.py,contains_match,Show the exact wire request for the 申込する POST
 python /tmp/its_csrf_probe.py,contains_match,Test whether the applicant form's CSRF token is what gets rejected
 python /tmp/its_getconfirm_probe.py,contains_match,Read what GET /apply/confirm answers

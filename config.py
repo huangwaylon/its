@@ -62,16 +62,8 @@ USER_AGENT_CACHE = os.path.join(_DIR, 'chrome_user_agent.txt')
 
 # ── Booking settings ─────────────────────────────────────────────────
 TARGET_DATES = [
-        "2026-09-16",
-
-    # "2026-09-05",
-    # "2026-09-19",
-    # "2026-09-20",
-    # "2026-09-21",
-    # "2026-09-22",
-    # "2026-09-26",
+    "2026-09-16",
 ]
-EMAIL = 'wwaylonhuang@gmail.com'
 NUM_GUESTS = '2'
 
 SKIP_PAST_DATES = True    # stop polling dates that have already passed
@@ -103,8 +95,7 @@ BOOK_RETRY_DELAY = 2.0    # seconds before re-attempting a date
 # Rails authenticity_token is valid for the life of the session — validation is a
 # stateless unmask against session[:_csrf_token], with no nonce store — so the
 # GET is skippable while the session lasts, halving the steady-state scan to one
-# request. (docs/BOOKING_VIA_CURL.md used to claim tokens were effectively
-# single-use; that finding is refuted there now.)
+# request. See Finding 1 in docs/BOOKING_VIA_CURL.md.
 #
 # Reuse is self-limiting: a rejected token is detected by response *shape*, the
 # tokens are re-minted in the same cycle, and after this many consecutive
@@ -123,7 +114,7 @@ SCAN_JITTER = 5
 # Hard ceiling on one CAPTCHA solve. pydoll/Chrome can hang, and the solve runs
 # synchronously in the URL monitor thread — the only thing that re-mints a
 # session. An untimed hang there stops all booking while the process still looks
-# healthy and the display keeps refreshing.
+# healthy.
 CAPTCHA_TIMEOUT = 180
 
 # ── Repeat-attempt cooldowns ─────────────────────────────────────────
@@ -131,28 +122,12 @@ CAPTCHA_TIMEOUT = 180
 # one book_all_hotels_for_date call, so a date that stays available for half an
 # hour with two hotels that always fail was re-attempted every scan cycle: ~80
 # cycles at ~24 requests each, about 1,960 requests in 30 minutes. A per-(date,
-# hotel) cooldown is what bounds that.
+# hotel) cooldown claimed on entry to book_one_hotel is what bounds that.
 #
-# Two lengths, because the two failures mean different things:
-#   RETRY  — failed before the room hold. Usually a lost race or a dead session,
-#            worth another go soon.
-#   HOLD   — reached the /apply/empty_create POST, which takes a 30-minute hold
-#            on the room and is the point of no return. Nothing in this program
-#            releases a hold, so re-attempting inside that window stacks a second
-#            hold on the same facility and we end up reading our own holds back
-#            as 空き部屋がございません. Must not be shorter than the site's hold.
+# One length is enough. The site refuses a second application at a facility we
+# already hold — the room search answers 空き部屋がございません — so a taken hold
+# needs no accounting here; it removes itself from what we are offered.
 HOTEL_RETRY_COOLDOWN = 300
-HOTEL_HOLD_COOLDOWN = 1800
-
-# Stop applying for a date once this many hotels are recorded for it. 0 = no cap.
-#
-# Off by default, deliberately. Capping at 1 would have discarded 16 of the 39
-# applications in this repo's history (41%). Because `send_complete` only sends
-# the confirmation email and the reservation is not confirmed until someone opens
-# the emailed link within 30 minutes, several applications per date are a hedge
-# against missing that window rather than waste. Set this only once the emailed
-# leg is automated.
-MAX_BOOKINGS_PER_DATE = 0
 
 # ── Emailed confirmation ─────────────────────────────────────────────
 # `send_complete` only dispatches the confirmation email. The reservation exists
@@ -172,35 +147,26 @@ AUTO_CONFIRM = True
 # cancel free, which is the margin for clock skew, a JST/local timezone edge, and
 # an application that fires just before midnight. Dates inside the window are NOT
 # abandoned — the hold is still taken and the email still sent, and a human
-# finishes within the site's 30-minute hold. See confirm_allowed().
+# finishes from the emailed link. See confirm_allowed().
 AUTO_CONFIRM_MIN_DAYS = 11
 
-# How long to wait for the site's confirmation email, and how much of the site's
-# 30-minute hold to leave for the remaining requests before giving up on it.
+# How long to wait for the site's confirmation email before giving up on it.
 CONFIRM_MAIL_TIMEOUT = 180     # seconds to poll IMAP for the message
-CONFIRM_HOLD_SECONDS = 1800    # the site's hold on the room, from step 7
-CONFIRM_HOLD_MARGIN = 300      # stop starting new work with less than this left
 
 # Finish the application in real Chrome when curl's 申込する POST is refused.
 #
-# Measured against a live hold on 2026-08-19: `POST /apply/confirm` answers
-# `302 → /service_category/index` for curl whatever it sends — valid CSRF token,
-# corrupted, absent, empty body, every browser header, one shared connection — while
-# the identical POST from Chrome succeeds, including as an in-page `fetch()` that
-# sends none of the navigation headers. The site refuses the *client*, not the
-# request. Finding 6 in docs/BOOKING_VIA_CURL.md has the full matrix.
-#
-# curl is still tried first and this only runs after it is refused, so if the cause
-# turns out to be environmental — that measurement was taken through an intercepting
-# HTTPS proxy, and a session pinned to request.remote_ip would look identical — the
-# fast path simply resumes and this never fires. A refused POST costs one request and
-# consumes nothing: the form still rendered afterwards and Chrome still succeeded.
+# `POST /apply/confirm` answers 302 → /service_category/index for curl whatever it
+# sends, while the identical POST from Chrome succeeds: the site refuses the
+# *client*, not the request. Finding 6 in docs/BOOKING_VIA_CURL.md has the matrix
+# and the open question — that measurement was taken through an intercepting HTTPS
+# proxy, so check whether it reproduces off one. curl is still tried first, so if
+# the cause is environmental this simply stops firing.
 #
 # Needs `pydoll-python`. Without it the booking still takes its hold and sends its
 # mail, and the log asks for a human.
 BROWSER_CONFIRM = True
-# Hard ceiling on one browser submit, and it is never longer than the hold has left.
-# Chrome can hang, and this runs inside a booking thread holding a room.
+# Hard ceiling on one browser submit. Chrome can hang, and this runs inside a
+# booking thread holding a room.
 BROWSER_CONFIRM_TIMEOUT = 240
 
 # ── Secrets, from the environment only ───────────────────────────────
@@ -321,19 +287,3 @@ SKIP_HOTELS = [
     "伊香保温泉 ホテル天坊",
     "蓼科東急ホテル",
 ]
-
-# ── Keep (reference only — these are NOT skipped) ────────────────────
-# Kept as a comment so the intent behind the skip list above stays readable.
-# Nothing here is code; anything not in SKIP_HOTELS is eligible to be booked,
-# including hotels the site adds that appear on neither list.
-#   NAGU 勝浦                  ← see PRIORITY_HOTELS
-#   リソルの森
-#   トスラブ箱根ビオーレ
-#   トスラブ箱根和奏林
-#   ホテルハーヴェスト那須
-#   日光千姫物語
-#   ラビスタ富士河口湖
-#   熱海後楽園ホテル
-#   ラビスタ横須賀観音崎テラス
-#   ラビスタ熱海テラス
-#   ホテルハーヴェスト鬼怒川

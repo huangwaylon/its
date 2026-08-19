@@ -2,30 +2,29 @@
 """File the applicant form in real Chrome, when curl cannot.
 
 `POST /apply/confirm` (申込する) is answered `302 → /service_category/index` for curl
-no matter what it sends — a valid CSRF token, a corrupted one, none at all, an empty
-body, with and without every browser header, and with the form GET and the POST on
-one connection. The same POST from Chrome succeeds: same URL, same fifteen fields,
-same cookies, and it also succeeds as an in-page `fetch()`, which sends none of the
-navigation headers. So what the site refuses is the *client*, not the request. See
-Finding 6 in docs/BOOKING_VIA_CURL.md.
-
-This is the way round it, and it is deliberately not the primary path: curl is tried
-first and this runs only when curl was refused, so if the underlying cause turns out
-to be environmental the fast path resumes on its own with nothing to undo.
+no matter what it sends, while the identical POST from Chrome succeeds: the site
+refuses the *client*, not the request. Finding 6 in docs/BOOKING_VIA_CURL.md has the
+matrix. This is deliberately not the primary path — curl is tried first and this runs
+only when curl was refused, so if the cause turns out to be environmental the fast
+path resumes on its own with nothing to undo.
 
 **This module presses 確認.** Past that a real reservation exists with a real
 cancellation liability, so three things guard it:
 
-  - `confirm_allowed()` is re-checked in the caller immediately before the commit;
-  - every field is written back and *verified*, and a single value the form did not
-    accept aborts before 申込する rather than filing a half-right application against
-    somebody's insurance number;
+  - `confirm_allowed()` is re-checked immediately before the commit, via the
+    `allow_commit` callable — filling a form takes tens of seconds and the
+    free-cancellation gate can close inside that window;
+  - every field is written back and *verified*: a `<select>` handed a value that is
+    not among its options keeps its old one silently, so an unverified mismatch would
+    file a blank 都道府県 or 生年月日 against somebody's insurance record. One value
+    the form did not accept aborts before 申込する;
   - 申込内容確認画面 must actually be on screen before 確認 is looked for.
 
-Values are never logged. They are 資格認証のキー.
+A timeout does not reap the browser: it may have landed after 確認 was accepted, and
+SIGKILL cannot un-file an application, so the outcome is reported unknown and the
+mailbox is the authority. Values are never logged — they are 資格認証のキー.
 """
 import asyncio
-import re
 
 from config import BROWSER_CONFIRM_TIMEOUT
 import chrome_guard
@@ -44,7 +43,7 @@ def _value(result):
     return result if isinstance(result, str) else ''
 
 
-def submit(link, values, log, tag, allow_commit, seconds_left):
+def submit(link, values, log, tag, allow_commit):
     """Fill the emailed applicant form, press 申込する, then 確認.
 
     `values` is `confirm_booking.map_fields`' post body with the hidden fields
@@ -58,12 +57,8 @@ def submit(link, values, log, tag, allow_commit, seconds_left):
     Returns `(status, detail)` with the same vocabulary as
     `confirm_booking.confirm_from_email`: 'confirmed' / 'deferred' / 'failed'.
     """
-    if seconds_left <= 0:
-        return 'failed', 'no hold left for a browser submit'
-    budget = min(BROWSER_CONFIRM_TIMEOUT, seconds_left)
+    budget = BROWSER_CONFIRM_TIMEOUT
 
-    # Waiting for the lock counts against the hold, so the wait is bounded by what
-    # the hold can actually spare rather than by chrome_guard's default.
     with chrome_guard.chrome(timeout=max(1, budget)) as owned:
         if not owned:
             log(f'{tag}   Chrome is busy re-minting a session; '
@@ -131,16 +126,12 @@ async def _run(link, values, log, tag, allow_commit):
 
             html = await _html(tab)
             if _EXPIRED_TEXT in html:
-                log(f'{tag}   The 30-minute hold expired before the browser '
-                    f'reached the form')
+                log(f'{tag}   The hold expired before the browser reached the form')
                 return 'failed', 'hold expired'
             if _NO_ROOMS_TEXT in html:
                 return 'failed', 'room taken'
 
-            # Write every value back and read it back out. A `<select>` silently
-            # keeps its old value when handed one that is not among its options, so
-            # without the read-back a mismatched 都道府県 or 生年月日 would be filed
-            # blank — and these are checked against the insurance record.
+            # Write every value back and read it back out — see the module note.
             report = _value(await tab.execute_script("""
                 const V = %s;
                 const bad = [];

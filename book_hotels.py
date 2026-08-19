@@ -6,7 +6,6 @@ cycle. If the URL is missing or expired, it simply waits for the next cycle
 (the URL monitor in main.py handles CAPTCHA solving separately).
 """
 import subprocess, re, urllib.parse, os, json, tempfile, threading, time, hashlib
-import base64
 import html as _html
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,7 +20,7 @@ from config import (
     BOOK_MAX_ATTEMPTS, BOOK_RETRY_DELAY,
     SCAN_BACKOFF_MAX, SCAN_JITTER,
     SCAN_REUSE_SESSION, SCAN_REUSE_MAX_FAILURES,
-    HOTEL_RETRY_COOLDOWN, HOTEL_HOLD_COOLDOWN, MAX_BOOKINGS_PER_DATE,
+    HOTEL_RETRY_COOLDOWN,
     AUTO_CONFIRM, AUTO_CONFIRM_MIN_DAYS,
     DEBUG_DUMP_INTERVAL, DEBUG_DUMP_KEEP, IDLE_LOG_INTERVAL, SKIP_PAST_DATES,
     APPLICANT,
@@ -92,88 +91,50 @@ def _read_cached_url():
         return None
 
 
-# Set when the bookings file could not be parsed. While this is set, writes
-# refuse to replace the file wholesale: a bad read returning {} followed by a
-# normal save would rewrite the file with only the one new entry and destroy
-# every prior booking. The last log has 5 bookings for 2026-08-22 that no longer
-# appear in bookings.json, which is exactly that failure having already happened.
-_bookings_unreadable = False
-_bookings_corrupt = False
+def _load_bookings(path):
+    """`(bookings, ok)`. `ok` is False when the file's contents are unknown.
 
-
-def _load_bookings():
-    """Read the bookings file. Must only be called under `_bookings_lock`.
-
-    Sets two distinct flags, because the two failures call for opposite actions:
-
-      `_bookings_corrupt`   — the bytes are there but do not parse, or parse to
-                              something that is not an object. Salvaging the file
-                              aside and starting a new one loses nothing.
-      `_bookings_unreadable` — contents unknown. Set for either failure, and it
-                              is the flag callers must consult before treating an
-                              empty result as "nothing is booked".
-
-    An OSError is deliberately NOT treated as corruption. One transient read
-    error used to be enough to rename a perfectly good file to
-    `bookings.json.corrupt.*` and replace it with a single entry, destroying the
-    record for every other date — and that record is the only thing preventing
-    duplicate applications.
+    Callers must not treat `not ok` as "nothing is booked": a bad read returning
+    {} followed by a normal save would rewrite the file with only the one new
+    entry and destroy every prior booking. The last log has 5 bookings for
+    2026-08-22 that no longer appear in bookings.json, which is exactly that
+    failure having already happened. Losing the record of one application risks a
+    duplicate attempt later; losing the file risks duplicating every application
+    ever made.
     """
-    global _bookings_unreadable, _bookings_corrupt
-    if not os.path.exists(BOOKINGS_FILE):
-        _bookings_unreadable = _bookings_corrupt = False
-        return {}
+    if not os.path.exists(path):
+        return {}, True
     try:
-        with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-    except OSError as e:
-        _bookings_unreadable, _bookings_corrupt = True, False
-        log(f"{R}Warning: could not read {BOOKINGS_FILE}: {e}{X}")
-        return {}
-    try:
-        data = json.loads(content) if content else {}
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        _bookings_unreadable = _bookings_corrupt = True
-        log(f"{R}Warning: failed to parse {BOOKINGS_FILE}: {e}{X}")
-        return {}
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.loads(f.read().strip() or '{}')
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        log(f"{R}Warning: could not read {path}: {e}{X}")
+        return {}, False
     if not isinstance(data, dict):
-        _bookings_unreadable = _bookings_corrupt = True
-        log(f"{R}Warning: {BOOKINGS_FILE} is not an object, ignoring{X}")
-        return {}
-    _bookings_unreadable = _bookings_corrupt = False
-    return data
+        log(f"{R}Warning: could not read {path}: not a JSON object{X}")
+        return {}, False
+    return data, True
 
 
-def save_booking(date_str, hotel_name):
-    """Record a successful booking. Thread-safe, atomic, never destructive."""
+def save_booking(date_str, hotel_name, path=None):
+    """Record a successful booking. Thread-safe, atomic, never destructive.
+
+    `path` defaults to BOOKINGS_FILE; `confirm_booking` passes RESERVATIONS_FILE.
+    It is a parameter rather than a swapped module global because both files are
+    written from booking threads that run concurrently.
+    """
+    path = path or BOOKINGS_FILE
     with _bookings_lock:
-        bookings = _load_bookings()
-        if _bookings_unreadable and not _bookings_corrupt:
-            # Contents unknown rather than known-bad: writing now would replace
-            # the whole file with this one entry. Losing the record of one
-            # application only risks a duplicate attempt later; losing the file
-            # risks duplicating every application ever made.
-            log(f"{R}BOOKED {hotel_name} for {date_str} but {BOOKINGS_FILE} could "
+        bookings, ok = _load_bookings(path)
+        if not ok:
+            log(f"{R}BOOKED {hotel_name} for {date_str} but {path} could "
                 f"not be read — not recording, refusing to overwrite it{X}")
             return
-        if _bookings_corrupt:
-            # Move the unreadable file aside instead of overwriting it, so the
-            # bytes survive for inspection and this booking is still recorded.
-            # The sequence number matters: two corruptions in the same second
-            # would otherwise have the second rename clobber the first salvage.
-            salvage = (f'{BOOKINGS_FILE}.corrupt.'
-                       f'{datetime.now():%Y%m%d_%H%M%S}.{_dump_seq()}')
-            try:
-                os.replace(BOOKINGS_FILE, salvage)
-                log(f"{Y}Unreadable bookings file preserved as "
-                    f"{os.path.basename(salvage)}{X}")
-            except OSError as e:
-                log(f"{R}Could not preserve unreadable bookings file: {e}{X}")
         if hotel_name in bookings.get(date_str, []):
             return
         bookings.setdefault(date_str, []).append(hotel_name)
         try:
-            _write_bookings(bookings)
+            _write_bookings(bookings, path)
         except OSError as e:
             # The booking itself succeeded on the site; losing the record only
             # risks a duplicate attempt later, so this must not raise into the
@@ -181,7 +142,7 @@ def save_booking(date_str, hotel_name):
             log(f"{R}BOOKED but failed to record {hotel_name} for {date_str}: {e}{X}")
 
 
-def _write_bookings(bookings):
+def _write_bookings(bookings, path):
     """Write the bookings file atomically — same directory, then rename.
 
     A plain `open(..., 'w')` truncates first, so a crash or a full disk midway
@@ -189,14 +150,14 @@ def _write_bookings(bookings):
     meant to run unattended for weeks; the record of what is already booked is
     the only thing preventing duplicate applications.
     """
-    d = os.path.dirname(os.path.abspath(BOOKINGS_FILE))
+    d = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=d, prefix='.bookings_', suffix='.tmp')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(bookings, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, BOOKINGS_FILE)
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -207,25 +168,14 @@ def _write_bookings(bookings):
 
 def get_booked_hotels(date_str):
     with _bookings_lock:
-        return _load_bookings().get(date_str, [])
+        return _load_bookings(BOOKINGS_FILE)[0].get(date_str, [])
 
-
-def booked_hotels_checked(date_str):
-    """`(hotels, readable)` for one date.
-
-    `get_booked_hotels` cannot distinguish "nothing booked" from "could not read
-    the file", and any policy that *stops* work once enough is booked has to tell
-    those apart or it fails open on a read error.
-    """
-    with _bookings_lock:
-        data = _load_bookings()
-        return data.get(date_str, []), not _bookings_unreadable
 
 
 # ── Per-(date, hotel) cooldowns ──────────────────────────────────────
 # `attempted` in book_all_hotels_for_date only lives for one call, so without
 # this a date that stays available keeps re-attempting the same failing hotels
-# every scan cycle. See HOTEL_RETRY_COOLDOWN / HOTEL_HOLD_COOLDOWN in config.
+# every scan cycle. See HOTEL_RETRY_COOLDOWN in config.
 _cooldown_lock = threading.Lock()
 _cooldowns = {}   # (date_str, normalized hotel name) -> monotonic expiry
 
@@ -512,109 +462,6 @@ def redact_url(url):
         return _fingerprint(url)
 
 
-# ── The `s=` token ──────────────────────────────────────────────────
-# The token is not opaque. Decoded live, an 88-character token is:
-#
-#   base64 -> reverse -> base64 -> "service_category_id=1&verify_expires=<10 digits>"
-#
-# 47 bytes of printable ASCII with nothing left over: no signature, no MAC.
-# Nothing cryptographically binds the token to the Turnstile solve that
-# produced it.
-#
-# That has a direct consequence for logging. Because the payload is only those
-# two fields, and one of them is constant, printing `verify_expires` in full is
-# equivalent to printing the token — anyone holding the log could rebuild it. So
-# timestamp fields are logged as a *relative* delta, never as an absolute value,
-# and every other field's value is masked. Field *names* are always shown, so a
-# field the site adds later becomes visible without its value leaking.
-#
-# `verify_expires` is worth watching because it could tell the URL monitor when
-# to refresh instead of guessing at URL_REFRESH_INTERVAL. It is not usable for
-# that yet: one live sample contradicted the obvious reading (a token minted
-# 2026-08-18 13:33 carried 2026-08-08 19:12:52, ten days in its own past), so
-# the field needs to be observed across several solves before anything relies on
-# it. Every token in the previous log was truncated at 80 characters and cannot
-# be decoded, which is exactly why this exists.
-
-_PRINTABLE_ASCII = re.compile(r'\A[\x20-\x7e]+\Z')
-_TOKEN_PAYLOAD = re.compile(r'\A[^=&]+=[^=&]*(?:&[^=&]+=[^=&]*)*\Z')
-# A 10-digit value in roughly 2020..2100, i.e. plausibly unix epoch seconds.
-_EPOCH_RANGE = (1577836800, 4102444800)
-
-
-def _b64_to_ascii(s):
-    """base64-decode to a printable-ASCII str, or None. Padding is inferred."""
-    for pad in ('', '=', '=='):
-        try:
-            raw = base64.b64decode(s + pad, validate=True)
-        except Exception:
-            continue
-        try:
-            out = raw.decode('ascii')
-        except UnicodeDecodeError:
-            return None
-        return out if _PRINTABLE_ASCII.match(out) else None
-    return None
-
-
-def decode_s_token(token):
-    """The token's plaintext payload as an ordered list of (key, value).
-
-    Returns None if it does not decode cleanly. Deliberately strict: a truncated
-    token still base64-decodes into plausible-looking bytes, and reporting
-    garbage as a payload is worse than reporting nothing at all.
-    """
-    if not token:
-        return None
-    middle = _b64_to_ascii(token)
-    if middle is None:
-        return None
-    payload = _b64_to_ascii(middle[::-1])
-    if payload is None or not _TOKEN_PAYLOAD.match(payload):
-        return None
-    return [(k, v) for k, _, v in (p.partition('=') for p in payload.split('&'))]
-
-
-def _relative(seconds):
-    """A signed, human duration: `+2h34m`, `-11m`, `+0s`."""
-    sign = '-' if seconds < 0 else '+'
-    s = int(abs(seconds))
-    if s >= 3600:
-        return f'{sign}{s // 3600}h{(s % 3600) // 60:02d}m'
-    if s >= 60:
-        return f'{sign}{s // 60}m{s % 60:02d}s'
-    return f'{sign}{s}s'
-
-
-def token_summary(url, now=None):
-    """Loggable summary of a calendar URL's `s=` token. Never raises.
-
-    Runs in the URL monitor's logging path — the one thread that re-mints a
-    session — so a malformed URL must not cost a solve.
-    """
-    try:
-        token = urllib.parse.parse_qs(
-            urllib.parse.urlsplit(url or '').query).get('s', [''])[0]
-        if not token:
-            return 'no s= token in URL'
-        fields = decode_s_token(token)
-        if fields is None:
-            return f'token does not decode ({len(token)} chars)'
-        now = time.time() if now is None else now
-        out = []
-        for k, v in fields:
-            if v.isdigit() and _EPOCH_RANGE[0] <= int(v) <= _EPOCH_RANGE[1]:
-                # Relative only. The absolute value would reconstruct the token.
-                out.append(f'{k}={_relative(int(v) - now)}')
-            elif len(v) <= 4:
-                out.append(f'{k}={v}')
-            else:
-                out.append(f'{k}=<{len(v)} chars>')
-        return ' '.join(out)
-    except Exception as e:
-        return f'token unreadable ({e.__class__.__name__})'
-
-
 def _redact_set_cookie(value):
     """Fingerprint the cookie value, keep its name and its real attributes.
 
@@ -717,12 +564,9 @@ def _redact_applicant(body):
     """Strip the applicant's identity data out of a body before it is stored.
 
     `config.APPLICANT` holds 記号 / 番号 / カナ氏名 / 生年月日 / 電話 / 住所 / 事業所名 —
-    identity credentials for somebody's insurance record, and `config.py` says
-    outright that they belong in this redaction list. They were not in it. Nothing
-    reached these pages before `confirm_booking` existed, so no dump on disk carries
-    them, but 申込内容確認画面 echoes every one of them back and a dump of it goes
-    into `DEBUG_DIR` — a directory whose contents were tracked in a public remote
-    until 2026-08-18.
+    identity credentials for somebody's insurance record. 申込内容確認画面 echoes
+    every one of them back, and a dump of it goes into `DEBUG_DIR`, whose contents
+    were tracked in a public remote until 2026-08-18.
 
     Two passes, because neither alone is enough:
 
@@ -801,10 +645,9 @@ def _dump_debug(label, step, status, body, via=None, throttle=True):
     taken after `if s == 302: c('GET', loc)` records the follow-up GET's headers
     and throws away the 302's — which is exactly the response worth reading.
 
-    Throttled per (label, step) and pruned to DEBUG_DUMP_KEEP files. A failure
-    that repeats every cycle used to write one pair of files per cycle for as
-    long as it lasted: 83 of the 380 existing dumps are one date's
-    service_group_select, and 302 of them are 0-byte bodies.
+    Throttled per (label, step) and pruned to DEBUG_DUMP_KEEP files: a failure
+    that repeats every cycle would otherwise write one pair of files per cycle for
+    as long as it lasted.
     """
     try:
         if throttle and not _dump_allowed(label, step):
@@ -1054,13 +897,11 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         return False
     log(f"{tag}   {C}{len(rooms)} rooms -> selecting room{X}")
 
-    # STEP 7: Submit room. This POST takes a 30-minute hold on the room and is
-    # the point of no return: nothing in this program can release one, so the
-    # cooldown is claimed *before* the request rather than after its outcome is
-    # known. A lost response still means we may be holding it.
+    # STEP 7: Submit room. This POST takes the site's hold on the room and is the
+    # point of no return: nothing in this program can release one. The site then
+    # refuses a second application at the same facility, answering the room search
+    # 「空き部屋がございません」, so nothing here has to track the hold itself.
     room_id = rooms[0][0]
-    set_cooldown(target_date, hotel_name, HOTEL_HOLD_COOLDOWN)
-    held_at = time.time()   # the site's 30-minute hold starts with this request
     s, body, loc = c('POST', BASE + form_action,
         {'utf8': '\u2713', 'authenticity_token': auth,
          'apply[join_time]': target_date, 'apply[night_count]': '1',
@@ -1127,12 +968,12 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
         via, (s, body, _) = body, c('GET', loc)
 
     if 'send_complete' in body:
-        # Not a reservation: this is 「メール送信を完了しました」. The room is held
-        # for 30 minutes from the step-7 POST and the site has emailed a link that
-        # still has to be followed. bookings.json records the *hold*.
+        # Not a reservation: this is 「メール送信を完了しました」. The room is held and
+        # the site has emailed a link that still has to be followed.
+        # bookings.json records the *hold*.
         log(f"{tag}   {B}{G}HELD + MAIL SENT: {hotel_name}{X}")
         save_booking(target_date, hotel_name)
-        _finish_from_email(c, target_date, hotel_name, tag, held_at)
+        _finish_from_email(c, target_date, hotel_name, tag)
         return True
 
     log(f"{tag}   {R}Final page not send_complete{X}")
@@ -1140,7 +981,7 @@ def book_one_hotel(tag, c, target_date, s_param, auth, hotel_id, hotel_name):
     return False
 
 
-def _finish_from_email(c, target_date, hotel_name, tag, held_at):
+def _finish_from_email(c, target_date, hotel_name, tag):
     """Run steps 7-9 off the emailed link, if that module is usable.
 
     Imported here rather than at module scope: `confirm_booking` imports this
@@ -1156,7 +997,7 @@ def _finish_from_email(c, target_date, hotel_name, tag, held_at):
         return
     try:
         status, detail = confirm_booking.confirm_from_email(
-            c, target_date, hotel_name, tag, held_at=held_at)
+            c, target_date, hotel_name, tag)
     except Exception as e:
         log(f"{tag}   {R}Confirmation step raised {e!r}; the room is held and the "
             f"mail is sent — finish it by hand{X}")
@@ -1165,16 +1006,13 @@ def _finish_from_email(c, target_date, hotel_name, tag, held_at):
         return
     # 'deferred' already explains itself and prints its own HUMAN NEEDED line.
     # 'failed' did not, and it is the case that most needs one: the room is held,
-    # the mail is sent, and whatever went wrong leaves a person a few minutes to
+    # the mail is sent, and whatever went wrong leaves a person a short window to
     # finish from the link before the site releases the room to somebody else.
     log(f"{tag}   {Y}{hotel_name} on {target_date} not confirmed "
         f"({status}: {detail}){X}")
     if status == 'failed':
-        left = (held_at + confirm_booking.CONFIRM_HOLD_SECONDS - time.time()) / 60
         log(f"{tag}   {B}{Y}HUMAN NEEDED: {hotel_name} on {target_date} is held and "
-            f"the mail to {EMAIL} is sent. Open its link and finish "
-            f"{'within %.0f minutes' % left if left > 0 else 'now — the hold has lapsed'}"
-            f".{X}")
+            f"the mail to {EMAIL} is sent. Open its link and finish now.{X}")
 
 
 def _open_calendar_session(c, cookie_file, url, target_date, tag, label,
@@ -1310,47 +1148,16 @@ def _cool_date_if_exhausted(target_date, names, tag):
         f"date alone for {wait / 60:.0f}m{X}")
 
 
-def _date_satisfied(target_date, booked=()):
-    """`(satisfied, readable)` against MAX_BOOKINGS_PER_DATE.
-
-    Counts normalized names from bookings.json unioned with this run's successes,
-    so a success that appears in both cannot be counted twice across
-    BOOK_MAX_ATTEMPTS retries.
-
-    `readable` is False when the bookings file could not be read. The caller must
-    not proceed in that case: a cap that quietly became unlimited on a transient
-    read error is exactly how duplicate applications get filed.
-    """
-    if not MAX_BOOKINGS_PER_DATE:
-        return False, True
-    recorded, readable = booked_hotels_checked(target_date)
-    if not readable:
-        return False, False
-    count = len({_norm_hotel(n) for n in recorded} |
-                {_norm_hotel(n) for n in booked})
-    return count >= MAX_BOOKINGS_PER_DATE, True
-
-
 def _book_date_once(target_date, label, tag, booked, attempted):
     """One full pass over a date's hotels. Returns an outcome string.
 
     `booked` is appended to in place and `attempted` records hotels already
     tried, so a retry resumes rather than re-applying for what it already sent.
     """
-    # Checked before any request, since neither needs one.
+    # Checked before any request, since it needs none.
     if in_cooldown(target_date, None):
         log(f"{tag} {Y}{target_date} cooling off for another "
             f"{cooldown_remaining(target_date, None) / 60:.0f}m, skipping{X}")
-        return 'done'
-
-    satisfied, readable = _date_satisfied(target_date, booked)
-    if not readable:
-        log(f"{tag} {R}bookings file unreadable — not applying for {target_date} "
-            f"while MAX_BOOKINGS_PER_DATE is set{X}")
-        return 'failed'
-    if satisfied:
-        log(f"{tag} {Y}{target_date} already has {MAX_BOOKINGS_PER_DATE} "
-            f"booking(s), leaving it alone{X}")
         return 'done'
 
     url = _read_cached_url()
@@ -1412,14 +1219,6 @@ def _book_date_once(target_date, label, tag, booked, attempted):
             f"{', '.join(n for _, n in hotels)}{X}")
 
         for i, (hotel_id, hotel_name) in enumerate(hotels):
-            # Re-checked per hotel, before the setup requests below, so the cap
-            # costs nothing once it is reached.
-            satisfied, _readable = _date_satisfied(target_date, booked)
-            if satisfied:
-                log(f"{tag} {G}{MAX_BOOKINGS_PER_DATE} booking(s) reached for "
-                    f"{target_date}, skipping the remaining "
-                    f"{len(hotels) - i} hotel(s){X}")
-                break
             if i > 0:
                 # Fresh session per hotel. A failure here is worth reporting up
                 # so the outer loop can retry the hotels not yet reached.
@@ -1554,9 +1353,9 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
     If URL is missing or expired, logs and waits for next cycle.
 
     The whole loop body is guarded. Nothing in here may end the thread: it is the
-    only thing scanning this month, it is a daemon, and main() blocks on the
-    display rather than joining it - so an escaping exception would stop the
-    month silently while the process carried on looking healthy.
+    only thing scanning this month, it is a daemon, and main() never joins it — so
+    an escaping exception would stop the month silently while the process carried
+    on looking healthy.
 
     `stop_event` is an optional threading.Event for a cooperative shutdown.
     Production leaves it None and relies on daemon threads; the tests set it so a
@@ -1585,8 +1384,8 @@ def scan_and_book_month(month_str, target_dates, label, stop_event=None):
         """GET the calendar for a fresh (csrf, s) pair. None if the GET failed.
 
         This is the request session reuse exists to avoid, and it is also the
-        most failure-prone one in the program: 172 of the 629 dumps on record are
-        a 503 on this GET.
+        most failure-prone one in the program — most dumps on record are a 503
+        here, and a 503 is how the 24-hour IP ban presents.
         """
         st, bd, lc = c('GET', url)
         if st != 200:
