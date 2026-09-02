@@ -216,61 +216,64 @@ PRIORITY_HOTELS = [
 # not, so the reachable-by-train set is visible at a glance. Assigned by facility
 # location, not from anything ITS publishes — the site groups by 直営/通年/夏季/冬季 only.
 #
-# The whole roster is here for reference, commented where not skipped. Cutoffs
-# (docs/SITE.md §1): 直営, ブルーベリーヒル勝浦, 日光千姫物語, 熱海後楽園ホテル and all
-# 夏季/冬季 are D−4; other 通年 are D−10.
+# The whole roster is here for reference, commented where not skipped. Every comment
+# is four fixed columns — 関東 · roster · cutoff · ✓ — then any name gotcha.
+#
+# Those columns are padded for a CJK glyph **5/3** the width of a Latin one — VSCodium's
+# default pairing of Menlo with a Hiragino fallback — not the 2/1 of a terminal, so they
+# look right in the editor and ragged in `git diff` and on GitHub. Integer spaces cannot
+# hit both, or even hit 5/3 exactly: ⅔ of a cell of residual is the floor. Re-pad with a
+# script, not by hand.
+#
+# Roster and cutoff both come from docs/SITE.md §1: 直営 and all 夏季/冬季 are D−4, 通年
+# is D−10 except ブルーベリーヒル勝浦, 日光千姫物語 and 熱海後楽園ホテル. 季節限定 matters as
+# much as the cutoff — a 夏季 facility is never offered for a stay past 9/30 (the
+# boundary itself is inferred, not published), the 冬季 window is unmeasured, and
+# 夏季・冬季 marks the four sitting on both rosters. スキージャム勝山 is on none of them.
 SKIP_HOTELS = [
-    # ── 直営 (3) — D−4 ──────────────────────────────────────────────
-    # "トスラブ箱根ビオーレ",                     # 関東 ✓
-    # "トスラブ箱根和奏林",                       # 関東 ✓
-    "トスラブ館山ルアーナ",                        # 関東 ✓
+    # "トスラブ箱根ビオーレ",                # 関東  直営       D−4   ✓
+    # "トスラブ箱根和奏林",                  # 関東  直営       D−4   ✓
+    # "ホテルハーヴェスト那須",              # 関東  通年       D−10  ✓
+    # "ホテルハーヴェスト旧軽井沢",           #      通年       D−10  ✓  roster writes it with a space
+    # "日光千姫物語",                       # 関東  通年       D−4
+    # "ラビスタ富士河口湖",                  #      通年       D−10  ✓
+    # "熱海後楽園ホテル",                   #       通年       D−4
+    # "ラビスタ横須賀観音崎テラス",           # 関東  通年       D−10  ✓
+    # "ラビスタ熱海テラス",                  #      通年       D−10
+    # "ホテルハーヴェスト鬼怒川",             # 関東  通年       D−10
+    # "NAGU 勝浦",                        # 関東  夏季・冬季  D−4   ✓  in PRIORITY_HOTELS — skipping WINS, so leave commented
+    # "鎌倉パークホテル",                   # 関東  夏季       D−4
+    # "プレジャーリゾート伊豆赤沢温泉",        #      夏季       D−4
+    # "軽井沢マリオットホテル",              #       夏季       D−4
+    # "フルーツパーク富士屋ホテル",           #      夏季       D−4   ✓
+    # "リソルの森",                        # 関東  通年       D−10  ✓
 
-    # ── 通年 (24) — D−10 unless marked ──────────────────────────────
-    # "ラビスタ熱海テラス",
-    # "ホテルハーヴェスト鬼怒川",                  # 関東
-    "鳴子温泉　湯元　吉祥",                        # ✓ full-width spaces on the site
-    # "ホテルハーヴェスト那須",                    # 関東 ✓
-    # "日光千姫物語",                             # 関東 D−4
-    "草津温泉　ホテルヴィレッジ",                   # 関東 ✓ full-width space
-    "伊香保温泉 ホテル天坊",                       # 関東
-    # "ラビスタ横須賀観音崎テラス",                 # 関東 ✓
-    "ホテルオークラ東京ベイ",                      # 関東 ✓
-    # "リソルの森",                               # 関東 ✓
-    "ブルーベリーヒル勝浦",                        # 関東 ✓ D−4
-    "和倉温泉 あえの風",
-    # "ラビスタ富士河口湖",                        # ✓
-    "ホテルハーヴェスト斑尾",                      # ✓
-    "ホテルハーヴェスト旧軽井沢",                   # ✓ roster writes it with a space
-    # "熱海後楽園ホテル",                          # D−4
-    "ホテルハーヴェスト伊東",                      # ✓
-    "ホテルハーヴェスト浜名湖",
-    "ホテル琵琶レイクオーツカ",
-    "ホテル日航プリンセス京都",                     # ✓
-    "ホテルハーヴェスト京都鷹峯",
-    "ホテルハーヴェスト有馬六彩",
-    "ホテルハーヴェスト南紀田辺",                   # ✓
-    "ゆふいん山水館",
+    "トスラブ館山ルアーナ",                  # 関東  直営       D−4   ✓
 
-    # ── 夏季 (13) — D−4, none listed for a stay past 9/30 ───────────
-    # "グランドメルキュール伊勢志摩",               # ✓ NOT the roster's longer name
-    # "スパリゾートハワイアンズ モノリスタワー",
-    # "フルーツパーク富士屋ホテル",                 # ✓
-    # "定山渓 ゆらく草庵",                         # ✓ half-width space
-    # "鎌倉パークホテル",                          # 関東
-    # "NAGU 勝浦",     # 関東 ✓ in PRIORITY_HOTELS — skipping WINS, so leave commented
-    # "プレジャーリゾート伊豆赤沢温泉",
-    # "軽井沢マリオットホテル",
-    "蓼科東急ホテル",                             # ✓ also 冬季
-    # "高山グリーンホテル",
-    "NASPAニューオータニ",                        # ✓ also 冬季
-    # "アオアヲナルトリゾート",                     # ✓
-    "ホテル日航アリビラ",                          # ✓ also 冬季
+    "鳴子温泉　湯元　吉祥",                  #      通年       D−10  ✓  full-width spaces on the site
+    "草津温泉　ホテルヴィレッジ",             # 関東  通年       D−10  ✓  full-width space
+    "伊香保温泉 ホテル天坊",                 # 関東  通年       D−10
+    "ホテルオークラ東京ベイ",                # 関東  通年       D−10  ✓
+    "ブルーベリーヒル勝浦",                  # 関東  通年       D−4   ✓
+    "和倉温泉 あえの風",                    #       通年       D−10
+    "ホテルハーヴェスト斑尾",                #       通年       D−10  ✓
+    "ホテルハーヴェスト伊東",                #       通年       D−10  ✓
+    "ホテルハーヴェスト浜名湖",               #      通年       D−10
+    "ホテル琵琶レイクオーツカ",               #      通年       D−10
+    "ホテル日航プリンセス京都",               #      通年       D−10  ✓
+    "ホテルハーヴェスト京都鷹峯",             #      通年       D−10
+    "ホテルハーヴェスト有馬六彩",             #      通年       D−10
+    "ホテルハーヴェスト南紀田辺",             #      通年       D−10  ✓
+    "ゆふいん山水館",                       #      通年       D−10
+    "グランドメルキュール伊勢志摩",           #       夏季       D−4   ✓  NOT the roster's longer name
+    "スパリゾートハワイアンズ モノリスタワー",  #      夏季       D−4
+    "定山渓 ゆらく草庵",                    #       夏季       D−4   ✓  half-width space
+    "蓼科東急ホテル",                       #      夏季・冬季  D−4   ✓
+    "高山グリーンホテル",                    #      夏季       D−4
+    "NASPAニューオータニ",                  #      夏季・冬季  D−4   ✓
+    "アオアヲナルトリゾート",                #       夏季       D−4   ✓
+    "ホテル日航アリビラ",                    #      夏季・冬季  D−4   ✓
+    "ラビスタ函館ベイANNEX",                #       冬季       D−4
 
-    # ── 冬季 (5) — D−4. Four overlap 夏季 above; only this one is unique ──
-    "ラビスタ函館ベイANNEX",
-
-    # No longer on any ITS roster (直営/通年/夏季/冬季/提携 all checked 2026-08-19).
-    # Kept because skipping a facility that never appears costs nothing, while
-    # dropping it would book the place if ITS re-contracts it.
-    "ホテルハーヴェスト　スキージャム勝山",
+    "ホテルハーヴェスト　スキージャム勝山",     #      —         —        on no roster since 2026-08-19; kept so a re-contract cannot book it
 ]
