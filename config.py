@@ -212,27 +212,31 @@ PRIORITY_HOTELS = [
 # from the roster pages (read 2026-08-19) and are unverified against live markup;
 # check one by reading a 「Found N hotels: …」 line in the log.
 #
+# 関東 = 東京/神奈川/千葉/埼玉/群馬/栃木/茨城, marked on every entry whether skipped or
+# not, so the reachable-by-train set is visible at a glance. Assigned by facility
+# location, not from anything ITS publishes — the site groups by 直営/通年/夏季/冬季 only.
+#
 # The whole roster is here for reference, commented where not skipped. Cutoffs
 # (docs/SITE.md §1): 直営, ブルーベリーヒル勝浦, 日光千姫物語, 熱海後楽園ホテル and all
 # 夏季/冬季 are D−4; other 通年 are D−10.
 SKIP_HOTELS = [
     # ── 直営 (3) — D−4 ──────────────────────────────────────────────
-    # "トスラブ箱根ビオーレ",                     # ✓
-    # "トスラブ箱根和奏林",                       # ✓
-    "トスラブ館山ルアーナ",                        # ✓
+    # "トスラブ箱根ビオーレ",                     # 関東 ✓
+    # "トスラブ箱根和奏林",                       # 関東 ✓
+    "トスラブ館山ルアーナ",                        # 関東 ✓
 
     # ── 通年 (24) — D−10 unless marked ──────────────────────────────
     # "ラビスタ熱海テラス",
-    # "ホテルハーヴェスト鬼怒川",
+    # "ホテルハーヴェスト鬼怒川",                  # 関東
     "鳴子温泉　湯元　吉祥",                        # ✓ full-width spaces on the site
-    # "ホテルハーヴェスト那須",                    # ✓
-    # "日光千姫物語",                             # D−4
-    "草津温泉　ホテルヴィレッジ",                   # ✓ full-width space
-    "伊香保温泉 ホテル天坊",
-    # "ラビスタ横須賀観音崎テラス",                 # ✓
-    "ホテルオークラ東京ベイ",                      # ✓
-    # "リソルの森",                               # ✓
-    "ブルーベリーヒル勝浦",                        # ✓ D−4
+    # "ホテルハーヴェスト那須",                    # 関東 ✓
+    # "日光千姫物語",                             # 関東 D−4
+    "草津温泉　ホテルヴィレッジ",                   # 関東 ✓ full-width space
+    "伊香保温泉 ホテル天坊",                       # 関東
+    # "ラビスタ横須賀観音崎テラス",                 # 関東 ✓
+    "ホテルオークラ東京ベイ",                      # 関東 ✓
+    # "リソルの森",                               # 関東 ✓
+    "ブルーベリーヒル勝浦",                        # 関東 ✓ D−4
     "和倉温泉 あえの風",
     # "ラビスタ富士河口湖",                        # ✓
     "ホテルハーヴェスト斑尾",                      # ✓
@@ -252,8 +256,8 @@ SKIP_HOTELS = [
     # "スパリゾートハワイアンズ モノリスタワー",
     # "フルーツパーク富士屋ホテル",                 # ✓
     # "定山渓 ゆらく草庵",                         # ✓ half-width space
-    # "鎌倉パークホテル",
-    # "NAGU 勝浦",           # ✓ in PRIORITY_HOTELS — skipping WINS, so leave commented
+    # "鎌倉パークホテル",                          # 関東
+    # "NAGU 勝浦",     # 関東 ✓ in PRIORITY_HOTELS — skipping WINS, so leave commented
     # "プレジャーリゾート伊豆赤沢温泉",
     # "軽井沢マリオットホテル",
     "蓼科東急ホテル",                             # ✓ also 冬季
