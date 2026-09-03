@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from datetime import date
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import book_hotels as bh
@@ -38,9 +38,22 @@ FAILURES = []
 # "FAKE_TOKEN_FOR_TESTS_NOT_A_REAL_SESSION_TOKEN", the same 60 characters a real ITS
 # `s=` token runs to. Never put a real one here — even expired, it publishes the format.
 S_TOKEN = 'RkFLRV9UT0tFTl9GT1JfVEVTVFNfTk9UX0FfUkVBTF9TRVNTSU9OX1RPS0VO'
-TARGET = '2026-09-05'
-TARGET_LIMITED = '2026-09-06'    # 'a_little': few rooms left, but still bookable
-OTHER_MONTH_DAY = '2026-08-05'   # what the initial calendar page shows
+
+# Every date the flow sees is derived from today, never written out. A fixed target
+# rots twice over: `_future_dates` drops it once it is past, and it crosses
+# AUTO_CONFIRM_MIN_DAYS about six weeks before that — which is what happened to the
+# hardcoded 2026-09-05, whose confirm-leg tests began failing for the date rather than
+# for the code. Anchored on the 1st so the offset cannot depend on today's day-of-month:
+# the target lands 33-66 days out, clear of the 11-day floor in either direction.
+_TARGET_MONTH = (date.today().replace(day=1) + timedelta(days=62)).replace(day=1)
+_PREV_MONTH = (_TARGET_MONTH - timedelta(days=1)).replace(day=1)
+MONTH = _TARGET_MONTH.strftime('%Y-%m')            # the month the scanners are given
+TARGET = _TARGET_MONTH.replace(day=5).isoformat()
+TARGET_LIMITED = _TARGET_MONTH.replace(day=6).isoformat()  # 'a_little': few left, bookable
+FULL_DAY = _TARGET_MONTH.replace(day=7).isoformat()        # 'full': not bookable
+IDLE_DAY = _TARGET_MONTH.replace(day=15).isoformat()       # future, never available
+ABSENT_DAY = _PREV_MONTH.replace(day=25).isoformat()       # not in the served month
+OTHER_MONTH_DAY = _PREV_MONTH.replace(day=5).isoformat()   # what the calendar page shows
 
 NAGU = 'NAGU 勝浦'
 RESOL = 'リソルの森'
@@ -810,7 +823,7 @@ def test_unexpected_status_is_dumped_not_retried(port):
 
 def test_date_unavailable(port):
     with Env(port) as env:
-        _, booked = bh.book_all_hotels_for_date('2026-09-07', 'TEST')  # 'full' cell
+        _, booked = bh.book_all_hotels_for_date(FULL_DAY, 'TEST')  # 'full' cell
         check('unavailable: books nothing', booked == [], str(booked))
         check('unavailable: never selected a date',
               STATE.count('POST /calendar_apply/service_group_select') == 0)
@@ -900,7 +913,7 @@ def test_scan_reuses_the_session(port):
     with Env(port) as env:
         # A date the fake's calendar does not carry, so cycles stay idle and the
         # request counts are only the scan's own.
-        t, stop = _run_scanner('2026-09', ['2026-09-15'], 'REUSE')
+        t, stop = _run_scanner(MONTH, [IDLE_DAY], 'REUSE')
         try:
             grew = _wait_for(lambda: STATE.count('POST /calendar_apply/calendar_select') >= 5)
             gets = STATE.count('GET /calendar_apply/calendar_select')
@@ -922,7 +935,7 @@ def test_scan_remints_when_the_cached_session_is_rejected(port):
     """
     with Env(port) as env:
         with CapturedLog() as logs:
-            t, stop = _run_scanner('2026-09', ['2026-09-15'], 'REMINT')
+            t, stop = _run_scanner(MONTH, [IDLE_DAY], 'REMINT')
             try:
                 # Let the first cycle mint and cache, then poison the next nav.
                 _wait_for(lambda: STATE.count('POST /calendar_apply/calendar_select') >= 1)
@@ -963,7 +976,7 @@ def test_scan_gives_up_on_reuse_after_repeated_rejection(port):
             # the give-up counter needs to see.
             with STATE.lock:
                 STATE.blank_cached_nav = True
-            t, stop = _run_scanner('2026-09', ['2026-09-15'], 'GIVEUP')
+            t, stop = _run_scanner(MONTH, [IDLE_DAY], 'GIVEUP')
             try:
                 off = _wait_for(lambda: logs.saw('session reuse disabled'))
                 check('giveup: reuse switched off', off)
@@ -994,7 +1007,7 @@ def test_scanner_books_and_survives_errors(port):
             return real(body, date_str)
 
         bh._date_css_class = flaky
-        t, stop = _run_scanner('2026-09', [TARGET], 'TEST')
+        t, stop = _run_scanner(MONTH, [TARGET], 'TEST')
         try:
             booked_all = _wait_for(lambda: len(env.bookings().get(TARGET, [])) >= 3)
             check('scanner: survived the injected exception and booked all three',
@@ -1031,7 +1044,7 @@ def test_scanner_spots_a_limited_availability_date(port):
     is the one that decided `a_little` slots went unbooked.
     """
     with Env(port) as env:
-        t, stop = _run_scanner('2026-09', [TARGET_LIMITED], 'LTD')
+        t, stop = _run_scanner(MONTH, [TARGET_LIMITED], 'LTD')
         try:
             booked = _wait_for(
                 lambda: len(env.bookings().get(TARGET_LIMITED, [])) >= 3)
@@ -1131,7 +1144,7 @@ def test_availability_classes():
         check(f'not available: {cls!r}', not bh.is_available(cls))
 
     # Through the extractor, on the escaped markup an AJAX response really sends.
-    body = nav_response('2026-09-01')
+    body = nav_response(f'{MONTH}-01')
     check('available: empty cell read off the AJAX body',
           bh.is_available(bh._date_css_class(body, TARGET)),
           bh._date_css_class(body, TARGET))
@@ -1139,10 +1152,10 @@ def test_availability_classes():
           bh.is_available(bh._date_css_class(body, TARGET_LIMITED)),
           bh._date_css_class(body, TARGET_LIMITED))
     check('available: full cell read as unavailable',
-          not bh.is_available(bh._date_css_class(body, '2026-09-07')),
-          bh._date_css_class(body, '2026-09-07'))
+          not bh.is_available(bh._date_css_class(body, FULL_DAY)),
+          bh._date_css_class(body, FULL_DAY))
     check('available: a date absent from the body is not bookable',
-          not bh.is_available(bh._date_css_class(body, '2026-12-25')))
+          not bh.is_available(bh._date_css_class(body, ABSENT_DAY)))
 
 
 def test_retry_classification():
@@ -1704,8 +1717,8 @@ def test_two_holds_never_share_one_application_link(port):
         cb._mail_source = lambda _since: [f'ご案内 {first} ', f'ご案内 {second} ']
 
         now = time.time()
-        cb.enqueue('2026-09-01', NAGU, held_at=now)
-        cb.enqueue('2026-09-16', NAGU, held_at=now)     # same second, as observed
+        cb.enqueue(TARGET, NAGU, held_at=now)
+        cb.enqueue(TARGET_LIMITED, NAGU, held_at=now)   # same second, as observed
         check('share: both queued', cb.pending_count() == 2, str(cb.pending_count()))
 
         cb.drain_once()
@@ -1722,7 +1735,7 @@ def test_two_holds_never_share_one_application_link(port):
               str([c['link'] for c in STATE.browser_calls]))
         reservations = env.reservations()
         check('share: a reservation recorded for each date',
-              sorted(reservations) == ['2026-09-01', '2026-09-16'],
+              sorted(reservations) == sorted([TARGET, TARGET_LIMITED]),
               str(reservations))
 
 

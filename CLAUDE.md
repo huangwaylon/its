@@ -180,6 +180,10 @@ behind `&&`. It clears proxy settings for loopback, since a local proxy would re
   typo'd filter cannot read as green.
 - **`Env` restores by reflection**, snapshotting every module-level setting rather than a
   hand-listed tuple, so a new knob in `config.py` cannot leak across tests.
+- **Every date the flow sees is derived from `date.today()`**, never written out: `TARGET`
+  and friends sit 33-66 days ahead, so the suite cannot start failing because the calendar
+  moved past a literal or inside `AUTO_CONFIRM_MIN_DAYS`. Hardcoded `today=` arguments are
+  fine — those tests never call `date.today()`.
 - **The emailed leg must stay stubbed and the Chrome fallback never launched.** `Env` sets
   `AUTO_CONFIRM=False`, injects `_mail_source`/`_browser_submit` and clears `_pending` and
   `_claimed`; nothing may open a socket to `imap.gmail.com`. Drive the worker with
