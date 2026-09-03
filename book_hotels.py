@@ -8,6 +8,7 @@ turns it into a reservation.
 import subprocess, re, urllib.parse, os, json, tempfile, threading, time
 import contextlib
 import html as _html
+import unicodedata
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
@@ -449,8 +450,21 @@ def _prune_debug_dir():
 # meant to be skipped. Normalizing both sides removes the whole class.
 
 def _norm_hotel(name):
-    """Casefold, unescape entities, and collapse all whitespace."""
-    return re.sub(r'\s+', '', _html.unescape(name or '')).casefold()
+    """Casefold, unescape entities, NFKC-fold, and collapse all whitespace.
+
+    NFKC is what makes a *visually identical* name match. 鳴子温泉　湯元　吉祥 is served
+    with 祥 as U+FA1A CJK COMPATIBILITY IDEOGRAPH, not U+7965, so the skip entry typed
+    from the roster missed it and the hotel was applied for and confirmed
+    (reservations.json 2026-09-22). Compatibility ideographs are singleton
+    decompositions, so folding either side to NFKC collapses the pair. The same trap is
+    loaded in 館 (U+FA2C), 都 (U+FA26), 六 (U+F9D1), 彩 (U+FA84), 紀 (U+2F96A),
+    志/摩 (U+2F89E/U+2F8C3) and 蓼 (U+F9C2), all present in current skip entries.
+    NFKC also folds half-width katakana and full-width ASCII, which can only widen a
+    match; whitespace differences are collapsed anyway.
+    """
+    return re.sub(
+        r'\s+', '',
+        unicodedata.normalize('NFKC', _html.unescape(name or ''))).casefold()
 
 
 _SKIP_NORM = frozenset(_norm_hotel(n) for n in SKIP_HOTELS if _norm_hotel(n))

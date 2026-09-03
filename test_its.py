@@ -1178,6 +1178,17 @@ def test_hotel_name_matching():
     check('norm is case-insensitive', bh._norm_hotel('nagu') == bh._norm_hotel('NAGU'))
     check('norm tolerates None', bh._norm_hotel(None) == '')
 
+    # The site serves 祥 as U+FA1A, a compatibility ideograph; the roster-typed skip
+    # entry uses U+7965. Visually identical, unequal without NFKC — and the miss booked
+    # and confirmed a skipped hotel.
+    check('norm folds compatibility ideographs (祥 U+FA1A)',
+          bh._norm_hotel('鳴子温泉　湯元　吉\uFA1A')
+          == bh._norm_hotel('鳴子温泉　湯元　吉祥'))
+    check('norm folds 館 U+FA2C', bh._norm_hotel('ゆふいん山水\uFA2C')
+          == bh._norm_hotel('ゆふいん山水館'))
+    check('norm folds full-width ASCII',
+          bh._norm_hotel('ラビスタ函館ベイＡＮＮＥＸ') == bh._norm_hotel('ラビスタ函館ベイANNEX'))
+
     saved = bh._PRIORITY_NORM
     try:
         bh._PRIORITY_NORM = ('nagu', 'トスラブ')
